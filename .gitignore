@@ -1,0 +1,16 @@
+.venv
+**.egg-info
+datasets/
+*.pt
+*.pth
+*.xml
+*.iml
+*.mp4
+*.json
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ttl

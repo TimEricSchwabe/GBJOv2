@@ -188,6 +188,7 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None, num_
             #data.y = torch.tensor(1) ## REOMVE !!!!
             # Move data to the specified device
             data = data.to(device)
+
             
             optimizer.zero_grad(set_to_none=True)
             out = model(data.x, data.edge_index, batch=data.batch)
@@ -273,19 +274,17 @@ if __name__ == "__main__":
     
     # Set train and validation sizes for experimentation
     # Make sure they don't exceed the total dataset size
-    train_size = 60000
-    val_size = 1024
+    train_size = 128
+    val_size = 128
 
     print(f"Using {train_size} samples for training and {val_size} samples for validation")
     
     # # Create indices for the subset we want to use
-    indices = torch.randperm(total_size)[:train_size + val_size]
-    subset = torch.utils.data.Subset(dataset, indices)
-    
-    # Then split the subset into train and validation
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        subset, [train_size, val_size]
-    )
+    # Use the first train_size examples for training and the last val_size for validation
+    train_indices = list(range(train_size))
+    val_indices = list(range(total_size - val_size, total_size))
+    train_dataset = torch.utils.data.Subset(dataset, train_indices)
+    val_dataset = torch.utils.data.Subset(dataset, val_indices)
     
     # Deterministically use the first element of dataset for both train and validation
     #train_dataset = torch.utils.data.Subset(dataset, [0])
@@ -293,7 +292,7 @@ if __name__ == "__main__":
     #val_dataset = train_dataset #todo: remove
 
     # Create data loaders
-    batch_size = 32
+    batch_size = 1
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
@@ -306,11 +305,11 @@ if __name__ == "__main__":
     model = CostGNN(node_feature_dim=node_feature_dim, hidden_dim=hidden_dim).to(device)
     
     # Training setup
-    learning_rate = 0.0001
+    learning_rate = 0.001
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
 
-    TRAIN = False
+    TRAIN = True
     
     # Train model
     if TRAIN:
