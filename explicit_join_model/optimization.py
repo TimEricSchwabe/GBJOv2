@@ -145,350 +145,438 @@ def visualize_adjacency_matrix(adjacency_matrix, triples_num, use_tree_layout=Fa
     
     return G
 
+if __name__ == "__main__":
 
-dataset_dir = "dataset"
+    dataset_dir = "dataset_stars_3"
 
-# Set device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {device}")
+    # Set device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
-# Load dataset
-dataset = QueryDataset(root=dataset_dir)
-
-
-test_datapoint = dataset[0].to("cpu")
-
-N_NODES = len(test_datapoint.x)
-
-triples_num = (N_NODES + 1) // 2  # n triples -> 2n-1 total nodes
+    # Load dataset
+    dataset = QueryDataset(root=dataset_dir)
 
 
+    test_datapoint = dataset[0].to("cpu")
 
-# Calculate the number of triple nodes
+    N_NODES = len(test_datapoint.x)
 
-possible_edges = []
-for src in range(N_NODES):
-    for dst in range(N_NODES):
-        if src != dst:
-            possible_edges.append([src, dst])
+    triples_num = (N_NODES + 1) // 2  # n triples -> 2n-1 total nodes
 
+
+
+    # Calculate the number of triple nodes
+
+    possible_edges = []
+    for src in range(N_NODES):
+        for dst in range(N_NODES):
+            if src != dst:
+                possible_edges.append([src, dst])
+
+            
+    edge_index = torch.tensor(possible_edges, dtype=torch.long).t().contiguous()
+    num_edges = edge_index.size(1)
+
+    # Initialize edge weights as learnable parameters
+    #edge_weights = torch.full((num_edges,), 0.5, requires_grad=True, device='cpu')
+    edge_weights = torch.tensor(0.5 + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device='cpu')
+    # ╰─▶ value for each of edge in possible_edges
+
+    # We optimize the adjacency weights using adam optimizer
+    optimizer_opt = optim.Adam([edge_weights], lr=0.1)
+    OPTIMIZATION_STEPS = 1000
+
+    # Define penalty coefficients
+    lambda_acyclic = 1000.0  # For acyclicity penalty
+    lambda_triple_in = 1000.0  # Triple nodes should have no incoming edges
+    lambda_triple_out = 1000.0  # Triple nodes should have exactly one outgoing edge
+    lambda_join_in = 500.0  # Join nodes should have exactly two incoming edges
+    lambda_join_out = 1000.0  # Join nodes should have exactly one outgoing edge (except root)
+    lambda_entropy = 100.0  # Weight for entropy penalties
+    lambda_l1 = 100.0        # Weight for L1 penalties
+
+
+    # When True, adds entropy penalty that encourages weights to be either 0 or 1, not intermediate values
+    # This helps get discrete decisions instead of distributed weights across many edges
+    USE_ENTROPY_PENALTY = True
+
+    # When True, adds L1 sparsity penalty that encourages keeping only the strongest connections
+    # For triple nodes: keeps the strongest outgoing edge, pushes others to zero
+    # For join nodes: keeps the two strongest incoming edges, pushes others to zero
+    USE_L1_PENALTY = False
+
+    # We are storing the adjacencies over time so that we can later plot them in a video
+    weight_history = []
+    weight_history.append(edge_weights.detach().clone().numpy())
+
+    # Create lists to store individual penalties during optimization
+    triple_in_penalties = []
+    triple_out_penalties = []
+    join_in_penalties = []
+    join_out_penalties = []
+    acyclic_penalties = []
+    entropy_penalties = []  # Track entropy penalties
+    l1_penalties = []       # Track L1 penalties
+
+    # Lets now define the optimal cost and optimal plan of this query (this comes from our example dataset)
+    OPTIMAL_COST = test_datapoint.y
+    OPTIMAL_PLAN = test_datapoint.x
+
+    costs_during_optimization = []
+    total_costs_during_optimization = []
+    plan_distances = []
+
+    costs_during_optimization = []
+    total_costs_during_optimization = []
+    plan_distances = []
+
+
+    node_feature_dim = 307  # Based on the data format
+    hidden_dim = 64
+    model = CostGNN(node_feature_dim=node_feature_dim, hidden_dim=hidden_dim).to(device)
+    model.load_state_dict(torch.load("/home/tim/query_optimization/explicit_join_model/models/GIN_3_tp_v1.pt"))
+
+
+
+    #### Optimization loop ###
+    for step in tqdm(range(OPTIMIZATION_STEPS)):
         
-edge_index = torch.tensor(possible_edges, dtype=torch.long).t().contiguous()
-num_edges = edge_index.size(1)
+        optimizer_opt.zero_grad()
+        cost_pred = model(test_datapoint.x, edge_index, edge_weight=edge_weights)
+        loss = cost_pred  # We aim to minimize the predicted cost
 
-# Initialize edge weights as learnable parameters
-#edge_weights = torch.full((num_edges,), 0.5, requires_grad=True, device='cpu')
-edge_weights = torch.tensor(0.5 + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device='cpu')
-# ╰─▶ value for each of edge in possible_edges
+        # turning edge_weights into Adjacency matrix format
+        A = torch.zeros((N_NODES, N_NODES))
+        A[edge_index[0], edge_index[1]] = edge_weights
 
-# We optimize the adjacency weights using adam optimizer
-optimizer_opt = optim.Adam([edge_weights], lr=0.1)
-OPTIMIZATION_STEPS = 4000
+        # Calculate in-degree and out-degree for all nodes
+        in_degree = torch.sum(A, dim=0)
+        out_degree = torch.sum(A, dim=1)
+        
+        # Separate nodes into triple nodes and join nodes
+        triple_nodes_indices = torch.arange(triples_num)
+        join_nodes_indices = torch.arange(triples_num, N_NODES)
+        
+        # 1. Triple nodes have no incoming edges
+        P_triple_in = torch.sum(torch.square(in_degree[triple_nodes_indices]))
+        
+        # 2. Triple nodes have exactly one outgoing edge
+        P_triple_out = torch.sum(torch.square(out_degree[triple_nodes_indices] - 1.0))
+        
+        # Add entropy penalty to encourage weights to be either 0 or 1, not in between
+        # This effectively penalizes intermediate values in [0,1] and pushes weights toward binary decisions
+        def entropy_penalty(weights, temperature=1.0):
+            """
+            Entropy penalty with temperature parameter:
+            - Higher temperature = softer penalty
+            - Lower temperature = sharper penalty that pushes more aggressively to 0/1
+            """
+            # Avoid log(0) by adding a small epsilon
+            epsilon = 1e-10
+            # Calculate -w*log(w) - (1-w)*log(1-w) which is minimized at w=0 or w=1
+            return -torch.sum(weights * torch.log(weights + epsilon) + 
+                            (1 - weights) * torch.log(1 - weights + epsilon)) * temperature
+        
+        # Use annealing temperature that decreases over time to encourage more binary decisions
+        temperature = max(0.5, 10.0 * (1.0 - step / OPTIMIZATION_STEPS))
+        #temperature = 0.5
 
-# Define penalty coefficients
-lambda_acyclic = 1000.0  # For acyclicity penalty
-lambda_triple_in = 1000.0  # Triple nodes should have no incoming edges
-lambda_triple_out = 1000.0  # Triple nodes should have exactly one outgoing edge
-lambda_join_in = 500.0  # Join nodes should have exactly two incoming edges
-lambda_join_out = 1000.0  # Join nodes should have exactly one outgoing edge (except root)
-lambda_entropy = 100.0  # Weight for entropy penalties
-lambda_l1 = 100.0        # Weight for L1 penalties
+        # Initialize penalties
+        P_triple_entropy = torch.tensor(0.0, device=A.device)
+        P_join_entropy = torch.tensor(0.0, device=A.device)
+        P_l1_triple_out = torch.tensor(0.0, device=A.device)
+        P_l1_join_in = torch.tensor(0.0, device=A.device)
+
+        # Compute entropy and L1 penalties only if they are enabled
+        if USE_ENTROPY_PENALTY or USE_L1_PENALTY:
+            # Compute L1 and entropy penalties for triple outgoing edges
+            for i in range(triples_num):
+                outgoing = A[i, :]
+                
+                if USE_L1_PENALTY:
+                    # For each triple node, we want one strong outgoing edge, others close to 0
+                    strongest_idx = torch.argmax(outgoing)
+                    # Apply L1 penalty to all edges except the strongest one
+                    mask = torch.ones_like(outgoing, dtype=torch.bool)
+                    mask[strongest_idx] = False
+                    P_l1_triple_out += torch.sum(torch.abs(outgoing[mask]))
+                
+                if USE_ENTROPY_PENALTY:
+                    # Only compute entropy for non-zero weights to encourage sparsity
+                    mask = outgoing > 0.01
+                    if torch.any(mask):
+                        P_triple_entropy += entropy_penalty(outgoing[mask], temperature)
+            
+            # Compute L1 and entropy penalties for join nodes
+            for i in range(triples_num, N_NODES):
+                incoming = A[:, i]
+                
+                if USE_L1_PENALTY:
+                    # For each join node, we want exactly two strong incoming edges
+                    if len(incoming) > 2:  # Only if we have more than 2 edges
+                        values, _ = torch.topk(incoming, 2)
+                        threshold = values[1]  # Value of the second strongest edge
+                        # Apply L1 penalty to all edges below this threshold
+                        mask = incoming < threshold
+                        P_l1_join_in += torch.sum(torch.abs(incoming[mask]))
+                
+                if USE_ENTROPY_PENALTY:
+                    mask = incoming > 0.01
+                    if torch.any(mask):
+                        P_join_entropy += entropy_penalty(incoming[mask], temperature)
+        
+        # 3. Join nodes have exactly 2 incoming edges
+        P_join_in = torch.sum(torch.square(in_degree[join_nodes_indices] - 2.0))
+        
+        # 4. Join nodes have exactly one outgoing edge, except for one (root) which has zero
+        # First, we need a way to identify the root - assuming it's the one with highest index
+        root_index = N_NODES - 1
+        non_root_join_indices = torch.arange(triples_num, root_index)
+        
+        P_join_out = torch.sum(torch.square(out_degree[non_root_join_indices] - 1.0)) + \
+                    torch.square(out_degree[root_index])  # Root should have 0 outgoing edges
+        
+        # Acyclicity penalty using trace of matrix exponential
+        trace_exp = torch.trace(torch.matrix_exp(A)) - N_NODES
+        P_acyclic = trace_exp
+
+        # Total Penalty with entropy terms
+        total_penalty = lambda_acyclic * P_acyclic + \
+                        lambda_triple_in * P_triple_in + \
+                        lambda_triple_out * P_triple_out + \
+                        lambda_join_in * P_join_in + \
+                        lambda_join_out * P_join_out
+        
+        # Add entropy penalty if enabled
+        if USE_ENTROPY_PENALTY:
+            total_penalty += lambda_entropy * (P_triple_entropy + P_join_entropy)
+        
+        # Add L1 penalty if enabled
+        if USE_L1_PENALTY:
+            total_penalty += lambda_l1 * (P_l1_triple_out + P_l1_join_in)
+                        
+
+        # Total loss is predicted cost + penalties
+        loss = loss + 0.01 * total_penalty
+        #loss = total_penalty
+
+        # Here we calculcate the gradient of loss with respect to A and then perform a gradient descent step
+        loss.backward()
+        optimizer_opt.step()
+
+        # Clamp edge weights to [0,1]
+        with torch.no_grad():
+            edge_weights.clamp_(0, 1)
+
+        costs_during_optimization.append(cost_pred.item())
+        total_costs_during_optimization.append(total_penalty.item())
+
+        # Record weights every 10 epochs
+        if (step + 1) % 10 == 0 or step == 0:
+            weight_history.append(edge_weights.detach().clone().numpy())
+        
+        # Record raw penalties (before lambda multiplication)
+        triple_in_penalties.append(P_triple_in.item())
+        triple_out_penalties.append(P_triple_out.item())
+        join_in_penalties.append(P_join_in.item())
+        join_out_penalties.append(P_join_out.item())
+        acyclic_penalties.append(P_acyclic.item())
+        
+        # Track entropy penalties (sum of triple and join entropy)
+        total_entropy = (P_triple_entropy + P_join_entropy).item()
+        entropy_penalties.append(total_entropy)
+
+        # Track L1 penalties
+        total_l1 = (P_l1_triple_out + P_l1_join_in).item()
+        l1_penalties.append(total_l1)
+
+        if (step + 1) % 50 == 0 or step == 0:
+            pass
+            print(f'Optimization Step {step + 1}, Predicted Cost: {cost_pred.item():.4f}')
+            print(f'Total Penalty: {total_penalty.item():.4f}')
+            print(f'Penalties - Triple In: {P_triple_in.item():.4f}, Triple Out: {P_triple_out.item():.4f}')
+            print(f'Penalties - Join In: {P_join_in.item():.4f}, Join Out: {P_join_out.item():.4f}')
+            print(f'Acyclicity Penalty: {P_acyclic.item():.4f}')
+            print(f'Entropy Penalty: {total_entropy:.4f} ({"enabled" if USE_ENTROPY_PENALTY else "disabled"})')
+            print(f'L1 Penalty: {total_l1:.4f} ({"enabled" if USE_L1_PENALTY else "disabled"})')
+            print(f'Temperature: {temperature:.4f}')
+            # Print the adjacency matrix
+            adj_matrix = A.detach().clone()
+            #print("\nAdjacency Matrix:")
+            #print(adj_matrix.numpy())
+            #print("-" * 30)
 
 
-# When True, adds entropy penalty that encourages weights to be either 0 or 1, not intermediate values
-# This helps get discrete decisions instead of distributed weights across many edges
-USE_ENTROPY_PENALTY = True
 
-# When True, adds L1 sparsity penalty that encourages keeping only the strongest connections
-# For triple nodes: keeps the strongest outgoing edge, pushes others to zero
-# For join nodes: keeps the two strongest incoming edges, pushes others to zero
-USE_L1_PENALTY = False
+    plt.plot(costs_during_optimization)
+    plt.xlabel('t')
+    plt.ylabel('Predicted Cost')
+    plt.title('Predicted Cost During Optimization')
+    plt.show()
 
-# We are storing the adjacencies over time so that we can later plot them in a video
-weight_history = []
-weight_history.append(edge_weights.detach().clone().numpy())
+    #plt.plot(plan_distances)
+    #plt.xlabel('t')
+    #plt.ylabel('$L_2(true plan, predicted plan)$')
+    #plt.show()
 
-# Create lists to store individual penalties during optimization
-triple_in_penalties = []
-triple_out_penalties = []
-join_in_penalties = []
-join_out_penalties = []
-acyclic_penalties = []
-entropy_penalties = []  # Track entropy penalties
-l1_penalties = []       # Track L1 penalties
+    # Visualize the final adjacency matrix
+    # print("Visualizing the final optimized query plan:")
+    final_adjacency = A.detach().clone()
+    # visualize_adjacency_matrix(final_adjacency, triples_num, use_tree_layout=False)
 
-# Lets now define the optimal cost and optimal plan of this query (this comes from our example dataset)
-OPTIMAL_COST = test_datapoint.y
-OPTIMAL_PLAN = test_datapoint.x
+    # Thresholding
+    final_adjacency[final_adjacency < 0.5] = 0.0
+    final_adjacency[final_adjacency >= 0.5] = 1.0
+    visualize_adjacency_matrix(final_adjacency, triples_num, use_tree_layout=True)
 
-costs_during_optimization = []
-total_costs_during_optimization = []
-plan_distances = []
+    print("Final Adjacency Matrix:")
+    print(final_adjacency.numpy())
 
-costs_during_optimization = []
-total_costs_during_optimization = []
-plan_distances = []
+    # # Convert the original test datapoint edge_index to adjacency matrix and visualize it
+    # print("\nVisualizing the original (ground truth) query plan:")
+    # original_edge_index = test_datapoint.edge_index
+    # original_adjacency = torch.zeros((N_NODES, N_NODES))
+    # original_adjacency[original_edge_index[0], original_edge_index[1]] = 1.0
+    # visualize_adjacency_matrix(original_adjacency, triples_num, use_tree_layout=True)
 
+    # # Plot the individual penalties over time
+    # plt.figure(figsize=(12, 8))
+    # plt.plot(triple_in_penalties, label='Triple In Penalty')
+    # plt.plot(triple_out_penalties, label='Triple Out Penalty')
+    # plt.plot(join_in_penalties, label='Join In Penalty')
+    # plt.plot(join_out_penalties, label='Join Out Penalty')
+    # plt.plot(acyclic_penalties, label='Acyclicity Penalty')
+    # plt.plot(entropy_penalties, label='Entropy Penalty')
+    # plt.plot(l1_penalties, label='L1 Penalty')
+    # plt.xlabel('Optimization Steps')
+    # plt.ylabel('Raw Penalty Value')
+    # plt.title('Individual Penalties During Optimization')
+    # plt.legend()
+    # plt.grid(True, alpha=0.3)
+    # plt.tight_layout()
+    # plt.show()
 
-node_feature_dim = 307  # Based on the data format
-hidden_dim = 64
-model = CostGNN(node_feature_dim=node_feature_dim, hidden_dim=hidden_dim).to(device)
-model.load_state_dict(torch.load("best_model.pt"))
+    # # Plot each penalty on separate subplots for better visibility
+    # fig, axes = plt.subplots(8, 1, figsize=(12, 20), sharex=True)
 
+    # axes[0].plot(triple_in_penalties, color='blue')
+    # axes[0].set_title('Triple In Penalty')
+    # axes[0].grid(True, alpha=0.3)
 
+    # axes[1].plot(triple_out_penalties, color='green')
+    # axes[1].set_title('Triple Out Penalty')
+    # axes[1].grid(True, alpha=0.3)
 
-#### Optimization loop ###
-for step in tqdm(range(OPTIMIZATION_STEPS)):
-    
-    optimizer_opt.zero_grad()
-    cost_pred = model(test_datapoint.x, edge_index, edge_weight=edge_weights)
-    loss = cost_pred  # We aim to minimize the predicted cost
+    # axes[2].plot(join_in_penalties, color='red')
+    # axes[2].set_title('Join In Penalty')
+    # axes[2].grid(True, alpha=0.3)
 
-    # turning edge_weights into Adjacency matrix format
-    A = torch.zeros((N_NODES, N_NODES))
-    A[edge_index[0], edge_index[1]] = edge_weights
+    # axes[3].plot(join_out_penalties, color='purple')
+    # axes[3].set_title('Join Out Penalty')
+    # axes[3].grid(True, alpha=0.3)
 
-    # Calculate in-degree and out-degree for all nodes
-    in_degree = torch.sum(A, dim=0)
-    out_degree = torch.sum(A, dim=1)
-    
-    # Separate nodes into triple nodes and join nodes
-    triple_nodes_indices = torch.arange(triples_num)
-    join_nodes_indices = torch.arange(triples_num, N_NODES)
-    
-    # 1. Triple nodes have no incoming edges
-    P_triple_in = torch.sum(torch.square(in_degree[triple_nodes_indices]))
-    
-    # 2. Triple nodes have exactly one outgoing edge
-    P_triple_out = torch.sum(torch.square(out_degree[triple_nodes_indices] - 1.0))
-    
-    # Add entropy penalty to encourage weights to be either 0 or 1, not in between
-    # This effectively penalizes intermediate values in [0,1] and pushes weights toward binary decisions
-    def entropy_penalty(weights, temperature=1.0):
+    # axes[4].plot(acyclic_penalties, color='orange')
+    # axes[4].set_title('Acyclicity Penalty')
+    # axes[4].grid(True, alpha=0.3)
+
+    # axes[5].plot(entropy_penalties, color='brown')
+    # axes[5].set_title('Entropy Penalty')
+    # axes[5].grid(True, alpha=0.3)
+
+    # axes[6].plot(l1_penalties, color='pink')
+    # axes[6].set_title('L1 Penalty')
+    # axes[6].grid(True, alpha=0.3)
+
+    # # Add a subplot for the total penalty
+    # axes[7].plot(total_costs_during_optimization, color='black', linewidth=2)
+    # axes[7].set_title('Total Penalty')
+    # axes[7].grid(True, alpha=0.3)
+    # axes[7].set_xlabel('Optimization Steps')
+
+    plt.tight_layout()
+    plt.show()
+
+    def adjacency_matrix_to_query(A, triples_num, node_features=None):
         """
-        Entropy penalty with temperature parameter:
-        - Higher temperature = softer penalty
-        - Lower temperature = sharper penalty that pushes more aggressively to 0/1
+        Converts a thresholded adjacency matrix to a Query object.
+        
+        Args:
+            A: The thresholded adjacency matrix (numpy array or torch tensor)
+            triples_num: The number of Triple nodes
+            node_features: Optional tensor of node features to use for original Triple data
+        
+        Returns:
+            A Query object representing the structure in the adjacency matrix
         """
-        # Avoid log(0) by adding a small epsilon
-        epsilon = 1e-10
-        # Calculate -w*log(w) - (1-w)*log(1-w) which is minimized at w=0 or w=1
-        return -torch.sum(weights * torch.log(weights + epsilon) + 
-                         (1 - weights) * torch.log(1 - weights + epsilon)) * temperature
-    
-    # Use annealing temperature that decreases over time to encourage more binary decisions
-    temperature = max(0.5, 10.0 * (1.0 - step / OPTIMIZATION_STEPS))
-    #temperature = 0.5
-
-    # Initialize penalties
-    P_triple_entropy = torch.tensor(0.0, device=A.device)
-    P_join_entropy = torch.tensor(0.0, device=A.device)
-    P_l1_triple_out = torch.tensor(0.0, device=A.device)
-    P_l1_join_in = torch.tensor(0.0, device=A.device)
-
-    # Compute entropy and L1 penalties only if they are enabled
-    if USE_ENTROPY_PENALTY or USE_L1_PENALTY:
-        # Compute L1 and entropy penalties for triple outgoing edges
+        from data import Triple, Join, Query, Entity
+        import numpy as np
+        import torch
+        
+        # Convert to numpy if it's a PyTorch tensor
+        if isinstance(A, torch.Tensor):
+            A = A.cpu().detach().numpy()
+        
+        # Total nodes
+        N_NODES = A.shape[0]
+        
+        # Create placeholder Triples
+        placeholder_triples = []
         for i in range(triples_num):
-            outgoing = A[i, :]
-            
-            if USE_L1_PENALTY:
-                # For each triple node, we want one strong outgoing edge, others close to 0
-                strongest_idx = torch.argmax(outgoing)
-                # Apply L1 penalty to all edges except the strongest one
-                mask = torch.ones_like(outgoing, dtype=torch.bool)
-                mask[strongest_idx] = False
-                P_l1_triple_out += torch.sum(torch.abs(outgoing[mask]))
-            
-            if USE_ENTROPY_PENALTY:
-                # Only compute entropy for non-zero weights to encourage sparsity
-                mask = outgoing > 0.01
-                if torch.any(mask):
-                    P_triple_entropy += entropy_penalty(outgoing[mask], temperature)
+            s = Entity(f"?s{i}")
+            p = Entity(f"?p{i}")
+            o = Entity(f"?o{i}")
+            placeholder_triples.append(Triple(s, p, o))
         
-        # Compute L1 and entropy penalties for join nodes
+        # Use a recursive function to build the query tree
+        def build_tree(node_idx):
+            """
+            Recursively builds the query tree starting from the given node.
+            
+            Args:
+                node_idx: The index of the current node
+                
+            Returns:
+                A Triple or Join object representing the subtree rooted at node_idx
+            """
+            # If this is a Triple node, return the corresponding Triple
+            if node_idx < triples_num:
+                return placeholder_triples[node_idx]
+            
+            # Otherwise, this is a Join node
+            # Find its children (incoming edges)
+            children = np.where(A[:, node_idx] > 0.5)[0]
+            
+            # Sanity check: Join nodes should have exactly two children
+            if len(children) != 2:
+                raise ValueError(f"Error: Join node {node_idx} has {len(children)} children, expected 2")
+            
+            # Recursively build the left and right subtrees
+            left = build_tree(children[0])
+            right = build_tree(children[1])
+            
+            # Create a Join node
+            return Join(left=left, right=right)
+        
+        # Find the root node (Join node with no outgoing edges)
+        root_idx = N_NODES - 1  # Default to the last node
         for i in range(triples_num, N_NODES):
-            incoming = A[:, i]
-            
-            if USE_L1_PENALTY:
-                # For each join node, we want exactly two strong incoming edges
-                if len(incoming) > 2:  # Only if we have more than 2 edges
-                    values, _ = torch.topk(incoming, 2)
-                    threshold = values[1]  # Value of the second strongest edge
-                    # Apply L1 penalty to all edges below this threshold
-                    mask = incoming < threshold
-                    P_l1_join_in += torch.sum(torch.abs(incoming[mask]))
-            
-            if USE_ENTROPY_PENALTY:
-                mask = incoming > 0.01
-                if torch.any(mask):
-                    P_join_entropy += entropy_penalty(incoming[mask], temperature)
-    
-    # 3. Join nodes have exactly 2 incoming edges
-    P_join_in = torch.sum(torch.square(in_degree[join_nodes_indices] - 2.0))
-    
-    # 4. Join nodes have exactly one outgoing edge, except for one (root) which has zero
-    # First, we need a way to identify the root - assuming it's the one with highest index
-    root_index = N_NODES - 1
-    non_root_join_indices = torch.arange(triples_num, root_index)
-    
-    P_join_out = torch.sum(torch.square(out_degree[non_root_join_indices] - 1.0)) + \
-                torch.square(out_degree[root_index])  # Root should have 0 outgoing edges
-    
-    # Acyclicity penalty using trace of matrix exponential
-    trace_exp = torch.trace(torch.matrix_exp(A)) - N_NODES
-    P_acyclic = trace_exp
+            # Check if this node has no outgoing edges
+            if np.sum(A[i, :]) < 0.1:
+                root_idx = i
+                break
+        
+        # Build the query tree starting from the root
+        root = build_tree(root_idx)
+        
+        # Create and return the Query object
+        return Query(root=root, triples_num=triples_num)
 
-    # Total Penalty with entropy terms
-    total_penalty = lambda_acyclic * P_acyclic + \
-                    lambda_triple_in * P_triple_in + \
-                    lambda_triple_out * P_triple_out + \
-                    lambda_join_in * P_join_in + \
-                    lambda_join_out * P_join_out
-    
-    # Add entropy penalty if enabled
-    if USE_ENTROPY_PENALTY:
-        total_penalty += lambda_entropy * (P_triple_entropy + P_join_entropy)
-    
-    # Add L1 penalty if enabled
-    if USE_L1_PENALTY:
-        total_penalty += lambda_l1 * (P_l1_triple_out + P_l1_join_in)
-                    
+    # Test the function with the final thresholded adjacency matrix
+    print("\nConverting the optimized adjacency matrix to a Query object:")
+    optimized_query = adjacency_matrix_to_query(final_adjacency, triples_num)
+    print("Optimized query structure:")
+    print(optimized_query)
 
-    # Total loss is predicted cost + penalties
-    loss = loss + 0.01 * total_penalty
-    #loss = total_penalty
-
-    # Here we calculcate the gradient of loss with respect to A and then perform a gradient descent step
-    loss.backward()
-    optimizer_opt.step()
-
-    # Clamp edge weights to [0,1]
-    with torch.no_grad():
-        edge_weights.clamp_(0, 1)
-
-    costs_during_optimization.append(cost_pred.item())
-    total_costs_during_optimization.append(total_penalty.item())
-
-    # Record weights every 10 epochs
-    if (step + 1) % 10 == 0 or step == 0:
-        weight_history.append(edge_weights.detach().clone().numpy())
-    
-    # Record raw penalties (before lambda multiplication)
-    triple_in_penalties.append(P_triple_in.item())
-    triple_out_penalties.append(P_triple_out.item())
-    join_in_penalties.append(P_join_in.item())
-    join_out_penalties.append(P_join_out.item())
-    acyclic_penalties.append(P_acyclic.item())
-    
-    # Track entropy penalties (sum of triple and join entropy)
-    total_entropy = (P_triple_entropy + P_join_entropy).item()
-    entropy_penalties.append(total_entropy)
-
-    # Track L1 penalties
-    total_l1 = (P_l1_triple_out + P_l1_join_in).item()
-    l1_penalties.append(total_l1)
-
-    if (step + 1) % 50 == 0 or step == 0:
-        pass
-        print(f'Optimization Step {step + 1}, Predicted Cost: {cost_pred.item():.4f}')
-        print(f'Total Penalty: {total_penalty.item():.4f}')
-        print(f'Penalties - Triple In: {P_triple_in.item():.4f}, Triple Out: {P_triple_out.item():.4f}')
-        print(f'Penalties - Join In: {P_join_in.item():.4f}, Join Out: {P_join_out.item():.4f}')
-        print(f'Acyclicity Penalty: {P_acyclic.item():.4f}')
-        print(f'Entropy Penalty: {total_entropy:.4f} ({"enabled" if USE_ENTROPY_PENALTY else "disabled"})')
-        print(f'L1 Penalty: {total_l1:.4f} ({"enabled" if USE_L1_PENALTY else "disabled"})')
-        print(f'Temperature: {temperature:.4f}')
-        # Print the adjacency matrix
-        adj_matrix = A.detach().clone()
-        #print("\nAdjacency Matrix:")
-        #print(adj_matrix.numpy())
-        #print("-" * 30)
-
-plt.plot(costs_during_optimization)
-plt.xlabel('t')
-plt.ylabel('Predicted Cost')
-plt.title('Predicted Cost During Optimization')
-plt.show()
-
-#plt.plot(plan_distances)
-#plt.xlabel('t')
-#plt.ylabel('$L_2(true plan, predicted plan)$')
-#plt.show()
-
-# Visualize the final adjacency matrix
-print("Visualizing the final optimized query plan:")
-final_adjacency = A.detach().clone()
-visualize_adjacency_matrix(final_adjacency, triples_num, use_tree_layout=False)
-
-# Thresholding
-final_adjacency[final_adjacency < 0.5] = 0.0
-final_adjacency[final_adjacency >= 0.5] = 1.0
-visualize_adjacency_matrix(final_adjacency, triples_num, use_tree_layout=True)
-
-print("Final Adjacency Matrix:")
-print(final_adjacency.numpy())
-
-# Convert the original test datapoint edge_index to adjacency matrix and visualize it
-print("\nVisualizing the original (ground truth) query plan:")
-original_edge_index = test_datapoint.edge_index
-original_adjacency = torch.zeros((N_NODES, N_NODES))
-original_adjacency[original_edge_index[0], original_edge_index[1]] = 1.0
-visualize_adjacency_matrix(original_adjacency, triples_num, use_tree_layout=True)
-
-# Plot the individual penalties over time
-plt.figure(figsize=(12, 8))
-plt.plot(triple_in_penalties, label='Triple In Penalty')
-plt.plot(triple_out_penalties, label='Triple Out Penalty')
-plt.plot(join_in_penalties, label='Join In Penalty')
-plt.plot(join_out_penalties, label='Join Out Penalty')
-plt.plot(acyclic_penalties, label='Acyclicity Penalty')
-plt.plot(entropy_penalties, label='Entropy Penalty')
-plt.plot(l1_penalties, label='L1 Penalty')
-plt.xlabel('Optimization Steps')
-plt.ylabel('Raw Penalty Value')
-plt.title('Individual Penalties During Optimization')
-plt.legend()
-plt.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
-
-# Plot each penalty on separate subplots for better visibility
-fig, axes = plt.subplots(8, 1, figsize=(12, 20), sharex=True)
-
-axes[0].plot(triple_in_penalties, color='blue')
-axes[0].set_title('Triple In Penalty')
-axes[0].grid(True, alpha=0.3)
-
-axes[1].plot(triple_out_penalties, color='green')
-axes[1].set_title('Triple Out Penalty')
-axes[1].grid(True, alpha=0.3)
-
-axes[2].plot(join_in_penalties, color='red')
-axes[2].set_title('Join In Penalty')
-axes[2].grid(True, alpha=0.3)
-
-axes[3].plot(join_out_penalties, color='purple')
-axes[3].set_title('Join Out Penalty')
-axes[3].grid(True, alpha=0.3)
-
-axes[4].plot(acyclic_penalties, color='orange')
-axes[4].set_title('Acyclicity Penalty')
-axes[4].grid(True, alpha=0.3)
-
-axes[5].plot(entropy_penalties, color='brown')
-axes[5].set_title('Entropy Penalty')
-axes[5].grid(True, alpha=0.3)
-
-axes[6].plot(l1_penalties, color='pink')
-axes[6].set_title('L1 Penalty')
-axes[6].grid(True, alpha=0.3)
-
-# Add a subplot for the total penalty
-axes[7].plot(total_costs_during_optimization, color='black', linewidth=2)
-axes[7].set_title('Total Penalty')
-axes[7].grid(True, alpha=0.3)
-axes[7].set_xlabel('Optimization Steps')
-
-plt.tight_layout()
-plt.show()
+    # Visualize the optimized query
+    optimized_query.visualize(output_file="optimized_query_plan")
+    print("Optimized query plan visualization saved as optimized_query_plan.png")

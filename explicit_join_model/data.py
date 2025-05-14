@@ -10,7 +10,9 @@ import json
 
 from torch_geometric.data import Data, Dataset, DataLoader
 import torch
-
+import asyncio
+from tqdm import tqdm
+import pickle
 
 @dataclass
 class Entity:
@@ -19,7 +21,7 @@ class Entity:
 	def __post_init__(self):
 		self.is_variable = self.name.startswith("?")
 
-	def get_embedding(self, variable_id_dict: dict["Entity", int]) -> np.ndarray:
+	def get_embedding(self, variable_id_dict: dict["Entity", int], rdf2vec=None, counts=None) -> np.ndarray:
 		"""
 		Size - 102
 
@@ -35,10 +37,18 @@ class Entity:
 				[0]
 			], axis=0)
 		else:
+			entity_name = self.name[1:-1]  # Remove angle brackets
+			if rdf2vec is None or counts is None:
+				raise ValueError("rdf2vec and counts must be provided for constant entities")
+			
+			# Get embedding and count
+			embedding = rdf2vec.get(entity_name, np.zeros(100))
+			count = counts.get(entity_name, 1)
+			
 			return np.concatenate([
 				[0],
-				rdf2vec[self.name[1:-1]],
-				[counts[self.name[1:-1]]]
+				embedding,
+				[count]
 			], axis=0)
 	
 	def __str__(self) -> str:
@@ -66,7 +76,7 @@ class Triple:
 	def json(self) -> Union[str, list]:
 		return self.where_body()
 	
-	def get_embedding(self, variable_id_dict: dict[Entity, int]) -> np.ndarray:
+	def get_embedding(self, variable_id_dict: dict[Entity, int], rdf2vec=None, counts=None) -> np.ndarray:
 		"""
 		Size - 307
 
@@ -77,7 +87,7 @@ class Triple:
 		"""
 		return np.concatenate([
 			*(
-				ent.get_embedding(variable_id_dict)
+				ent.get_embedding(variable_id_dict, rdf2vec, counts)
 				for ent in [self.s, self.p, self.o]
 			),
 			[0]
@@ -133,7 +143,7 @@ class Join:
 	def get_cost(self) -> int:
 		query = f"""
 			SELECT COUNT(*) AS ?count
-			FROM <lubm>
+			FROM <http://lubm>
 			WHERE {{ 
 				{self.where_body()}	
 			}}
@@ -273,7 +283,7 @@ class Datapoint:
 		)
 
 
-def join_order_to_adjacency_matrix(join_order: Query, seed = None) -> Datapoint:
+def join_order_to_adjacency_matrix(join_order: Query, seed = None, rdf2vec=None, counts=None) -> Datapoint:
 	# There are len(join_order.triples) triple patterns and len(join_order.triples)-1 join nodes
 	triples_num = join_order.triples_num
 	nodes_num = triples_num * 2 - 1
@@ -290,7 +300,7 @@ def join_order_to_adjacency_matrix(join_order: Query, seed = None) -> Datapoint:
 		return Datapoint(
 			nodes_order=[join_order.root],
 			adjacency_matrix=np.zeros((1, 1)),
-			embedding_matrix=join_order.root.get_embedding(variable_id_dict).reshape(1, 307),
+			embedding_matrix=join_order.root.get_embedding(variable_id_dict, rdf2vec, counts).reshape(1, 307),
 			join_order=join_order
 		)
 
@@ -307,7 +317,7 @@ def join_order_to_adjacency_matrix(join_order: Query, seed = None) -> Datapoint:
 	
 	def get_node_embedding(node: Triple | Join) -> np.ndarray:
 		if isinstance(node, Triple):
-			return node.get_embedding(variable_id_dict)
+			return node.get_embedding(variable_id_dict, rdf2vec, counts)
 		else:
 			return node.get_embedding()
 
@@ -341,8 +351,142 @@ def join_order_to_adjacency_matrix(join_order: Query, seed = None) -> Datapoint:
 		join_order=join_order
 	)
 		
+def chucks(lst, n):
+	step = len(lst) // n
+	prev_left = 0
+	for i in range(n-1):
+		yield lst[prev_left:prev_left + step]
+		prev_left += step
+	yield lst[prev_left:]
+
+async def raw_json_to_datapoint(raw_json_query_data: list[dict], chunks_num: int = 20) -> tuple[list[Datapoint], list[Data]]:
+	"""
+	Converts a list of raw JSON query data into Datapoint and PyTorch Geometric Data objects.
+	
+	This function processes query data in parallel chunks to improve performance.
+	It creates random join orders for each query, converts them to adjacency matrices,
+	and then to PyTorch Geometric Data objects.
+	
+	Args:
+		raw_json_query_data: List of dictionaries containing query data with "triples" key
+		chunks_num: Number of chunks to split the data for parallel processing
+		
+	Returns:
+		A tuple containing two lists:
+		- List of Datapoint objects representing the query plans
+		- List of PyTorch Geometric Data objects for model training
+	"""
+	async def _raw_json_to_datapoint(i: int, raw_json_query_data_list: list[dict]) -> list[tuple[Datapoint, Data]]:
+		"""
+		Helper function to process a chunk of raw JSON query data.
+		
+		Args:
+			i: Index of the current chunk (used to determine if progress bar should be shown)
+			raw_json_query_data_list: List of query data dictionaries to process
+			
+		Returns:
+			List of tuples containing (Datapoint, PyTorch Geometric Data) pairs
+		"""
+		res = []
+		loop = asyncio.get_event_loop()
+
+		# Showing the progress of only the first iteration, as the other ones go approx hand-in-hand
+		if i == 0:
+			iter = tqdm(raw_json_query_data_list)
+		else:
+			iter = raw_json_query_data_list
+		
+		for raw_json_query_data in iter:
+			query = random_join_order(
+				raw_json_query_data["triples"]
+			)
+
+			# Those two interact with the Virtuoso server, blocking the thread
+			datapoint = await loop.run_in_executor(
+				None,
+				join_order_to_adjacency_matrix,
+				query
+			)
+
+			try:
+				torch_data = await loop.run_in_executor(
+					None,
+					datapoint.get_torch_data
+				)
+			except RuntimeError as e:
+				print("Error:", e, "skipping the query...")
+				continue
+				
+
+			res.append((datapoint, torch_data))
+		
+		return res
+	
+	tasks = [
+		_raw_json_to_datapoint(i, raw_json_query_data_list)
+		for i, raw_json_query_data_list in enumerate(chucks(raw_json_query_data, chunks_num))
+	]
+
+	res = await asyncio.gather(*tasks)
+	res = sum(res, [])
+	return tuple((
+		list(el) for el in zip(*res)
+	)) # type: ignore
+
+
 
 if __name__ == "__main__":
+
+
+
+	# Load the queries
+	with open("/home/tim/query_optimization/queries/Star_Queries.json", "r") as f:
+		queries = json.load(f)
+
+    # Example how a querylooks like
+	# {'x': ['http://example.org/1969', 'http://example.org/4', 'http://example.org/400390', 'http://example.org/7865', 'http://example.org/6', 'http://example.org/246919', 'http://example.org/6', 'http://example.org/128437'], 'y': 1, 'query': ['SELECT * WHERE { ?s ?p1 <http://example.org/1969> . ?s <http://example.org/4> <http://example.org/400390> . ?s ?p2 <http://example.org/7865> . ?s <http://example.org/6> <http://example.org/246919> . ?s <http://example.org/6> <http://example.org/128437> . }'], 'triples': [['?s', '?p1', '<http://example.org/1969>', '.'], ['?s', '<http://example.org/4>', '<http://example.org/400390>', '.'], ['?s', '?p2', '<http://example.org/7865>', '.'], ['?s', '<http://example.org/6>', '<http://example.org/246919>', '.'], ['?s', '<http://example.org/6>', '<http://example.org/128437>', '.']]}
+	print(queries[29])
+	exit()
+
+
+	with open("/home/tim/query_optimization/queries/rdf2vec100dim.pkl", "rb") as f:
+		rdf2vec = pickle.load(f)
+
+
+	random_order_A = random_join_order(
+		queries[29]["triples"],
+		# seed=42
+	)
+
+	print(json.dumps(
+		random_order_A.root.json(),
+		indent=2
+	))
+
+	#random_order_A.visualize()
+
+	# Get cost of the random order
+	print(random_order_A.root.get_cost())
+
+	exit()
+
+	# Example how to create join plan dataset
+	#res = await raw_json_to_datapoint(star_data + path_data, chunks_num=20)
+	compact_res = [
+		(
+			[triple.where_body() for triple in datapoint.nodes_order if isinstance(triple, Triple)],
+			torch_data
+		)
+		for datapoint, torch_data in zip(*res)
+	]
+
+	with open("DATASET.pkl", "wb") as f:
+		pickle.dump(compact_res, f)
+	
+	
+	
+
+
 	triples = [
 		["?x", "?p1", "?z1"],
 		["?x", "?p2", "?z2"],
@@ -366,3 +510,4 @@ if __name__ == "__main__":
 	print(datapoint.adjacency_matrix)
 	print(datapoint.nodes_order)
 	
+

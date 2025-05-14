@@ -88,8 +88,8 @@ class CostGNN(nn.Module):
 		x = self.fc1(x)
 		x = F.relu(x)
 		x = self.dropout(x)
-		cost = self.fc2(x)
-		
+		cost = torch.abs(self.fc2(x))
+
 		return torch.squeeze(cost)
       
 
@@ -258,7 +258,7 @@ def validate_model(model, criterion, val_loader, device='cpu'):
 
 if __name__ == "__main__":
     # Example of using the model with batch-loaded dataset
-    dataset_dir = "dataset"
+    dataset_dir = "dataset_stars_3"
     
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -274,8 +274,8 @@ if __name__ == "__main__":
     
     # Set train and validation sizes for experimentation
     # Make sure they don't exceed the total dataset size
-    train_size = 128
-    val_size = 128
+    train_size = 60000
+    val_size = 10000
 
     print(f"Using {train_size} samples for training and {val_size} samples for validation")
     
@@ -292,7 +292,7 @@ if __name__ == "__main__":
     #val_dataset = train_dataset #todo: remove
 
     # Create data loaders
-    batch_size = 1
+    batch_size = 32
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
@@ -309,14 +309,16 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
 
-    TRAIN = True
+    TRAIN = False
     
     # Train model
     if TRAIN:
-        train_model(model, optimizer, criterion, train_loader, val_loader, num_epochs=100, device=device)
+        train_model(model, optimizer, criterion, train_loader, val_loader, num_epochs=2000, device=device)
 		
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(script_dir, "models", "Path-GIN-40000.pt")
+    model_path = os.path.join(script_dir, "best_model.pt")
+    model_path = os.path.join("best_model.pt")
+
     model.load_state_dict(torch.load(model_path))
 
     model.eval()
