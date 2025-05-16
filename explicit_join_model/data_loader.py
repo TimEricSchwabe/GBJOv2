@@ -30,6 +30,38 @@ class QueryDataset(Dataset):
         data = torch.load(os.path.join(self.processed_dir, f'data_{idx}.pt'))
         return data
 
+class SingleFileQueryDataset(Dataset):
+    def __init__(self, root, transform=None, pre_transform=None, pre_filter=None):
+        self.dataset_path = os.path.join(root, 'dataset.pt')
+        super(SingleFileQueryDataset, self).__init__(root, transform, pre_transform, pre_filter)
+        # Load the dataset after initialization
+        if os.path.exists(self.dataset_path):
+            self.data_dict = torch.load(self.dataset_path)
+            self.data_list = self.data_dict['data']
+        else:
+            raise FileNotFoundError(f"Dataset file not found at {self.dataset_path}")
+        
+    @property
+    def raw_file_names(self):
+        return []
+    
+    @property
+    def processed_file_names(self):
+        # Since we're using a single file, just check if it exists
+        if os.path.exists(self.dataset_path):
+            return ['dataset.pt']
+        return []
+    
+    def process(self):
+        # This method is called if processed_file_names is empty
+        pass
+    
+    def len(self):
+        return len(self.data_list)
+    
+    def get(self, idx):
+        return self.data_list[idx]
+
 def save_dataset(triples, torch_dataset, output_dir, clear_existing=False):
     """
     Save dataset to disk for batch loading
@@ -69,7 +101,43 @@ def save_dataset(triples, torch_dataset, output_dir, clear_existing=False):
     print(f"Dataset saved to {output_dir}")
     print(f"Total samples: {len(torch_dataset)}")
 
+def save_dataset_single_file(triples, torch_dataset, output_dir):
+    """
+    Save dataset to a single file for batch loading
+    
+    Args:
+        triples: List of triples data
+        torch_dataset: PyTorch Geometric dataset
+        output_dir: Directory to save the processed data
+    """
+    # Create directory if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Save metadata and dataset in one file
+    data = {
+        'dataset_size': len(torch_dataset),
+        'triples': triples,
+        'data': torch_dataset
+    }
+    
+    torch.save(data, os.path.join(output_dir, 'dataset.pt'))
+    
+    print(f"Dataset saved to {os.path.join(output_dir, 'dataset.pt')}")
+    print(f"Total samples: {len(torch_dataset)}")
+
 def load_dataset_metadata(dataset_dir):
     """Load metadata about the dataset"""
     with open(os.path.join(dataset_dir, 'metadata.pkl'), 'rb') as f:
-        return pickle.load(f) 
+        return pickle.load(f)
+
+def load_single_file_dataset_metadata(dataset_dir):
+    """Load metadata about the single file dataset"""
+    dataset_path = os.path.join(dataset_dir, 'dataset.pt')
+    if os.path.exists(dataset_path):
+        data_dict = torch.load(dataset_path)
+        return {
+            'dataset_size': data_dict['dataset_size'],
+            'triples': data_dict['triples']
+        }
+    return None 

@@ -1,4 +1,4 @@
-from torch_geometric.nn import GCNConv
+from torch_geometric.nn import GCNConv, GATv2Conv
 from torch_geometric.utils import scatter
 import torch.nn.functional as F
 import torch.nn as nn
@@ -7,7 +7,7 @@ import time
 from torch.nn.utils import clip_grad_norm_
 from data import random_join_order, join_order_to_adjacency_matrix
 from torch_geometric.data import DataLoader
-from data_loader import QueryDataset, load_dataset_metadata
+from data_loader import QueryDataset, SingleFileQueryDataset, load_dataset_metadata, load_single_file_dataset_metadata
 import random
 import numpy as np
 from matplotlib import pyplot as plt
@@ -80,9 +80,9 @@ class CostGNN(nn.Module):
 
 		# Global pooling
 		if batch is not None:
-			x = scatter(x, batch, dim=0, reduce='mean')
+			x = scatter(x, batch, dim=0, reduce='add')
 		else:
-			x = torch.mean(x, dim=0)
+			x = torch.sum(x, dim=0)
 		
 		# Apply FC layers with nonlinearities
 		x = self.fc1(x)
@@ -172,7 +172,15 @@ class CostGNNbla(nn.Module):
 		return torch.squeeze(cost)
 	
 
-def train_model(model, optimizer, criterion, train_loader, val_loader=None, num_epochs=100, device='cpu', save_path="best_model.pt"):
+def calculate_qerror(pred, true):
+    # Add small epsilon to avoid division by zero
+    epsilon = 1e-10
+    true_div_pred = true / (pred + epsilon)
+    pred_div_true = pred / (true + epsilon)
+    qerror = torch.maximum(true_div_pred, pred_div_true)
+    return qerror
+
+def train_model(model, optimizer, criterion, train_loader, val_loader=None, num_epochs=100, device='cpu', save_path="best_model.pt", loss_type="mse"):
     model.train()
     best_performance = float('inf')
     
@@ -185,16 +193,23 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None, num_
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
         
         for data in pbar:
-            #data.y = torch.tensor(1) ## REOMVE !!!!
             # Move data to the specified device
             data = data.to(device)
 
-            
             optimizer.zero_grad(set_to_none=True)
             out = model(data.x, data.edge_index, batch=data.batch)
-            loss = criterion(out, torch.log(data.y))
+            
+            # Calculate loss based on loss_type
+            if loss_type == "mse":
+                loss = criterion(out, torch.log(data.y))
+            elif loss_type == "qerror":
+                pred_y = torch.exp(out)
+                qerrors = calculate_qerror(pred_y, data.y)
+                loss = torch.mean(qerrors)
+            else:
+                raise ValueError(f"Unsupported loss type: {loss_type}")
+                
             loss.backward()
-            #clip_grad_norm_(model.parameters(), .4)
             optimizer.step()
             total_loss += loss.item()
             
@@ -206,7 +221,7 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None, num_
         mse_metric = 0
         qerror_metric = 0
         if val_loader:
-            perf, mse_metric, qerror_metric = validate_model(model, criterion, val_loader, device)
+            perf, mse_metric, qerror_metric = validate_model(model, criterion, val_loader, device, loss_type=loss_type)
             if perf < best_performance:
                 best_performance = perf
                 # Save the model when there's a new best performance
@@ -217,7 +232,7 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None, num_
               f'Val Loss: {perf:.4f}, Best Val Loss: {best_performance:.4f}, '
               f'MSE: {mse_metric:.4f}, Q-Error: {qerror_metric:.4f}')
 
-def validate_model(model, criterion, val_loader, device='cpu'):
+def validate_model(model, criterion, val_loader, device='cpu', loss_type="mse"):
     model.eval()
     total_loss = 0
     total_mse = 0
@@ -231,23 +246,29 @@ def validate_model(model, criterion, val_loader, device='cpu'):
             num_samples += data.y.size(0)
             
             out = model(data.x, data.edge_index, batch=data.batch)
-            loss = criterion(out, torch.log(data.y))
+            
+            # Calculate the primary loss based on loss_type
+            if loss_type == "mse":
+                loss = criterion(out, torch.log(data.y))
+            elif loss_type == "qerror":
+                pred_y = torch.exp(out)
+                qerrors = calculate_qerror(pred_y, data.y)
+                loss = torch.mean(qerrors)
+            else:
+                raise ValueError(f"Unsupported loss type: {loss_type}")
+                
             total_loss += loss.item() * data.y.size(0)
             
-            # Calculate MSE between true y and predicted (exp(out))
+            # Always calculate both metrics regardless of loss type
             pred_y = torch.exp(out)
+            
+            # Calculate MSE
             mse = torch.mean((pred_y - data.y) ** 2)
             total_mse += mse.item() * data.y.size(0)
             
-            # Calculate q-error: max(true/pred, pred/true)
-            # Add small epsilon to avoid division by zero
-            epsilon = 1e-10
-            true_div_pred = data.y / (pred_y + epsilon)
-            pred_div_true = pred_y / (data.y + epsilon)
-            qerror = torch.maximum(true_div_pred, pred_div_true)
-            # Clamp extreme values to avoid skewing the mean
-            #qerror = torch.clamp(qerror, 0, 1000)  # Cap at 1000x error
-            qerror = torch.mean(qerror)
+            # Calculate q-error
+            qerrors = calculate_qerror(pred_y, data.y)
+            qerror = torch.mean(qerrors)
             total_qerror += qerror.item() * data.y.size(0)
 
     avg_loss = total_loss / num_samples
@@ -256,16 +277,124 @@ def validate_model(model, criterion, val_loader, device='cpu'):
     
     return avg_loss, avg_mse, avg_qerror
 
+
+class CostGNNv2(nn.Module):
+	def __init__(self, node_feature_dim, hidden_dim):
+		super(CostGNNv2, self).__init__()
+		
+		# Projection for first residual connection
+		self.projection = nn.Linear(node_feature_dim, hidden_dim)
+		
+		# Define MLPs for GINConv layers
+		self.mlp1 = nn.Sequential(
+			nn.Linear(node_feature_dim, hidden_dim),
+			nn.ReLU(),
+			nn.Linear(hidden_dim, hidden_dim)
+		)
+		
+		self.mlp2 = nn.Sequential(
+			nn.Linear(hidden_dim, hidden_dim),
+			nn.ReLU(),
+			nn.Linear(hidden_dim, hidden_dim)
+		)
+		
+		self.mlp3 = nn.Sequential(
+			nn.Linear(hidden_dim, hidden_dim),
+			nn.ReLU(),
+			nn.Linear(hidden_dim, hidden_dim)
+		)
+		
+		# GINConv layers for message passing
+		self.conv1 = GINConv(self.mlp1)
+		self.conv2 = GINConv(self.mlp2)
+		self.conv3 = GINConv(self.mlp3)
+		
+		# Layer normalization after each residual connection
+		self.layer_norm1 = nn.LayerNorm(hidden_dim)
+		self.layer_norm2 = nn.LayerNorm(hidden_dim)
+		self.layer_norm3 = nn.LayerNorm(hidden_dim)
+		
+		# Additional FC layers with nonlinearities
+		self.fc1 = nn.Linear(hidden_dim, hidden_dim // 2)
+		self.fc2 = nn.Linear(hidden_dim // 2, 1)
+		
+		# Dropout for regularization
+		self.dropout = nn.Dropout(0.2)
+
+	def forward(self, x, edge_index, edge_weight=None, batch=None):
+		# For the first layer, project input to match hidden_dim for residual
+		residual = self.projection(x)
+		
+		# First message passing layer
+		if edge_weight is not None:
+			x = self.conv1(x, edge_index, edge_weight=edge_weight)
+		else:
+			x = self.conv1(x, edge_index)
+		
+		# Add residual and apply layer norm
+		x = x + residual
+		x = self.layer_norm1(x)
+		x = F.relu(x)
+		x = self.dropout(x)
+		
+		# Second message passing layer with residual
+		residual = x
+		if edge_weight is not None:
+			x = self.conv2(x, edge_index, edge_weight=edge_weight)
+		else:
+			x = self.conv2(x, edge_index)
+		
+		# Add residual and apply layer norm
+		x = x + residual
+		x = self.layer_norm2(x)
+		x = F.relu(x)
+		x = self.dropout(x)
+		
+		# Third message passing layer with residual
+		residual = x
+		if edge_weight is not None:
+			x = self.conv3(x, edge_index, edge_weight=edge_weight)
+		else:
+			x = self.conv3(x, edge_index)
+		
+		# Add residual and apply layer norm
+		x = x + residual
+		x = self.layer_norm3(x)
+		x = F.relu(x)
+
+		# Global pooling
+		if batch is not None:
+			x = scatter(x, batch, dim=0, reduce='add')
+		else:
+			x = torch.sum(x, dim=0)
+		
+		# Apply FC layers with nonlinearities
+		x = self.fc1(x)
+		x = F.relu(x)
+		x = self.dropout(x)
+		cost = torch.abs(self.fc2(x))
+
+		return torch.squeeze(cost)
+
+
 if __name__ == "__main__":
     # Example of using the model with batch-loaded dataset
     dataset_dir = "dataset_stars_3"
+    use_single_file = True  # Flag to switch between dataset types
+    root_dir = "/home/tim/query_optimization/"
     
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Load dataset
-    dataset = QueryDataset(root=dataset_dir)
+    # Load dataset based on flag
+    if use_single_file:
+        dataset_dir = os.path.join(root_dir, "dataset_stars_3_single")  # Use the single file dataset directory
+        dataset = SingleFileQueryDataset(root=dataset_dir)
+        print(f"Using single-file dataset from {dataset_dir}")
+    else:
+        dataset = QueryDataset(root=dataset_dir)
+        print(f"Using regular dataset from {dataset_dir}")
     
     # Get total dataset size
     total_size = len(dataset)
@@ -274,7 +403,7 @@ if __name__ == "__main__":
     
     # Set train and validation sizes for experimentation
     # Make sure they don't exceed the total dataset size
-    train_size = 60000
+    train_size = 80000
     val_size = 10000
 
     print(f"Using {train_size} samples for training and {val_size} samples for validation")
@@ -286,11 +415,6 @@ if __name__ == "__main__":
     train_dataset = torch.utils.data.Subset(dataset, train_indices)
     val_dataset = torch.utils.data.Subset(dataset, val_indices)
     
-    # Deterministically use the first element of dataset for both train and validation
-    #train_dataset = torch.utils.data.Subset(dataset, [0])
-    #val_dataset = torch.utils.data.Subset(dataset, [0])
-    #val_dataset = train_dataset #todo: remove
-
     # Create data loaders
     batch_size = 32
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -301,30 +425,34 @@ if __name__ == "__main__":
     
     # Initialize model and move to device
     node_feature_dim = 307  # Based on the data format
-    hidden_dim = 64
-    model = CostGNN(node_feature_dim=node_feature_dim, hidden_dim=hidden_dim).to(device)
+    hidden_dim = 512
+    model = CostGNNv2(node_feature_dim=node_feature_dim, hidden_dim=hidden_dim).to(device)
     
     # Training setup
     learning_rate = 0.001
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
+    loss_type = "mse"  # Options: "mse" or "qerror"
 
     TRAIN = False
     
     # Train model
     if TRAIN:
-        train_model(model, optimizer, criterion, train_loader, val_loader, num_epochs=2000, device=device)
+        train_model(model, optimizer, criterion, train_loader, val_loader, 
+                   num_epochs=2000, device=device, 
+                   save_path=os.path.join(root_dir, "best_model_local.pt"),
+                   loss_type=loss_type)
 		
     script_dir = os.path.dirname(os.path.abspath(__file__))
     model_path = os.path.join(script_dir, "best_model.pt")
     model_path = os.path.join("best_model.pt")
 
-    model.load_state_dict(torch.load(model_path))
+    model.load_state_dict(torch.load(model_path, map_location=device))
 
     model.eval()
 
 
-    data = next(iter(DataLoader(train_dataset, batch_size=1024, shuffle=True)))
+    data = next(iter(DataLoader(val_dataset, batch_size=6000, shuffle=True)))
     y = torch.exp(model(data.x, data.edge_index, batch=data.batch))
     x = data.y
 

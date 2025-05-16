@@ -226,54 +226,38 @@ def create_datapoints(sparql_query: SPARQLQuery, rdf2vec_dict, counts_dict) -> L
     
     return results
 
-def save_sparql_queries(sparql_queries, output_dir):
-    """Save individual SPARQLQuery objects to files in the output directory"""
-    os.makedirs(output_dir, exist_ok=True)
+def save_sparql_queries_single_file(sparql_queries, output_file):
+    """Save all SPARQLQuery objects to a single pickle file"""
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
     
-    for i, query in enumerate(sparql_queries):
-        filename = os.path.join(output_dir, f'query_{i}.pkl')
-        with open(filename, 'wb') as f:
-            pickle.dump(query, f)
+    with open(output_file, 'wb') as f:
+        pickle.dump(sparql_queries, f)
     
-    print(f"Saved {len(sparql_queries)} SPARQLQuery objects to {output_dir}")
+    print(f"Saved {len(sparql_queries)} SPARQLQuery objects to {output_file}")
 
-def save_dataset(triples, torch_dataset, output_dir, clear_existing=False):
+def save_dataset_single_file(triples, torch_dataset, output_dir):
     """
-    Save dataset to disk for batch loading
+    Save dataset to a single file for batch loading
     
     Args:
         triples: List of triples data
         torch_dataset: PyTorch Geometric dataset
         output_dir: Directory to save the processed data
-        clear_existing: Whether to clear existing files in output_dir
     """
-    processed_dir = os.path.join(output_dir, 'processed')
-    
-    # Create directories if they don't exist
+    # Create directory if it doesn't exist
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
-    if not os.path.exists(processed_dir):
-        os.makedirs(processed_dir)
-    elif clear_existing:
-        # Clear existing files if requested
-        shutil.rmtree(processed_dir)
-        os.makedirs(processed_dir)
-    
-    # Save metadata
-    metadata = {
+    # Save metadata and dataset in one file
+    data = {
         'dataset_size': len(torch_dataset),
-        'triples': triples
+        'triples': triples,
+        'data': torch_dataset
     }
     
-    with open(os.path.join(output_dir, 'metadata.pkl'), 'wb') as f:
-        pickle.dump(metadata, f)
+    torch.save(data, os.path.join(output_dir, 'dataset.pt'))
     
-    # Save each data point individually
-    for i, data in enumerate(torch_dataset):
-        torch.save(data, os.path.join(processed_dir, f'data_{i}.pt'))
-    
-    print(f"Dataset saved to {output_dir}")
+    print(f"Dataset saved to {os.path.join(output_dir, 'dataset.pt')}")
     print(f"Total samples: {len(torch_dataset)}")
 
 if __name__ == "__main__":
@@ -287,8 +271,8 @@ if __name__ == "__main__":
     
     # Set paths
     input_file = "/home/tim/query_optimization/queries/Star_Queries.json"
-    dataset_dir = "dataset_stars_3"
-    sparql_queries_dir = "sparql_queries_3"
+    dataset_dir = "dataset_stars_3_single"
+    sparql_queries_file = "sparql_queries_3_single/queries.pkl"
     
     # Load the queries
     print(f"Loading queries from {input_file}...")
@@ -296,7 +280,7 @@ if __name__ == "__main__":
         queries = json.load(f)
     
     # Filter queries with exactly 3 triple patterns
-    queries_3tp = [q for q in queries if len(q["triples"]) == 3]
+    queries_3tp = [q for q in queries if len(q["triples"]) == 8]
     print(f"Found {len(queries_3tp)} queries with exactly 3 triple patterns")
     
     # Process queries
@@ -304,7 +288,7 @@ if __name__ == "__main__":
     all_triples = []
     all_torch_data = []
     
-    for i, query in enumerate(tqdm(queries_3tp[:300], desc="Processing queries")):  # Process first 10 queries for testing
+    for i, query in enumerate(tqdm(queries_3tp[:], desc="Processing queries")):  # Process first 300 queries as in original
         try:
             print(f"Processing query {i+1}/{len(queries_3tp)}")
             sparql_query = query_to_sparql_query(query, rdf2vec_dict, counts_dict)
@@ -332,28 +316,10 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error processing query {i}: {e}")
     
-    # Save SPARQLQuery objects
-    save_sparql_queries(sparql_queries, sparql_queries_dir)
+    # Save all SPARQLQuery objects to a single file
+    save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
     
-    # Save dataset for PyTorch Geometric
-    save_dataset(all_triples, all_torch_data, dataset_dir, clear_existing=True)
+    # Save dataset to a single file
+    save_dataset_single_file(all_triples, all_torch_data, dataset_dir)
     
-    # Test loading the dataset
-    print("\nTesting dataset loading...")
-    dataset = QueryDataset(root=dataset_dir)
-    print(f"Dataset size: {len(dataset)}")
-    
-    # Test batch loading
-    batch_size = 32
-    loader = DataLoader(dataset, batch_size=min(batch_size, len(dataset)), shuffle=True)
-    
-    print(f"\nLoading {len(loader)} batches with batch_size={batch_size}")
-    for i, batch in enumerate(loader):
-        if i == 0:
-            print(f"First batch shape: x={batch.x.shape}, edge_index={batch.edge_index.shape}")
-            print(f"First batch y: {batch.y[:5]}")
-        
-        if i >= 2:  # Just test a few batches
-            break
-    
-    print("\nDataset conversion and testing complete!") 
+    print("\nDataset conversion complete!") 

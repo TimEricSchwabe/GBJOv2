@@ -40,9 +40,9 @@ DROPOUT = 0.2  # Dropout rate
 LEARNING_RATE = 0.0005  # Learning rate for optimizer
 WEIGHT_DECAY = 1e-5  # Weight decay for optimizer
 TRAIN_SIZE = 80000  # Number of training samples
-VAL_SIZE = 1024  # Number of validation samples
-BATCH_SIZE = 1  # Batch size for training and validation
-TRAIN = True
+VAL_SIZE = 2048  # Number of validation samples
+BATCH_SIZE = 32  # Batch size for training and validation
+TRAIN = False
 DIRECTED = False  # If True, use directed graph. If False, convert to undirected
 
 # Cost scaling configuration
@@ -483,7 +483,7 @@ def validate_model(model, criterion, val_loader, device='cpu', walk_length=12,
 
 if __name__ == "__main__":
     # Example of using the model with batch-loaded dataset
-    dataset_dir = "dataset"
+    dataset_dir = "dataset_stars_3_old"
     
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -509,9 +509,9 @@ if __name__ == "__main__":
     val_indices = list(range(total_size - val_size, total_size))
     train_dataset = torch.utils.data.Subset(dataset, train_indices)
     val_dataset = torch.utils.data.Subset(dataset, val_indices)
-    train_dataset = torch.utils.data.Subset(dataset, [0])
+    #train_dataset = torch.utils.data.Subset(dataset, [0])
     #val_dataset = torch.utils.data.Subset(dataset, [0])
-    val_dataset = train_dataset #todo: remove
+    #val_dataset = train_dataset #todo: remove
     
     # Create data loaders
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)

@@ -178,13 +178,13 @@ if __name__ == "__main__":
     num_edges = edge_index.size(1)
 
     # Initialize edge weights as learnable parameters
-    #edge_weights = torch.full((num_edges,), 0.5, requires_grad=True, device='cpu')
-    edge_weights = torch.tensor(0.5 + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device='cpu')
+    edge_weights = torch.full((num_edges,), 0.5, requires_grad=True, device='cpu')
+    #edge_weights = torch.tensor(0.5 + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device='cpu')
     # ╰─▶ value for each of edge in possible_edges
 
     # We optimize the adjacency weights using adam optimizer
-    optimizer_opt = optim.Adam([edge_weights], lr=0.1)
-    OPTIMIZATION_STEPS = 1000
+    optimizer_opt = optim.Adam([edge_weights], lr=0.001)
+    OPTIMIZATION_STEPS = 2000
 
     # Define penalty coefficients
     lambda_acyclic = 1000.0  # For acyclicity penalty
@@ -278,8 +278,8 @@ if __name__ == "__main__":
                             (1 - weights) * torch.log(1 - weights + epsilon)) * temperature
         
         # Use annealing temperature that decreases over time to encourage more binary decisions
-        temperature = max(0.5, 10.0 * (1.0 - step / OPTIMIZATION_STEPS))
-        #temperature = 0.5
+        #temperature = max(0.5, 10.0 * (1.0 - step / OPTIMIZATION_STEPS))
+        temperature = 1 #todo
 
         # Initialize penalties
         P_triple_entropy = torch.tensor(0.0, device=A.device)
@@ -357,8 +357,11 @@ if __name__ == "__main__":
                         
 
         # Total loss is predicted cost + penalties
-        loss = loss + 0.01 * total_penalty
-        #loss = total_penalty
+        #if step > 500:
+        if True:
+            loss = loss + 0.01 * total_penalty
+        else:
+            loss = loss
 
         # Here we calculcate the gradient of loss with respect to A and then perform a gradient descent step
         loss.backward()
@@ -432,66 +435,66 @@ if __name__ == "__main__":
     print("Final Adjacency Matrix:")
     print(final_adjacency.numpy())
 
-    # # Convert the original test datapoint edge_index to adjacency matrix and visualize it
+    # Convert the original test datapoint edge_index to adjacency matrix and visualize it
     # print("\nVisualizing the original (ground truth) query plan:")
     # original_edge_index = test_datapoint.edge_index
     # original_adjacency = torch.zeros((N_NODES, N_NODES))
     # original_adjacency[original_edge_index[0], original_edge_index[1]] = 1.0
     # visualize_adjacency_matrix(original_adjacency, triples_num, use_tree_layout=True)
 
-    # # Plot the individual penalties over time
-    # plt.figure(figsize=(12, 8))
-    # plt.plot(triple_in_penalties, label='Triple In Penalty')
-    # plt.plot(triple_out_penalties, label='Triple Out Penalty')
-    # plt.plot(join_in_penalties, label='Join In Penalty')
-    # plt.plot(join_out_penalties, label='Join Out Penalty')
-    # plt.plot(acyclic_penalties, label='Acyclicity Penalty')
-    # plt.plot(entropy_penalties, label='Entropy Penalty')
-    # plt.plot(l1_penalties, label='L1 Penalty')
-    # plt.xlabel('Optimization Steps')
-    # plt.ylabel('Raw Penalty Value')
-    # plt.title('Individual Penalties During Optimization')
-    # plt.legend()
-    # plt.grid(True, alpha=0.3)
-    # plt.tight_layout()
-    # plt.show()
+    # Plot the individual penalties over time
+    plt.figure(figsize=(12, 8))
+    plt.plot(triple_in_penalties, label='Triple In Penalty')
+    plt.plot(triple_out_penalties, label='Triple Out Penalty')
+    plt.plot(join_in_penalties, label='Join In Penalty')
+    plt.plot(join_out_penalties, label='Join Out Penalty')
+    plt.plot(acyclic_penalties, label='Acyclicity Penalty')
+    plt.plot(entropy_penalties, label='Entropy Penalty')
+    plt.plot(l1_penalties, label='L1 Penalty')
+    plt.xlabel('Optimization Steps')
+    plt.ylabel('Raw Penalty Value')
+    plt.title('Individual Penalties During Optimization')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
 
-    # # Plot each penalty on separate subplots for better visibility
-    # fig, axes = plt.subplots(8, 1, figsize=(12, 20), sharex=True)
+    # Plot each penalty on separate subplots for better visibility
+    fig, axes = plt.subplots(8, 1, figsize=(12, 20), sharex=True)
 
-    # axes[0].plot(triple_in_penalties, color='blue')
-    # axes[0].set_title('Triple In Penalty')
-    # axes[0].grid(True, alpha=0.3)
+    axes[0].plot(triple_in_penalties, color='blue')
+    axes[0].set_title('Triple In Penalty')
+    axes[0].grid(True, alpha=0.3)
 
-    # axes[1].plot(triple_out_penalties, color='green')
-    # axes[1].set_title('Triple Out Penalty')
-    # axes[1].grid(True, alpha=0.3)
+    axes[1].plot(triple_out_penalties, color='green')
+    axes[1].set_title('Triple Out Penalty')
+    axes[1].grid(True, alpha=0.3)
 
-    # axes[2].plot(join_in_penalties, color='red')
-    # axes[2].set_title('Join In Penalty')
-    # axes[2].grid(True, alpha=0.3)
+    axes[2].plot(join_in_penalties, color='red')
+    axes[2].set_title('Join In Penalty')
+    axes[2].grid(True, alpha=0.3)
 
-    # axes[3].plot(join_out_penalties, color='purple')
-    # axes[3].set_title('Join Out Penalty')
-    # axes[3].grid(True, alpha=0.3)
+    axes[3].plot(join_out_penalties, color='purple')
+    axes[3].set_title('Join Out Penalty')
+    axes[3].grid(True, alpha=0.3)
 
-    # axes[4].plot(acyclic_penalties, color='orange')
-    # axes[4].set_title('Acyclicity Penalty')
-    # axes[4].grid(True, alpha=0.3)
+    axes[4].plot(acyclic_penalties, color='orange')
+    axes[4].set_title('Acyclicity Penalty')
+    axes[4].grid(True, alpha=0.3)
 
-    # axes[5].plot(entropy_penalties, color='brown')
-    # axes[5].set_title('Entropy Penalty')
-    # axes[5].grid(True, alpha=0.3)
+    axes[5].plot(entropy_penalties, color='brown')
+    axes[5].set_title('Entropy Penalty')
+    axes[5].grid(True, alpha=0.3)
 
-    # axes[6].plot(l1_penalties, color='pink')
-    # axes[6].set_title('L1 Penalty')
-    # axes[6].grid(True, alpha=0.3)
+    axes[6].plot(l1_penalties, color='pink')
+    axes[6].set_title('L1 Penalty')
+    axes[6].grid(True, alpha=0.3)
 
-    # # Add a subplot for the total penalty
-    # axes[7].plot(total_costs_during_optimization, color='black', linewidth=2)
-    # axes[7].set_title('Total Penalty')
-    # axes[7].grid(True, alpha=0.3)
-    # axes[7].set_xlabel('Optimization Steps')
+    # Add a subplot for the total penalty
+    axes[7].plot(total_costs_during_optimization, color='black', linewidth=2)
+    axes[7].set_title('Total Penalty')
+    axes[7].grid(True, alpha=0.3)
+    axes[7].set_xlabel('Optimization Steps')
 
     plt.tight_layout()
     plt.show()
