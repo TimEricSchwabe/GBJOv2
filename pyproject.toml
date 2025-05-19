@@ -11,6 +11,7 @@ dependencies = [
     "networkx>=2.5.1",
     "numpy<2.0",
     "pyrdf2vec>=0.2.3",
+    "ray>=2.46.0",
     "torch==1.13.1",
     "torch-geometric>=2.6.1",
 ]
