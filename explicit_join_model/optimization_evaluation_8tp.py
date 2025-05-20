@@ -10,10 +10,10 @@ from typing import List, Dict, Tuple
 
 from data import Triple, Join, Query, Entity
 from model import CostGNNv2
-from process_8_tp_dataset_single_file import SPARQLQuery
+from explicit_join_model.process_dataset_single_file import SPARQLQuery
 
 
-def load_sparql_queries(queries_file: str, num_queries: None):
+def load_sparql_queries(queries_file: str, num_queries):
     """
     Load all the SPARQL query objects from the given file.
     
@@ -28,7 +28,7 @@ def load_sparql_queries(queries_file: str, num_queries: None):
     
     if num_queries is not None:
         print(f"Loaded {num_queries} SPARQL queries from {queries_file}")
-        return sparql_queries[:num_queries]
+        return sparql_queries[-num_queries:]
     print(f"Loaded {len(sparql_queries)} SPARQL queries from {queries_file}")
     return sparql_queries
 
@@ -68,7 +68,7 @@ def optimize_query(query_data, model, device='cpu', optimization_steps=500, verb
     edge_weights = torch.tensor(0.5 + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device=device)
     
     # Set up optimizer - use LBFGS instead of Adam
-    optimizer_opt = optim.LBFGS([edge_weights], lr=0.1, max_iter=20, line_search_fn='strong_wolfe')
+    optimizer_opt = optim.AdamW([edge_weights], lr=0.01)
     
     # Define penalty coefficients
     lambda_acyclic = 1000.0
@@ -76,7 +76,7 @@ def optimize_query(query_data, model, device='cpu', optimization_steps=500, verb
     lambda_triple_out = 1000.0
     lambda_join_in = 500.0
     lambda_join_out = 1000.0
-    lambda_entropy = 100.0
+    lambda_entropy = 100.0 #100
     
     # Tracking metrics for plotting
     cost_history = []
@@ -88,109 +88,96 @@ def optimize_query(query_data, model, device='cpu', optimization_steps=500, verb
     join_out_penalty_history = []
     entropy_penalty_history = []
     
-    # Entropy penalty function
-    def entropy_penalty(weights, temperature=1.0):
-        epsilon = 1e-10
-        return -torch.sum(weights * torch.log(weights + epsilon) + 
-                        (1 - weights) * torch.log(1 - weights + epsilon)) * temperature
-    
-    # Optimization loop for LBFGS
+    # Optimization loop
     for step in range(optimization_steps):
-        # Define closure function for LBFGS
-        def closure():
-            optimizer_opt.zero_grad()
-            
-            # Get cost prediction from model
-            cost_pred = model(test_datapoint.x, edge_index, edge_weight=edge_weights)
-            
-            # Convert edge weights to adjacency matrix
-            A = torch.zeros((N_NODES, N_NODES), device=device)
-            A[edge_index[0], edge_index[1]] = edge_weights
-            
-            # Calculate in-degree and out-degree for all nodes
-            in_degree = torch.sum(A, dim=0)
-            out_degree = torch.sum(A, dim=1)
-            
-            # Split nodes into triple and join nodes
-            triple_nodes_indices = torch.arange(triples_num, device=device)
-            join_nodes_indices = torch.arange(triples_num, N_NODES, device=device)
-            
-            # Structural penalties
-            P_triple_in = torch.sum(torch.square(in_degree[triple_nodes_indices]))
-            P_triple_out = torch.sum(torch.square(out_degree[triple_nodes_indices] - 1.0))
-            P_join_in = torch.sum(torch.square(in_degree[join_nodes_indices] - 2.0))
-            
-            # Root node (last join node) has no outgoing edges, others have one
-            root_index = N_NODES - 1
-            non_root_join_indices = torch.arange(triples_num, root_index, device=device)
-            P_join_out = torch.sum(torch.square(out_degree[non_root_join_indices] - 1.0)) + \
-                        torch.square(out_degree[root_index])
-            
-            # Acyclicity penalty
-            trace_exp = torch.trace(torch.matrix_exp(A)) - N_NODES
-            P_acyclic = trace_exp
-            
-            # Use fixed temperature
-            temperature = 1.0
-            
-            # Compute entropy penalties
-            P_entropy = torch.tensor(0.0, device=device)
-            for i in range(N_NODES):
-                weights = A[i, :]
-                mask = weights > 0.01
-                if torch.any(mask):
-                    P_entropy += entropy_penalty(weights[mask], temperature)
-            
-            # Total penalty
-            total_penalty = lambda_acyclic * P_acyclic + \
-                            lambda_triple_in * P_triple_in + \
-                            lambda_triple_out * P_triple_out + \
-                            lambda_join_in * P_join_in + \
-                            lambda_join_out * P_join_out + \
-                            lambda_entropy * P_entropy
-            
-            # Total loss
-            loss = cost_pred + 0.1 * total_penalty
-            
-            # Backward pass
-            loss.backward()
-            
-            # Store metrics for this step (outside of history to avoid duplicating)
-            closure.cost_pred = cost_pred.item()
-            closure.total_penalty = total_penalty.item()
-            closure.P_acyclic = P_acyclic.item()
-            closure.P_triple_in = P_triple_in.item()
-            closure.P_triple_out = P_triple_out.item()
-            closure.P_join_in = P_join_in.item()
-            closure.P_join_out = P_join_out.item()
-            closure.P_entropy = P_entropy.item()
-            
-            return loss
+        optimizer_opt.zero_grad()
         
-        # Perform optimization step
-        optimizer_opt.step(closure)
+        # Get cost prediction from model
+        cost_pred = model(test_datapoint.x, edge_index, edge_weight=edge_weights)
+        
+        # Convert edge weights to adjacency matrix
+        A = torch.zeros((N_NODES, N_NODES), device=device)
+        A[edge_index[0], edge_index[1]] = edge_weights
+        
+        # Calculate in-degree and out-degree for all nodes
+        in_degree = torch.sum(A, dim=0)
+        out_degree = torch.sum(A, dim=1)
+        
+        # Split nodes into triple and join nodes
+        triple_nodes_indices = torch.arange(triples_num, device=device)
+        join_nodes_indices = torch.arange(triples_num, N_NODES, device=device)
+        
+        # Structural penalties
+        P_triple_in = torch.sum(torch.square(in_degree[triple_nodes_indices]))
+        P_triple_out = torch.sum(torch.square(out_degree[triple_nodes_indices] - 1.0))
+        P_join_in = torch.sum(torch.square(in_degree[join_nodes_indices] - 2.0))
+        
+        # Root node (last join node) has no outgoing edges, others have one
+        root_index = N_NODES - 1
+        non_root_join_indices = torch.arange(triples_num, root_index, device=device)
+        P_join_out = torch.sum(torch.square(out_degree[non_root_join_indices] - 1.0)) + \
+                    torch.square(out_degree[root_index])
+        
+        # Acyclicity penalty
+        trace_exp = torch.trace(torch.matrix_exp(A)) - N_NODES
+        P_acyclic = trace_exp
+        #P_acyclic = torch.tensor(0.0, device=device)
+        
+        # Entropy penalty for binary decisions
+        def entropy_penalty(weights, temperature=1.0):
+            epsilon = 1e-10
+            return -torch.sum(weights * torch.log(weights + epsilon) + 
+                            (1 - weights) * torch.log(1 - weights + epsilon)) * temperature
+        
+        # Use fixed temperature
+        temperature = 1.0 #exponential increase
+        
+        # Compute entropy penalties
+        P_entropy = torch.tensor(0.0, device=device)
+        for i in range(N_NODES):
+            weights = A[i, :]
+            mask = weights > 0.01
+            if torch.any(mask):
+                P_entropy += entropy_penalty(weights[mask], temperature)
+        
+        # Total penalty
+        total_penalty = lambda_triple_in * P_triple_in + \
+                        lambda_triple_out * P_triple_out + \
+                        lambda_join_in * P_join_in + \
+                        lambda_join_out * P_join_out + \
+                        lambda_entropy * P_entropy + \
+                        lambda_acyclic * P_acyclic
+        
+        # Total loss
+        lambda_total_penalty = 1.0
+        #if step < 4000:
+        #    loss = cost_pred
+        #else:
+        loss = cost_pred + lambda_total_penalty * total_penalty
+        
+        # Track metrics for plotting
+        cost_history.append(cost_pred.item())
+        total_penalty_history.append(total_penalty.item())
+        acyclic_penalty_history.append(P_acyclic.item())
+        triple_in_penalty_history.append(P_triple_in.item())
+        triple_out_penalty_history.append(P_triple_out.item())
+        join_in_penalty_history.append(P_join_in.item())
+        join_out_penalty_history.append(P_join_out.item())
+        entropy_penalty_history.append(P_entropy.item())
+        
+        # Backward pass and optimization step
+        loss.backward()
+        optimizer_opt.step()
         
         # Clamp edge weights to [0,1]
         with torch.no_grad():
             edge_weights.clamp_(0, 1)
-        
-        # Record metrics
-        cost_history.append(closure.cost_pred)
-        total_penalty_history.append(closure.total_penalty)
-        acyclic_penalty_history.append(closure.P_acyclic)
-        triple_in_penalty_history.append(closure.P_triple_in)
-        triple_out_penalty_history.append(closure.P_triple_out)
-        join_in_penalty_history.append(closure.P_join_in)
-        join_out_penalty_history.append(closure.P_join_out)
-        entropy_penalty_history.append(closure.P_entropy)
-        
+            
         if verbose and (step + 1) % 100 == 0:
-            print(f'Step {step+1}/{optimization_steps}, Cost: {closure.cost_pred:.2f}, Penalty: {closure.total_penalty:.2f}')
-    
-    # Convert edge weights to final adjacency matrix
-    with torch.no_grad():
-        final_adjacency = torch.zeros((N_NODES, N_NODES), device=device)
-        final_adjacency[edge_index[0], edge_index[1]] = edge_weights
+            print(f'Step {step+1}/{optimization_steps}, Cost: {cost_pred.item():.2f}, Penalty: {total_penalty.item():.2f}')
+
+    # Final adjacency matrix
+    final_adjacency = A.detach().clone()
     
     # Threshold to get binary decisions
     final_adjacency[final_adjacency < 0.5] = 0.0
@@ -619,6 +606,10 @@ def plot_statistics(stats, show_plots=True, suffix=""):
     plt.title('Gradient vs Greedy Optimization Cost Comparison')
     plt.grid(alpha=0.3)
     
+    # Set both axes to logarithmic scale
+    plt.xscale('log')
+    plt.yscale('log')
+    
     # Add annotations for points far from the line
     for i in range(len(gradient_costs)):
         ratio = greedy_costs[i] / gradient_costs[i] if gradient_costs[i] > 0 else 0
@@ -633,6 +624,122 @@ def plot_statistics(stats, show_plots=True, suffix=""):
         plt.show()
     else:
         plt.close()
+    
+    # Plot scatter of gradient vs random costs (new)
+    plt.figure(figsize=(10, 8))
+    plt.scatter(gradient_costs, random_costs, alpha=0.7, s=70, c='orange', edgecolors='black')
+    
+    # Add 45-degree line (y=x)
+    max_val = max(np.max(gradient_costs), np.max(random_costs))
+    min_val = min(np.min(gradient_costs), np.min(random_costs))
+    # Add some padding to the line
+    line_min = min_val * 0.9
+    line_max = max_val * 1.1
+    plt.plot([line_min, line_max], [line_min, line_max], 'k--', alpha=0.7)
+    
+    plt.xlabel('Gradient-Based Optimization Cost')
+    plt.ylabel('Random Plan Cost')
+    plt.title('Gradient vs Random Plan Cost Comparison')
+    plt.grid(alpha=0.3)
+    
+    # Set both axes to logarithmic scale
+    plt.xscale('log')
+    plt.yscale('log')
+    
+    # Add annotations for points far from the line
+    for i in range(len(gradient_costs)):
+        ratio = random_costs[i] / gradient_costs[i] if gradient_costs[i] > 0 else 0
+        # Annotate points where one method is significantly better
+        if ratio > 2 or ratio < 0.5:
+            plt.annotate(f"Q{i}", (gradient_costs[i], random_costs[i]), 
+                         xytext=(5, 5), textcoords='offset points')
+    
+    plt.tight_layout()
+    plt.savefig(f'gradient_vs_random.png')
+    if show_plots:
+        plt.show()
+    else:
+        plt.close()
+
+
+def count_triples_in_plan(plan):
+    """
+    Count the number of triple patterns in a query plan.
+    
+    Args:
+        plan: Query object representing a join plan
+        
+    Returns:
+        int: The number of triple patterns in the plan
+    """
+    def traverse_count(node):
+        if isinstance(node, Triple):
+            return 1
+        elif isinstance(node, Join):
+            return traverse_count(node.left) + traverse_count(node.right)
+        else:
+            return 0
+    
+    return traverse_count(plan.root)
+
+
+def collect_triples_in_plan(plan):
+    """
+    Collect all triple patterns in a query plan.
+    
+    Args:
+        plan: Query object representing a join plan
+        
+    Returns:
+        list: All triple patterns in the plan
+    """
+    triples = []
+    
+    def traverse_collect(node):
+        if isinstance(node, Triple):
+            triples.append(node)
+        elif isinstance(node, Join):
+            traverse_collect(node.left)
+            traverse_collect(node.right)
+    
+    traverse_collect(plan.root)
+    return triples
+
+
+def validate_plan(plan, expected_triples):
+    """
+    Validate that a query plan contains all expected triple patterns.
+    
+    Args:
+        plan: Query object representing a join plan
+        expected_triples: List of Triple objects that should be in the plan
+        
+    Returns:
+        tuple: (is_valid, message) 
+               where is_valid is a boolean and message is a description of any issues
+    """
+    # Check if the plan has the right number of triples
+    triples_in_plan = collect_triples_in_plan(plan)
+    
+    if len(triples_in_plan) != len(expected_triples):
+        return False, f"Plan has {len(triples_in_plan)} triples but expected {len(expected_triples)}"
+    
+    # Check if all expected triples are in the plan
+    # Create a simple string representation for comparison
+    plan_triple_strs = set(str(t) for t in triples_in_plan)
+    expected_triple_strs = set(str(t) for t in expected_triples)
+    
+    if plan_triple_strs != expected_triple_strs:
+        missing = expected_triple_strs - plan_triple_strs
+        extra = plan_triple_strs - expected_triple_strs
+        message = ""
+        if missing:
+            message += f"Missing triples: {missing}"
+        if extra:
+            message += f"Unexpected triples: {extra}"
+        return False, message
+    
+    return True, "Plan is valid"
 
 
 def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimization_steps=500, verbose=False):
@@ -695,16 +802,24 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             # Convert adjacency to query plan
             gradient_plan = adjacency_to_query_with_real_triples(final_adjacency, triples_num, triple_objs)
             
+            # Validate that the plan contains all expected triple patterns
+            is_valid, validation_msg = validate_plan(gradient_plan, triple_objs)
+            if not is_valid:
+                print(f"Warning: Invalid gradient plan for query {i}: {validation_msg}")
+                print("Skipping this query")
+                continue
+            
             # Calculate the actual cost using the get_cost method
             gradient_cost = gradient_plan.root.get_cost()
             gradient_costs.append(gradient_cost)
+
+            # Create visualization directory if it doesn't exist
+            visualization_dir = "plan_visualizations"
+            os.makedirs(visualization_dir, exist_ok=True)
+            gradient_plan.visualize(output_file=f"{visualization_dir}/gradient_plan_query_{i}")
             
             if verbose:
                 print(f"Gradient optimization complete. Final cost: {gradient_cost}")
-                # Visualize the plan if verbose
-                visualization_dir = "plan_visualizations"
-                os.makedirs(visualization_dir, exist_ok=True)
-                gradient_plan.visualize(output_file=f"{visualization_dir}/gradient_plan_query_{i}")
                 print(f"Saved gradient plan visualization to {visualization_dir}/gradient_plan_query_{i}.png")
                 
         except Exception as e:
@@ -720,6 +835,13 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             greedy_plan = greedy_optimize_query(
                 torch_data, model, triple_objs, device, verbose=verbose
             )
+            
+            # Validate that the plan contains all expected triple patterns
+            is_valid, validation_msg = validate_plan(greedy_plan, triple_objs)
+            if not is_valid:
+                print(f"Warning: Invalid greedy plan for query {i}: {validation_msg}")
+                greedy_costs.append(float('inf'))
+                continue
             
             # Calculate the actual cost
             greedy_cost = greedy_plan.root.get_cost()
@@ -744,6 +866,13 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
                 print(f"\nCreating random plan for query {i}")
                 
             random_plan = random_join_plan(triple_objs, seed=i)
+            
+            # Validate that the plan contains all expected triple patterns
+            is_valid, validation_msg = validate_plan(random_plan, triple_objs)
+            if not is_valid:
+                print(f"Warning: Invalid random plan for query {i}: {validation_msg}")
+                random_costs.append(float('inf'))
+                continue
             
             # Calculate the actual cost
             random_cost = random_plan.root.get_cost()
@@ -796,7 +925,7 @@ if __name__ == "__main__":
     # Set paths
     queries_file = "sparql_queries_8_single/queries.pkl"
     model_path = "/home/tim/query_optimization/8tp_v3.pt"
-    num_queries = 50  # Adjust as needed
+    num_queries = 500  # Adjust as needed
     
     # Load queries
     sparql_queries = load_sparql_queries(queries_file, num_queries)
@@ -809,9 +938,9 @@ if __name__ == "__main__":
         sparql_queries, 
         model_path,
         num_queries=num_queries,  # Set to None to evaluate all queries
-        optimization_steps=4000,  # Adjust number of steps as needed
+        optimization_steps=5000,  # Adjust number of steps as needed
         verbose=verbose  # Pass the verbose flag
     )
     
     # Plot final statistics with display
-    plot_statistics(stats, show_plots=True) 
+    plot_statistics(stats, show_plots=True)

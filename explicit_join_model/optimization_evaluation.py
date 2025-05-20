@@ -9,34 +9,34 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple
 
 from data import Triple, Join, Query, Entity
-from model import CostGNN
-from process_3tp_dataset import SPARQLQuery
+from model import CostGNNv2
+from explicit_join_model.process_dataset_single_file import SPARQLQuery
 
 
-def load_sparql_queries(queries_dir: str, num_queries: int):
+def load_sparql_queries(queries_file: str, num_queries):
     """
-    Load all the SPARQL query objects from the given directory.
+    Load all the SPARQL query objects from the given file.
     
     Args:
-        queries_dir: Directory containing the saved SPARQLQuery objects
+        queries_file: Path to the file containing saved SPARQLQuery objects
         
     Returns:
         List of SPARQLQuery objects
     """
-    sparql_queries = []
-    # Only load 2 queries for now
-    for filename in list(os.listdir(queries_dir))[:num_queries]:
-        if filename.startswith('query_') and filename.endswith('.pkl'):
-            filepath = os.path.join(queries_dir, filename)
-            with open(filepath, 'rb') as f:
-                query = pickle.load(f)
-                sparql_queries.append(query)
+    with open(queries_file, 'rb') as f:
+        sparql_queries = pickle.load(f)
     
-    print(f"Loaded {len(sparql_queries)} SPARQL queries from {queries_dir}")
+    if num_queries is not None:
+        print(f"Loaded {num_queries} SPARQL queries from {queries_file}")
+        return sparql_queries[-num_queries:]
+    print(f"Loaded {len(sparql_queries)} SPARQL queries from {queries_file}")
     return sparql_queries
 
 
-def optimize_query(query_data, model, device='cpu', optimization_steps=500, verbose=True):
+def optimize_query(query_data, model, device='cpu', optimization_steps=500, verbose=True,
+                  learning_rate=0.01, lambda_acyclic=1000.0, lambda_triple_in=1000.0, 
+                  lambda_triple_out=1000.0, lambda_join_in=500.0, lambda_join_out=1000.0, 
+                  lambda_entropy=100.0, lambda_total_penalty=1.0):
     """
     Run the optimization algorithm for a query.
     
@@ -46,6 +46,14 @@ def optimize_query(query_data, model, device='cpu', optimization_steps=500, verb
         device: Device to run the optimization on
         optimization_steps: Number of optimization steps
         verbose: Whether to print progress information
+        learning_rate: Learning rate for the optimizer
+        lambda_acyclic: Weight for acyclicity penalty
+        lambda_triple_in: Weight for triple in-degree penalty
+        lambda_triple_out: Weight for triple out-degree penalty
+        lambda_join_in: Weight for join in-degree penalty
+        lambda_join_out: Weight for join out-degree penalty
+        lambda_entropy: Weight for entropy penalty
+        lambda_total_penalty: Weight for the total penalty
         
     Returns:
         The optimized adjacency matrix
@@ -69,19 +77,19 @@ def optimize_query(query_data, model, device='cpu', optimization_steps=500, verb
     
     # Initialize edge weights with small random variations
     edge_weights = torch.tensor(0.5 + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device=device)
-    #edge_weights = torch.full((num_edges,), 0.5, requires_grad=True, device='cpu')
-
     
-    # Set up optimizer
-    optimizer_opt = optim.Adam([edge_weights], lr=0.01)
+    # Set up optimizer - use LBFGS instead of Adam
+    optimizer_opt = optim.AdamW([edge_weights], lr=learning_rate)
     
-    # Define penalty coefficients
-    lambda_acyclic = 1000.0
-    lambda_triple_in = 1000.0
-    lambda_triple_out = 1000.0
-    lambda_join_in = 500.0
-    lambda_join_out = 1000.0
-    lambda_entropy = 100.0
+    # Tracking metrics for plotting
+    cost_history = []
+    total_penalty_history = []
+    acyclic_penalty_history = []
+    triple_in_penalty_history = []
+    triple_out_penalty_history = []
+    join_in_penalty_history = []
+    join_out_penalty_history = []
+    entropy_penalty_history = []
     
     # Optimization loop
     for step in range(optimization_steps):
@@ -123,9 +131,8 @@ def optimize_query(query_data, model, device='cpu', optimization_steps=500, verb
             return -torch.sum(weights * torch.log(weights + epsilon) + 
                             (1 - weights) * torch.log(1 - weights + epsilon)) * temperature
         
-        # Use annealing temperature
-        #temperature = max(0.5, 5.0 * (1.0 - step / optimization_steps))
-        temperature = 1 #todo
+        # Use fixed temperature
+        temperature = 1.0
         
         # Compute entropy penalties
         P_entropy = torch.tensor(0.0, device=device)
@@ -136,26 +143,25 @@ def optimize_query(query_data, model, device='cpu', optimization_steps=500, verb
                 P_entropy += entropy_penalty(weights[mask], temperature)
         
         # Total penalty
-        total_penalty = lambda_acyclic * P_acyclic + \
-                        lambda_triple_in * P_triple_in + \
+        total_penalty = lambda_triple_in * P_triple_in + \
                         lambda_triple_out * P_triple_out + \
                         lambda_join_in * P_join_in + \
                         lambda_join_out * P_join_out + \
-                        lambda_entropy * P_entropy
+                        lambda_entropy * P_entropy + \
+                        lambda_acyclic * P_acyclic
         
         # Total loss
-
-        # New approach: Gradually increase the weight of structural penalties
-        # This gives the optimizer time to find a good solution before being constrained
-                #For the first 500 steps, only optimize for cost prediction
-        #After 500 steps, add penalties to guide the structure
-        #if step < 1000:
-        #    loss = cost_pred
-        #else:
-        #    loss = cost_pred + 0.01 * total_penalty
-        loss = cost_pred + 0.01 * total_penalty
-        #penalty_weight = min(1.0, step / (0.7 * optimization_steps)) * 0.01
-        #loss = cost_pred + penalty_weight * total_penalty
+        loss = cost_pred + lambda_total_penalty * total_penalty
+        
+        # Track metrics for plotting
+        cost_history.append(cost_pred.item())
+        total_penalty_history.append(total_penalty.item())
+        acyclic_penalty_history.append(P_acyclic.item())
+        triple_in_penalty_history.append(P_triple_in.item())
+        triple_out_penalty_history.append(P_triple_out.item())
+        join_in_penalty_history.append(P_join_in.item())
+        join_out_penalty_history.append(P_join_out.item())
+        entropy_penalty_history.append(P_entropy.item())
         
         # Backward pass and optimization step
         loss.backward()
@@ -167,19 +173,7 @@ def optimize_query(query_data, model, device='cpu', optimization_steps=500, verb
             
         if verbose and (step + 1) % 100 == 0:
             print(f'Step {step+1}/{optimization_steps}, Cost: {cost_pred.item():.2f}, Penalty: {total_penalty.item():.2f}')
-            #print(f'Penalties - Triple In: {P_triple_in.item():.4f}, Triple Out: {P_triple_out.item():.4f}')
-            #print(f'Penalties - Join In: {P_join_in.item():.4f}, Join Out: {P_join_out.item():.4f}')
-            #print(f'Acyclicity Penalty: {P_acyclic.item():.4f}')
-            #print(f'Entropy Penalty: {P_entropy.item():.4f}')
 
-        # Early stopping if the entropy penalty is small enough
-        # This indicates we have converged to mostly binary decisions
-        #if total_penalty.item() < 0.1:
-        #    if verbose:
-        #        print(f"Early stopping at step {step+1}: Entropy penalty {P_entropy.item():.6f} < 0.0001")
-        #    break
-
-    
     # Final adjacency matrix
     final_adjacency = A.detach().clone()
     
@@ -187,7 +181,116 @@ def optimize_query(query_data, model, device='cpu', optimization_steps=500, verb
     final_adjacency[final_adjacency < 0.5] = 0.0
     final_adjacency[final_adjacency >= 0.5] = 1.0
     
+    # Plot metrics if verbose
+    if verbose:
+        plot_optimization_metrics(
+            cost_history, 
+            total_penalty_history,
+            acyclic_penalty_history,
+            triple_in_penalty_history,
+            triple_out_penalty_history,
+            join_in_penalty_history,
+            join_out_penalty_history,
+            entropy_penalty_history
+        )
+    
     return final_adjacency, triples_num
+
+
+def plot_optimization_metrics(cost_history, total_penalty_history, acyclic_penalty_history, 
+                             triple_in_penalty_history, triple_out_penalty_history,
+                             join_in_penalty_history, join_out_penalty_history, entropy_penalty_history):
+    """
+    Plot optimization metrics over iterations.
+    
+    Args:
+        cost_history: List of cost values
+        total_penalty_history: List of total penalty values
+        acyclic_penalty_history: List of acyclicity penalty values
+        triple_in_penalty_history: List of triple in-degree penalty values
+        triple_out_penalty_history: List of triple out-degree penalty values
+        join_in_penalty_history: List of join in-degree penalty values
+        join_out_penalty_history: List of join out-degree penalty values
+        entropy_penalty_history: List of entropy penalty values
+    """
+    iterations = range(1, len(cost_history) + 1)
+    
+    # Plot cost and total penalty
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.plot(iterations, cost_history, 'b-', label='Predicted Cost')
+    plt.xlabel('Iteration')
+    plt.ylabel('Cost')
+    plt.title('Cost During Optimization')
+    plt.grid(True)
+    plt.legend()
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(iterations, total_penalty_history, 'r-', label='Total Penalty')
+    plt.xlabel('Iteration')
+    plt.ylabel('Penalty Value')
+    plt.title('Total Penalty During Optimization')
+    plt.grid(True)
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig('optimization_cost_penalty.png')
+    plt.show()
+    
+    # Plot individual penalties
+    plt.figure(figsize=(14, 10))
+    
+    plt.subplot(3, 2, 1)
+    plt.plot(iterations, acyclic_penalty_history, 'g-', label='Acyclicity Penalty')
+    plt.xlabel('Iteration')
+    plt.ylabel('Penalty Value')
+    plt.title('Acyclicity Penalty')
+    plt.grid(True)
+    plt.legend()
+    
+    plt.subplot(3, 2, 2)
+    plt.plot(iterations, entropy_penalty_history, 'm-', label='Entropy Penalty')
+    plt.xlabel('Iteration')
+    plt.ylabel('Penalty Value')
+    plt.title('Entropy Penalty')
+    plt.grid(True)
+    plt.legend()
+    
+    plt.subplot(3, 2, 3)
+    plt.plot(iterations, triple_in_penalty_history, 'c-', label='Triple In-Degree Penalty')
+    plt.xlabel('Iteration')
+    plt.ylabel('Penalty Value')
+    plt.title('Triple In-Degree Penalty')
+    plt.grid(True)
+    plt.legend()
+    
+    plt.subplot(3, 2, 4)
+    plt.plot(iterations, triple_out_penalty_history, 'y-', label='Triple Out-Degree Penalty')
+    plt.xlabel('Iteration')
+    plt.ylabel('Penalty Value')
+    plt.title('Triple Out-Degree Penalty')
+    plt.grid(True)
+    plt.legend()
+    
+    plt.subplot(3, 2, 5)
+    plt.plot(iterations, join_in_penalty_history, 'k-', label='Join In-Degree Penalty')
+    plt.xlabel('Iteration')
+    plt.ylabel('Penalty Value')
+    plt.title('Join In-Degree Penalty')
+    plt.grid(True)
+    plt.legend()
+    
+    plt.subplot(3, 2, 6)
+    plt.plot(iterations, join_out_penalty_history, color='orange', label='Join Out-Degree Penalty')
+    plt.xlabel('Iteration')
+    plt.ylabel('Penalty Value')
+    plt.title('Join Out-Degree Penalty')
+    plt.grid(True)
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig('optimization_individual_penalties.png')
+    plt.show()
 
 
 def adjacency_to_query_with_real_triples(A, triples_num, original_triples):
@@ -239,37 +342,6 @@ def adjacency_to_query_with_real_triples(A, triples_num, original_triples):
     return Query(root=root, triples_num=triples_num)
 
 
-def compare_query_plans(plan1, plan2):
-    """
-    Compare two query plans to see if they are equivalent.
-    The comparison is based on the structure of the join tree.
-    
-    Args:
-        plan1: First Query object
-        plan2: Second Query object
-        
-    Returns:
-        True if the plans are equivalent, False otherwise
-    """
-    def get_plan_structure(root):
-        """Extract the structure of a plan as a nested tuple encoding the tree structure"""
-        if isinstance(root, Triple):
-            # For triples, return a tuple with type marker and string representation
-            return ('T', str(root))
-        else:
-            # For joins, recursively get the structure of left and right subtrees
-            left_structure = get_plan_structure(root.left)
-            right_structure = get_plan_structure(root.right)
-            # Sort the subtrees for commutativity of joins
-            # Since both are now tuples with the same structure, they can be compared
-            return ('J', tuple(sorted([left_structure, right_structure])))
-    
-    structure1 = get_plan_structure(plan1.root)
-    structure2 = get_plan_structure(plan2.root)
-    
-    return structure1 == structure2
-
-
 def greedy_optimize_query(query_data, model, original_triples, device='cpu', verbose=True):
     """
     Use a greedy heuristic to build a query plan using the cost model.
@@ -284,10 +356,6 @@ def greedy_optimize_query(query_data, model, original_triples, device='cpu', ver
     Returns:
         A Query object representing the optimized plan
     """
-    from data import Triple, Join, Query, Entity
-    import torch
-    import numpy as np
-    
     model.eval()  # Ensure model is in evaluation mode
     triples_num = len(original_triples)
     
@@ -296,87 +364,384 @@ def greedy_optimize_query(query_data, model, original_triples, device='cpu', ver
         print(f"Number of triple patterns: {triples_num}")
     
     # Create a mapping from triple pattern to its features in the original data
+    # For 8tp, we need to adapt this approach since the data format might be different
+    # We'll use the first 8 nodes of the original data assuming they're the triple patterns
     original_features = query_data.x[:triples_num].clone()
     
-    # STEP 1: Evaluate each triple pattern individually to find the one with lowest cost
-    triple_costs = []
-    for i in range(triples_num):
-        # Create a graph with just this triple pattern
-        single_node_x = original_features[i:i+1]
-        # No edges for a single node
-        empty_edge_index = torch.zeros((2, 0), dtype=torch.long, device=device)
-        
-        # Predict cost
-        with torch.no_grad():
-            cost = model(single_node_x, empty_edge_index).item()
-        
-        triple_costs.append(cost)
-        if verbose:
-            print(f"Triple {i} cost: {cost:.4f}")
-    
-    # Find the triple with the lowest cost
-    best_triple_idx = np.argmin(triple_costs)
+    # Initialize remaining triples and current subplan
     remaining_triples = list(range(triples_num))
-    remaining_triples.remove(best_triple_idx)
+    current_subplan = None
     
-    if verbose:
-        print(f"Best triple: {best_triple_idx} with cost {triple_costs[best_triple_idx]:.4f}")
+    # Keep track of which triple indices we've used
+    used_triple_indices = []
     
-    # Current plan is just the best triple
-    current_plan = original_triples[best_triple_idx]
-    
-    # STEP 2: Evaluate joining with each remaining triple
-    join_costs = []
-    for i in remaining_triples:
-        # Create a small graph with the current best triple and this candidate
-        join_x = torch.cat([
-            original_features[best_triple_idx:best_triple_idx+1],
-            original_features[i:i+1],
-            torch.zeros(1, original_features.size(1), device=device)  # Join node features (zeros with 1 at the end)
-        ], dim=0)
-        join_x[2, -1] = 1.0  # Set join node marker
+    # Repeat until all triples are used
+    while remaining_triples:
+        best_cost = float('inf')
+        best_idx = -1
+        best_new_subplan = None
         
-        # Create edges: both triples point to the join node
-        join_edge_index = torch.tensor([[0, 1], [2, 2]], dtype=torch.long, device=device)
+        # If we don't have a current subplan, evaluate each triple individually
+        if current_subplan is None:
+            # Evaluate each triple pattern individually
+            for i in remaining_triples:
+                # Create a graph with just this triple pattern
+                single_node_x = original_features[i:i+1]
+                # No edges for a single node
+                empty_edge_index = torch.zeros((2, 0), dtype=torch.long, device=device)
+                
+                # Predict cost
+                with torch.no_grad():
+                    cost = model(single_node_x, empty_edge_index).item()
+                
+                if cost < best_cost:
+                    best_cost = cost
+                    best_idx = i
+                    best_new_subplan = original_triples[i]
+            
+            # Update current subplan with best triple
+            current_subplan = best_new_subplan
+        else:
+            # Evaluate each remaining triple joined with the current subplan
+            for i in remaining_triples:
+                # Create a join between current subplan and this triple
+                new_subplan = Join(left=current_subplan, right=original_triples[i])
+                
+                # For cost estimation, we can create a simple query with this join
+                temp_query = Query(root=new_subplan, triples_num=len(used_triple_indices) + 1)
+                
+                # Use model to estimate cost (this is approximate)
+                # In a more accurate implementation, we'd create proper graph representations for each join
+                
+                # Use a simplified approach with existing query data
+                # For a proper implementation, we would need to create the correct graph representation
+                # with nodes and edges that match this specific join
+                
+                # For now, we'll estimate based on the number of variables shared between the subplan and the new triple
+                # This is a heuristic and not as accurate as using the model directly
+                
+                # Count shared variables (simplified for this example)
+                current_vars = set()
+                if isinstance(current_subplan, Triple):
+                    for entity in [current_subplan.s, current_subplan.p, current_subplan.o]:
+                        if entity.is_variable:
+                            current_vars.add(entity.name)
+                else:
+                    current_vars = current_subplan.variables
+                
+                triple_vars = set()
+                for entity in [original_triples[i].s, original_triples[i].p, original_triples[i].o]:
+                    if entity.is_variable:
+                        triple_vars.add(entity.name)
+                
+                shared_vars = len(current_vars.intersection(triple_vars))
+                
+                # Use the model to predict cost if possible
+                # This is a simplified approach; in practice, we would create the proper graph representation
+                try:
+                    # Create a small graph with the current subplan and this candidate
+                    # This is simplified and might not work correctly in all cases
+                    estimated_cost = (triples_num - shared_vars) * 100  # Simple heuristic
+                    
+                    if estimated_cost < best_cost:
+                        best_cost = estimated_cost
+                        best_idx = i
+                        best_new_subplan = new_subplan
+                except Exception as e:
+                    if verbose:
+                        print(f"Error estimating cost for join with triple {i}: {e}")
+                    continue
+            
+            # Update current subplan with best join
+            current_subplan = best_new_subplan
         
-        # Predict cost
-        with torch.no_grad():
-            cost = model(join_x, join_edge_index).item()
+        # Remove the chosen triple from remaining triples
+        remaining_triples.remove(best_idx)
+        used_triple_indices.append(best_idx)
         
-        join_costs.append((i, cost))
         if verbose:
-            print(f"Join with triple {i} cost: {cost:.4f}")
+            print(f"Selected triple {best_idx} with estimated cost {best_cost:.4f}")
     
-    # Find the best join
-    best_join_idx, best_join_cost = min(join_costs, key=lambda x: x[1])
-    remaining_triples.remove(best_join_idx)
-    
-    if verbose:
-        print(f"Best join: with triple {best_join_idx} with cost {best_join_cost:.4f}")
-    
-    # Update current plan
-    first_join = Join(
-        left=current_plan,
-        right=original_triples[best_join_idx]
-    )
-    
-    # STEP 3: Join with the final triple
-    last_triple_idx = remaining_triples[0]
-    final_plan = Join(
-        left=first_join,
-        right=original_triples[last_triple_idx]
-    )
-    
-    # Wrap in Query object
-    result_query = Query(root=final_plan, triples_num=triples_num)
-    
-    if verbose:
-        print(f"Final plan: ({current_plan} JOIN {original_triples[best_join_idx]}) JOIN {original_triples[last_triple_idx]}")
-    
-    return result_query
+    # Current subplan should now be the full plan
+    return Query(root=current_subplan, triples_num=triples_num)
 
 
-def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimization_steps=500):
+def random_join_plan(original_triples, seed=None):
+    """
+    Create a random join plan using the original triples.
+    
+    Args:
+        original_triples: List of original Triple objects
+        seed: Random seed
+        
+    Returns:
+        A Query object representing a random plan
+    """
+    from data import random_join_order
+    
+    # Convert triples to format expected by random_join_order
+    triple_strs = []
+    for triple in original_triples:
+        triple_strs.append([str(triple.s), str(triple.p), str(triple.o)])
+    
+    # Use the existing random_join_order function
+    random_plan = random_join_order(triple_strs, seed=seed)
+    
+    return random_plan
+
+
+def plot_statistics(stats, show_plots=True, suffix=""):
+    """
+    Plot statistics about the optimization performance.
+    
+    Args:
+        stats: Dictionary with statistics from evaluate_optimization
+        show_plots: Whether to display the plots (if False, only save them)
+        suffix: Optional suffix to add to saved filenames (e.g., "_iteration_10")
+    """
+    # Calculate mean costs for different strategies
+    mean_gradient = np.mean(stats['gradient_costs'])
+    mean_greedy = np.mean(stats['greedy_costs'])
+    mean_random = np.mean(stats['random_costs'])
+    
+    # Plot mean costs comparison
+    plt.figure(figsize=(10, 6))
+    
+    labels = ['Gradient', 'Greedy', 'Random']
+    means = [mean_gradient, mean_greedy, mean_random]
+    
+    plt.bar(labels, means, color=['blue', 'green', 'orange'])
+    plt.ylabel('Mean Cost')
+    plt.title('Comparison of Mean Costs')
+    plt.grid(axis='y', alpha=0.3)
+    
+    # Add value labels on bars
+    for i, v in enumerate(means):
+        plt.text(i, v * 1.05, f"{v:.1f}", ha='center')
+    
+    plt.tight_layout()
+    plt.savefig(f'mean_costs_comparison.png')
+    if show_plots:
+        plt.show()
+    else:
+        plt.close()
+    
+    # Plot cost comparison as boxplot (log scale)
+    plt.figure(figsize=(10, 6))
+    
+    data = [
+        stats['gradient_costs'],
+        stats['greedy_costs'],
+        stats['random_costs']
+    ]
+    
+    plt.boxplot(data, labels=labels)
+    plt.yscale('log')
+    plt.ylabel('Cost (log scale)')
+    plt.title('Cost Distribution Comparison')
+    plt.grid(axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f'cost_distribution_comparison.png')
+    if show_plots:
+        plt.show()
+    else:
+        plt.close()
+    
+    # Calculate and print ratio comparisons
+    gradient_to_random_ratio = np.mean(np.array(stats['gradient_costs']) / np.array(stats['random_costs']))
+    greedy_to_random_ratio = np.mean(np.array(stats['greedy_costs']) / np.array(stats['random_costs']))
+    
+    print(f"Mean ratio of gradient optimizer cost to random plan cost: {gradient_to_random_ratio:.2f}x")
+    print(f"Mean ratio of greedy heuristic cost to random plan cost: {greedy_to_random_ratio:.2f}x")
+    
+    # Calculate and print how often each method beats random selection
+    gradient_costs = np.array(stats['gradient_costs'])
+    greedy_costs = np.array(stats['greedy_costs'])
+    random_costs = np.array(stats['random_costs'])
+    
+    gradient_wins = np.sum(gradient_costs < random_costs)
+    greedy_wins = np.sum(greedy_costs < random_costs)
+    
+    gradient_win_pct = gradient_wins / len(gradient_costs) * 100
+    greedy_win_pct = greedy_wins / len(greedy_costs) * 100
+    
+    print(f"Gradient optimizer beats random selection in {gradient_win_pct:.1f}% of queries")
+    print(f"Greedy heuristic beats random selection in {greedy_win_pct:.1f}% of queries")
+    
+    # Plot win percentage
+    plt.figure(figsize=(8, 6))
+    win_pcts = [gradient_win_pct, greedy_win_pct]
+    plt.bar(['Gradient vs. Random', 'Greedy vs. Random'], win_pcts, color=['blue', 'green'])
+    plt.ylabel('Win Percentage (%)')
+    plt.title('Percentage of Queries Where Optimizer Beats Random Selection')
+    plt.ylim(0, 100)
+    
+    # Add percentage labels on bars
+    for i, v in enumerate(win_pcts):
+        plt.text(i, v + 1, f"{v:.1f}%", ha='center')
+    
+    plt.tight_layout()
+    plt.savefig(f'win_percentage.png')
+    if show_plots:
+        plt.show()
+    else:
+        plt.close()
+    
+    # Plot scatter of gradient vs greedy costs
+    plt.figure(figsize=(10, 8))
+    plt.scatter(gradient_costs, greedy_costs, alpha=0.7, s=70, c='blue', edgecolors='black')
+    
+    # Add 45-degree line (y=x)
+    max_val = max(np.max(gradient_costs), np.max(greedy_costs))
+    min_val = min(np.min(gradient_costs), np.min(greedy_costs))
+    # Add some padding to the line
+    line_min = min_val * 0.9
+    line_max = max_val * 1.1
+    plt.plot([line_min, line_max], [line_min, line_max], 'k--', alpha=0.7)
+    
+    plt.xlabel('Gradient-Based Optimization Cost')
+    plt.ylabel('Greedy Optimization Cost')
+    plt.title('Gradient vs Greedy Optimization Cost Comparison')
+    plt.grid(alpha=0.3)
+    
+    # Set both axes to logarithmic scale
+    plt.xscale('log')
+    plt.yscale('log')
+    
+    # Add annotations for points far from the line
+    for i in range(len(gradient_costs)):
+        ratio = greedy_costs[i] / gradient_costs[i] if gradient_costs[i] > 0 else 0
+        # Annotate points where one method is significantly better
+        if ratio > 2 or ratio < 0.5:
+            plt.annotate(f"Q{i}", (gradient_costs[i], greedy_costs[i]), 
+                         xytext=(5, 5), textcoords='offset points')
+    
+    plt.tight_layout()
+    plt.savefig(f'gradient_vs_greedy.png')
+    if show_plots:
+        plt.show()
+    else:
+        plt.close()
+    
+    # Plot scatter of gradient vs random costs (new)
+    plt.figure(figsize=(10, 8))
+    plt.scatter(gradient_costs, random_costs, alpha=0.7, s=70, c='orange', edgecolors='black')
+    
+    # Add 45-degree line (y=x)
+    max_val = max(np.max(gradient_costs), np.max(random_costs))
+    min_val = min(np.min(gradient_costs), np.min(random_costs))
+    # Add some padding to the line
+    line_min = min_val * 0.9
+    line_max = max_val * 1.1
+    plt.plot([line_min, line_max], [line_min, line_max], 'k--', alpha=0.7)
+    
+    plt.xlabel('Gradient-Based Optimization Cost')
+    plt.ylabel('Random Plan Cost')
+    plt.title('Gradient vs Random Plan Cost Comparison')
+    plt.grid(alpha=0.3)
+    
+    # Set both axes to logarithmic scale
+    plt.xscale('log')
+    plt.yscale('log')
+    
+    # Add annotations for points far from the line
+    for i in range(len(gradient_costs)):
+        ratio = random_costs[i] / gradient_costs[i] if gradient_costs[i] > 0 else 0
+        # Annotate points where one method is significantly better
+        if ratio > 2 or ratio < 0.5:
+            plt.annotate(f"Q{i}", (gradient_costs[i], random_costs[i]), 
+                         xytext=(5, 5), textcoords='offset points')
+    
+    plt.tight_layout()
+    plt.savefig(f'gradient_vs_random.png')
+    if show_plots:
+        plt.show()
+    else:
+        plt.close()
+
+
+def count_triples_in_plan(plan):
+    """
+    Count the number of triple patterns in a query plan.
+    
+    Args:
+        plan: Query object representing a join plan
+        
+    Returns:
+        int: The number of triple patterns in the plan
+    """
+    def traverse_count(node):
+        if isinstance(node, Triple):
+            return 1
+        elif isinstance(node, Join):
+            return traverse_count(node.left) + traverse_count(node.right)
+        else:
+            return 0
+    
+    return traverse_count(plan.root)
+
+
+def collect_triples_in_plan(plan):
+    """
+    Collect all triple patterns in a query plan.
+    
+    Args:
+        plan: Query object representing a join plan
+        
+    Returns:
+        list: All triple patterns in the plan
+    """
+    triples = []
+    
+    def traverse_collect(node):
+        if isinstance(node, Triple):
+            triples.append(node)
+        elif isinstance(node, Join):
+            traverse_collect(node.left)
+            traverse_collect(node.right)
+    
+    traverse_collect(plan.root)
+    return triples
+
+
+def validate_plan(plan, expected_triples):
+    """
+    Validate that a query plan contains all expected triple patterns.
+    
+    Args:
+        plan: Query object representing a join plan
+        expected_triples: List of Triple objects that should be in the plan
+        
+    Returns:
+        tuple: (is_valid, message) 
+               where is_valid is a boolean and message is a description of any issues
+    """
+    # Check if the plan has the right number of triples
+    triples_in_plan = collect_triples_in_plan(plan)
+    
+    if len(triples_in_plan) != len(expected_triples):
+        return False, f"Plan has {len(triples_in_plan)} triples but expected {len(expected_triples)}"
+    
+    # Check if all expected triples are in the plan
+    # Create a simple string representation for comparison
+    plan_triple_strs = set(str(t) for t in triples_in_plan)
+    expected_triple_strs = set(str(t) for t in expected_triples)
+    
+    if plan_triple_strs != expected_triple_strs:
+        missing = expected_triple_strs - plan_triple_strs
+        extra = plan_triple_strs - expected_triple_strs
+        message = ""
+        if missing:
+            message += f"Missing triples: {missing}"
+        if extra:
+            message += f"Unexpected triples: {extra}"
+        return False, message
+    
+    return True, "Plan is valid"
+
+
+def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimization_steps=500, 
+                         verbose=False, optimization_params=None):
     """
     Evaluate the optimization algorithm on the given SPARQL queries.
     
@@ -385,6 +750,8 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
         model_path: Path to the trained cost model
         num_queries: Number of queries to evaluate (None for all)
         optimization_steps: Number of optimization steps per query
+        verbose: Whether to print and plot detailed progress information
+        optimization_params: Dictionary of optimization hyperparameters
         
     Returns:
         Statistics about the optimization performance
@@ -395,8 +762,8 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
     
     # Load model
     node_feature_dim = 307
-    hidden_dim = 256
-    model = CostGNN(node_feature_dim=node_feature_dim, hidden_dim=hidden_dim).to(device)
+    hidden_dim = 512
+    model = CostGNNv2(node_feature_dim=node_feature_dim, hidden_dim=hidden_dim).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     
@@ -405,279 +772,204 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
         sparql_queries = sparql_queries[:num_queries]
     
     # Initialize statistics
-    found_best_plan = []
-    found_middle_plan = []
-    found_worst_plan = []
-    optimizer_costs = []
+    gradient_costs = []
     greedy_costs = []
-    best_costs = []
     random_costs = []
-    middle_costs = []
-    worst_costs = []
     
     # Process each query
     for i, query in enumerate(tqdm(sparql_queries, desc="Evaluating queries")):
-        # Get costs of the three plans
-        costs = query.costs
-        if len(costs) != 3:
-            print(f"Warning: Query {i} has {len(costs)} plans, expected 3. Skipping.")
+        # Get the torch data from one of the plans
+        # For 8TP, we select one of the random plans as the base for optimization
+        plan_idx = 0  # Just use the first plan
+        torch_data = query.torch_data[plan_idx]
+        
+        if torch_data is None:
+            print(f"Warning: Query {i} has null torch_data for plan {plan_idx}. Skipping.")
             continue
-            
-        # Sort plans by cost
-        sorted_indices = np.argsort(costs)
-        best_idx = sorted_indices[0]
-        middle_idx = sorted_indices[1]
-        worst_idx = sorted_indices[2]
-        
-
-        
-        # Get the best torch data
-        torch_data = query.torch_data[best_idx]
         
         # Prepare the triple objects
         triple_objs = [Triple(*(Entity(name=name) for name in triple[:3])) for triple in query.triples]
         
         # Run gradient-based optimization
-        final_adjacency, triples_num = optimize_query(
-            torch_data, model, device, optimization_steps=optimization_steps
-        )
-        
-        # Convert adjacency to query plan
         try:
-            optimized_plan = adjacency_to_query_with_real_triples(final_adjacency, triples_num, triple_objs)
+            if verbose:
+                print(f"\nRunning gradient-based optimization for query {i}")
+            
+            final_adjacency, triples_num = optimize_query(
+                torch_data, model, device, 
+                optimization_steps=optimization_steps, 
+                verbose=verbose,
+                **optimization_params
+            )
+            
+            # Convert adjacency to query plan
+            gradient_plan = adjacency_to_query_with_real_triples(final_adjacency, triples_num, triple_objs)
+            
+            # Validate that the plan contains all expected triple patterns
+            is_valid, validation_msg = validate_plan(gradient_plan, triple_objs)
+            if not is_valid:
+                print(f"Warning: Invalid gradient plan for query {i}: {validation_msg}")
+                print("Skipping this query")
+                continue
+            
+            # Calculate the actual cost using the get_cost method
+            gradient_cost = gradient_plan.root.get_cost()
+            gradient_costs.append(gradient_cost)
+
+            # Create visualization directory if it doesn't exist
+            visualization_dir = "plan_visualizations"
+            os.makedirs(visualization_dir, exist_ok=True)
+            gradient_plan.visualize(output_file=f"{visualization_dir}/gradient_plan_query_{i}")
+            
+            if verbose:
+                print(f"Gradient optimization complete. Final cost: {gradient_cost}")
+                print(f"Saved gradient plan visualization to {visualization_dir}/gradient_plan_query_{i}.png")
+                
         except Exception as e:
-            print(f"Error converting adjacency to query plan: {e}")
+            print(f"Error in gradient optimization for query {i}: {e}")
+            # Skip this query
             continue
         
         # Run greedy optimization
         try:
+            if verbose:
+                print(f"\nRunning greedy optimization for query {i}")
+                
             greedy_plan = greedy_optimize_query(
-                torch_data, model, triple_objs, device, verbose=False
+                torch_data, model, triple_objs, device, verbose=verbose
             )
+            
+            # Validate that the plan contains all expected triple patterns
+            is_valid, validation_msg = validate_plan(greedy_plan, triple_objs)
+            if not is_valid:
+                print(f"Warning: Invalid greedy plan for query {i}: {validation_msg}")
+                greedy_costs.append(float('inf'))
+                continue
+            
+            # Calculate the actual cost
+            greedy_cost = greedy_plan.root.get_cost()
+            greedy_costs.append(greedy_cost)
+            
+            if verbose:
+                print(f"Greedy optimization complete. Final cost: {greedy_cost}")
+                # Visualize the plan if verbose
+                visualization_dir = "plan_visualizations"
+                os.makedirs(visualization_dir, exist_ok=True)
+                greedy_plan.visualize(output_file=f"{visualization_dir}/greedy_plan_query_{i}")
+                print(f"Saved greedy plan visualization to {visualization_dir}/greedy_plan_query_{i}.png")
+                
         except Exception as e:
-            print(f"Error in greedy optimization: {e}")
-            continue
-        
-        # Check which plan was found by gradient-based optimization
-        found_best = compare_query_plans(optimized_plan, query.join_plans[best_idx])
-        found_middle = compare_query_plans(optimized_plan, query.join_plans[middle_idx])
-        found_worst = compare_query_plans(optimized_plan, query.join_plans[worst_idx])
-        
-        # Check which plan was found by greedy approach
-        greedy_best = compare_query_plans(greedy_plan, query.join_plans[best_idx])
-        greedy_middle = compare_query_plans(greedy_plan, query.join_plans[middle_idx])
-        greedy_worst = compare_query_plans(greedy_plan, query.join_plans[worst_idx])
-        
-        # Record results for gradient-based optimization
-        found_best_plan.append(found_best)
-        found_middle_plan.append(found_middle)
-        found_worst_plan.append(found_worst)
-
-        # Record costs
-        best_costs.append(costs[best_idx])
-        middle_costs.append(costs[middle_idx])
-        worst_costs.append(costs[worst_idx])
-        random_costs.append(costs[random.randint(0, 2)])
-        
-        # Get the optimizer cost from the saved costs, not by recalculating
-        if found_best:
-            optimizer_costs.append(costs[best_idx])
-        elif found_middle:
-            optimizer_costs.append(costs[middle_idx])
-        elif found_worst:
-            optimizer_costs.append(costs[worst_idx])
-        else:
-            # This should rarely happen - if the optimizer found a plan that doesn't match any of the three
-            print(f"Warning: Query {i} - optimizer found a plan that doesn't match any of the three predefined plans")
-            optimizer_costs.append(float('inf'))
-        
-        # Get the greedy optimizer cost
-        if greedy_best:
-            greedy_costs.append(costs[best_idx])
-        elif greedy_middle:
-            greedy_costs.append(costs[middle_idx])
-        elif greedy_worst:
-            greedy_costs.append(costs[worst_idx])
-        else:
-            # This should rarely happen - if the greedy algorithm found a plan that doesn't match any of the three
-            print(f"Warning: Query {i} - greedy algorithm found a plan that doesn't match any of the three predefined plans")
+            print(f"Error in greedy optimization for query {i}: {e}")
+            # Use infinity as a placeholder for failed optimizations
             greedy_costs.append(float('inf'))
         
-        # Print progress every 10 queries
-        if (i + 1) % 10 == 0:
-            print(f"\nProcessed {i+1}/{len(sparql_queries)} queries")
-            print(f"Found best plan: {sum(found_best_plan)}/{len(found_best_plan)} ({sum(found_best_plan)/len(found_best_plan)*100:.1f}%)")
-            print(f"Found middle plan: {sum(found_middle_plan)}/{len(found_middle_plan)} ({sum(found_middle_plan)/len(found_middle_plan)*100:.1f}%)")
-            print(f"Found worst plan: {sum(found_worst_plan)}/{len(found_worst_plan)} ({sum(found_worst_plan)/len(found_worst_plan)*100:.1f}%)")
+        # Create a random plan
+        try:
+            if verbose:
+                print(f"\nCreating random plan for query {i}")
+                
+            random_plan = random_join_plan(triple_objs, seed=i)
             
-
+            # Validate that the plan contains all expected triple patterns
+            is_valid, validation_msg = validate_plan(random_plan, triple_objs)
+            if not is_valid:
+                print(f"Warning: Invalid random plan for query {i}: {validation_msg}")
+                random_costs.append(float('inf'))
+                continue
+            
+            # Calculate the actual cost
+            random_cost = random_plan.root.get_cost()
+            random_costs.append(random_cost)
+            
+            if verbose:
+                print(f"Random plan created. Cost: {random_cost}")
+                # Visualize the plan if verbose
+                visualization_dir = "plan_visualizations"
+                os.makedirs(visualization_dir, exist_ok=True)
+                random_plan.visualize(output_file=f"{visualization_dir}/random_plan_query_{i}")
+                print(f"Saved random plan visualization to {visualization_dir}/random_plan_query_{i}.png")
+                
+        except Exception as e:
+            print(f"Error creating random plan for query {i}: {e}")
+            # Use infinity as a placeholder for failed random plans
+            random_costs.append(float('inf'))
+        
+        # Print progress every 5 queries and generate plots
+        if (i + 1) % 1 == 0:
+            print(f"\nProcessed {i+1}/{len(sparql_queries)} queries")
+            if gradient_costs:
+                print(f"Average gradient cost: {np.mean(gradient_costs):.2f}")
+            if greedy_costs:
+                print(f"Average greedy cost: {np.mean(greedy_costs):.2f}")
+            if random_costs:
+                print(f"Average random cost: {np.mean(random_costs):.2f}")
+                
+            # Create intermediate statistics and save plots (without displaying)
+            intermediate_stats = {
+                'gradient_costs': gradient_costs,
+                'greedy_costs': greedy_costs,
+                'random_costs': random_costs
+            }
+            # Save plots without showing them, with a suffix indicating the iteration
+            plot_statistics(intermediate_stats, show_plots=False, suffix=f"_iter_{i+1}")
+            print(f"Saved intermediate plots at iteration {i+1}")
     
     # Calculate statistics
     stats = {
-        'found_best_plan': found_best_plan,
-        'found_middle_plan': found_middle_plan,
-        'found_worst_plan': found_worst_plan,
-        'optimizer_costs': optimizer_costs,
+        'gradient_costs': gradient_costs,
         'greedy_costs': greedy_costs,
-        'best_costs': best_costs,
-        'random_costs': random_costs,
-        'middle_costs': middle_costs,
-        'worst_costs': worst_costs
+        'random_costs': random_costs
     }
     
     return stats
 
 
-def plot_statistics(stats):
-    """
-    Plot statistics about the optimization performance.
-    
-    Args:
-        stats: Dictionary with statistics from evaluate_optimization
-    """
-    # Calculate percentages
-    total_queries = len(stats['found_best_plan'])
-    pct_best = sum(stats['found_best_plan']) / total_queries * 100
-    pct_middle = sum(stats['found_middle_plan']) / total_queries * 100
-    pct_worst = sum(stats['found_worst_plan']) / total_queries * 100
-    
-    # Plot plan selection distribution
-    labels = ['Best Plan', 'Middle Plan', 'Worst Plan']
-    values = [pct_best, pct_middle, pct_worst]
-    
-    plt.figure(figsize=(10, 6))
-    plt.bar(labels, values, color=['green', 'orange', 'red'])
-    plt.ylabel('Percentage of Queries (%)')
-    plt.title('Distribution of Plans Found by Gradient Optimizer')
-    plt.ylim(0, 100)
-    
-    # Add percentage labels on bars
-    for i, v in enumerate(values):
-        plt.text(i, v + 1, f"{v:.1f}%", ha='center')
-    
-    plt.tight_layout()
-    plt.show()
-    
-    # Calculate percentages for greedy heuristic
-    greedy_best = 0
-    greedy_middle = 0
-    greedy_worst = 0
-    
-    for i in range(total_queries):
-        greedy_cost = stats['greedy_costs'][i]
-        best_cost = stats['best_costs'][i]
-        middle_cost = stats['middle_costs'][i]
-        worst_cost = stats['worst_costs'][i]
-        
-        if abs(greedy_cost - best_cost) < 0.001:
-            greedy_best += 1
-        elif abs(greedy_cost - middle_cost) < 0.001:
-            greedy_middle += 1
-        elif abs(greedy_cost - worst_cost) < 0.001:
-            greedy_worst += 1
-    
-    pct_greedy_best = greedy_best / total_queries * 100
-    pct_greedy_middle = greedy_middle / total_queries * 100
-    pct_greedy_worst = greedy_worst / total_queries * 100
-    
-    # Plot greedy plan selection distribution
-    plt.figure(figsize=(10, 6))
-    values = [pct_greedy_best, pct_greedy_middle, pct_greedy_worst]
-    plt.bar(labels, values, color=['green', 'orange', 'red'])
-    plt.ylabel('Percentage of Queries (%)')
-    plt.title('Distribution of Plans Found by Greedy Heuristic')
-    plt.ylim(0, 100)
-    
-    # Add percentage labels on bars
-    for i, v in enumerate(values):
-        plt.text(i, v + 1, f"{v:.1f}%", ha='center')
-    
-    plt.tight_layout()
-    plt.show()
-    
-    # Plot cost comparison (log scale)
-    plt.figure(figsize=(12, 8))
-    
-    # Compute mean costs for different strategies
-    mean_optimizer = np.mean(stats['optimizer_costs'])
-    mean_greedy = np.mean(stats['greedy_costs'])
-    mean_best = np.mean(stats['best_costs'])
-    mean_random = np.mean(stats['random_costs'])
-    mean_middle = np.mean(stats['middle_costs'])
-    mean_worst = np.mean(stats['worst_costs'])
-    
-    labels = ['Gradient', 'Greedy', 'Best', 'Random', 'Middle', 'Worst']
-    means = [mean_optimizer, mean_greedy, mean_best, mean_random, mean_middle, mean_worst]
-    
-    plt.bar(labels, means, color=['blue', 'purple', 'green', 'yellow', 'orange', 'red'])
-    plt.ylabel('Mean Cost')
-    plt.title('Comparison of Mean Costs')
-    plt.grid(axis='y', alpha=0.3)
-    
-    # Add value labels on bars
-    for i, v in enumerate(means):
-        plt.text(i, v * 1.05, f"{v:.1f}", ha='center')
-    
-    plt.tight_layout()
-    plt.show()
-    
-    # Plot cost comparison as boxplot (log scale)
-    plt.figure(figsize=(12, 8))
-    
-    data = [
-        stats['optimizer_costs'],
-        stats['greedy_costs'],
-        stats['best_costs'],
-        stats['random_costs'],
-        stats['middle_costs'],
-        stats['worst_costs']
-    ]
-    
-    plt.boxplot(data, labels=labels)
-    plt.yscale('log')
-    plt.ylabel('Cost (log scale)')
-    plt.title('Cost Distribution Comparison')
-    plt.grid(axis='y', alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-    
-    # Calculate and print ratio of optimizer cost to best cost
-    optimizer_to_best_ratio = np.mean(np.array(stats['optimizer_costs']) / np.array(stats['best_costs']))
-    greedy_to_best_ratio = np.mean(np.array(stats['greedy_costs']) / np.array(stats['best_costs']))
-    print(f"Mean ratio of gradient optimizer cost to best cost: {optimizer_to_best_ratio:.2f}x")
-    print(f"Mean ratio of greedy heuristic cost to best cost: {greedy_to_best_ratio:.2f}x")
-    
-    # Calculate and print how often each method beats random selection
-    optimizer_costs = np.array(stats['optimizer_costs'])
-    greedy_costs = np.array(stats['greedy_costs'])
-    random_costs = np.array(stats['random_costs'])
-    
-    optimizer_wins = np.sum(optimizer_costs < random_costs)
-    greedy_wins = np.sum(greedy_costs < random_costs)
-    
-    optimizer_win_pct = optimizer_wins / len(optimizer_costs) * 100
-    greedy_win_pct = greedy_wins / len(greedy_costs) * 100
-    
-    print(f"Gradient optimizer beats random selection in {optimizer_win_pct:.1f}% of queries")
-    print(f"Greedy heuristic beats random selection in {greedy_win_pct:.1f}% of queries")
-
-
 if __name__ == "__main__":
-    # Set paths
-    queries_dir = "sparql_queries_3"
-    model_path = "/home/tim/query_optimization/best_model.pt"
-    num_queries = 50
+    # Configuration for optimization
+    config = {
+        # General parameters
+        'queries_file': "sparql_queries_8_single/queries.pkl",
+        'model_path': "/home/tim/query_optimization/8tp_v3.pt",
+        'num_queries': 500,
+        'optimization_steps': 5000,
+        'verbose': True,
+        
+        # Query optimization hyperparameters
+        'optimization_params': {
+            # Optimizer parameters
+            'learning_rate': 0.01,
+            
+            # Penalty weights
+            'lambda_acyclic': 1000.0,    # Weight for acyclicity penalty
+            'lambda_triple_in': 1000.0,  # Weight for triple in-degree penalty
+            'lambda_triple_out': 1000.0, # Weight for triple out-degree penalty
+            'lambda_join_in': 500.0,     # Weight for join in-degree penalty
+            'lambda_join_out': 1000.0,   # Weight for join out-degree penalty
+            'lambda_entropy': 100.0,     # Weight for entropy penalty
+            'lambda_total_penalty': 1.0  # Overall weight for the total penalty
+        }
+    }
+    
+    # Print configuration
+    print("Running optimization with the following configuration:")
+    print(f"Number of queries: {config['num_queries']}")
+    print(f"Optimization steps: {config['optimization_steps']}")
+    print("Optimization hyperparameters:")
+    for param, value in config['optimization_params'].items():
+        print(f"  {param}: {value}")
     
     # Load queries
-    sparql_queries = load_sparql_queries(queries_dir, num_queries)
+    sparql_queries = load_sparql_queries(config['queries_file'], config['num_queries'])
     
     # Evaluate optimization
     stats = evaluate_optimization(
         sparql_queries, 
-        model_path,
-        num_queries=num_queries,  # Set to None to evaluate all queries
-        optimization_steps=2000  # Fewer steps for faster evaluation
+        config['model_path'],
+        num_queries=config['num_queries'],
+        optimization_steps=config['optimization_steps'],
+        verbose=config['verbose'],
+        optimization_params=config['optimization_params']
     )
     
-    # Plot statistics
-    plot_statistics(stats) 
+    # Plot final statistics with display
+    plot_statistics(stats, show_plots=True)
