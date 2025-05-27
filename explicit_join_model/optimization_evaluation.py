@@ -7,10 +7,14 @@ from tqdm import tqdm
 import random
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
+import json
+from datetime import datetime
+
+import torch.optim as optim
 
 from data import Triple, Join, Query, Entity
 from model import CostGNNv2
-from explicit_join_model.process_dataset_single_file import SPARQLQuery
+from process_dataset_single_file import SPARQLQuery
 
 
 def load_sparql_queries(queries_file: str, num_queries):
@@ -31,6 +35,210 @@ def load_sparql_queries(queries_file: str, num_queries):
         return sparql_queries[-num_queries:]
     print(f"Loaded {len(sparql_queries)} SPARQL queries from {queries_file}")
     return sparql_queries
+
+def sample_binary_concrete(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    """Sample from the Binary Concrete (Gumbel‑Sigmoid) distribution using the
+    re‑parameterisation trick and return a straight‑through sample.
+    Args:
+        logits: Raw, unconstrained edge logits (shape: [num_edges]).
+        temperature: Positive temperature τ controlling smoothness.
+    Returns:
+        edge_weights: Straight‑through hard sample in [0,1] with gradients.
+    """
+    u = torch.rand_like(logits)
+    gumbel = -torch.log(-torch.log(u + 1e-10) + 1e-10)
+    y_soft = torch.sigmoid((logits + gumbel) / temperature)
+    hard=False
+    if hard:
+        y_hard = (y_soft >= 0.5).float()
+        # Straight‑through estimator: replace forward value with hard, keep soft gradient
+        return y_hard.detach() - y_soft.detach() + y_soft
+    else:
+        return y_soft
+
+
+@torch.no_grad()
+def _temperature_anneal(init_tau: float, min_tau: float, decay: float, step: int, max_step: int) -> float:
+    """Exponential temperature annealing every step."""
+    return max(min_tau, init_tau - (init_tau - min_tau) * (step / max_step))
+
+    #return max(min_tau, init_tau * (decay ** step)) #exponential deacy
+
+    #return 1.
+
+
+def optimize_query_gumbel(
+    query_data,
+    model,
+    device: str = "cpu",
+    *,
+    optimization_steps: int = 500,
+    verbose: bool = True,
+    learning_rate: float = 0.01,
+    lambda_acyclic: float = 1000.0,
+    lambda_triple_in: float = 1000.0,
+    lambda_triple_out: float = 1000.0,
+    lambda_join_in: float = 500.0,
+    lambda_join_out: float = 1000.0,
+    lambda_entropy: float = 10.0,
+    lambda_total_penalty: float = 1.0,
+    # Gumbel‑Sigmoid specific hyper‑parameters
+    init_tau: float = 10.0,
+    min_tau: float = 1.,
+    tau_decay: float = 0.999,
+    use_temperature_annealing: bool = True,
+    return_best: bool = True,
+    min_penalty_threshold: float = 30.0,
+    use_lambda_ramping: bool = True,
+):
+    """Gradient-based join-order search with **Straight-Through Gumbel-Sigmoid**.
+
+    The signature and return values mirror `optimize_query()` so the rest of
+    your code remains unchanged.
+    """
+    # Move data ----------------------------------------------------------------
+    data = query_data.to(device)
+    N_NODES = len(data.x)
+    triples_num = (N_NODES + 1) // 2  # n triples ➜ 2n‑1 nodes
+
+    # Enumerate all candidate edges (excluding self‑loops) ----------------------
+    src, dst = torch.where(~torch.eye(N_NODES, dtype=torch.bool))
+    edge_index = torch.stack([src, dst], dim=0).to(device)
+    num_edges = edge_index.size(1)
+
+    # Optimised parameters: edge logits (initially 0 ⇒ p≈0.5) ------------------
+    edge_logits = torch.zeros(num_edges, device=device, requires_grad=True)
+    edge_logits = torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device=device)
+
+    # Optimiser ----------------------------------------------------------------
+    optimiser = optim.AdamW([edge_logits], lr=learning_rate)
+    
+    # Track best solution if return_best is True
+    best_cost = float('inf')
+    best_edge_logits = None
+
+    # Tracking metrics for plotting -------------------------------------------
+    cost_history = []
+    total_penalty_history = []
+    acyclic_penalty_history = []
+    triple_in_penalty_history = []
+    triple_out_penalty_history = []
+    join_in_penalty_history = []
+    join_out_penalty_history = []
+    entropy_penalty_history = []
+
+    for step in range(optimization_steps):
+        optimiser.zero_grad()
+
+        # Gumbel‑Sigmoid sampling ---------------------------------------------
+        if use_temperature_annealing:
+            tau = _temperature_anneal(init_tau, min_tau, tau_decay, step, optimization_steps)
+        else:
+            tau = init_tau
+            
+        edge_weights = sample_binary_concrete(edge_logits, tau)
+
+        # Cost prediction ------------------------------------------------------
+        cost_pred = model(data.x, edge_index, edge_weight=edge_weights)
+
+        # Build adjacency ------------------------------------------------------
+        A = torch.zeros((N_NODES, N_NODES), device=device)
+        A[edge_index[0], edge_index[1]] = edge_weights
+
+        in_deg, out_deg = A.sum(0), A.sum(1)
+        triple_nodes = torch.arange(triples_num, device=device)
+        join_nodes = torch.arange(triples_num, N_NODES, device=device)
+        root = N_NODES - 1
+        non_root_joins = torch.arange(triples_num, root, device=device)
+
+        # Structural penalties -------------------------------------------------
+        P_triple_in = (in_deg[triple_nodes] ** 2).sum()
+        P_triple_out = ((out_deg[triple_nodes] - 1) ** 2).sum()
+        P_join_in = ((in_deg[join_nodes] - 2) ** 2).sum()
+        P_join_out = ((out_deg[non_root_joins] - 1) ** 2).sum() + out_deg[root] ** 2
+        P_acyclic = torch.trace(torch.matrix_exp(A)) - N_NODES
+
+        # Entropy penalty (optional) ------------------------------------------
+        eps = 1e-10
+        probs = torch.sigmoid(edge_logits)
+        P_entropy = -(probs * torch.log(probs + eps) + (1 - probs) * torch.log(1 - probs + eps)).sum()
+
+        # Aggregate -----------------------------------------------------------
+        total_penalty = (
+            lambda_triple_in * P_triple_in
+            + lambda_triple_out * P_triple_out
+            + lambda_join_in * P_join_in
+            + lambda_join_out * P_join_out
+            + lambda_acyclic * P_acyclic
+            + lambda_entropy * P_entropy
+        )
+
+        # Lambda ramping logic ------------------------------------------------
+        if use_lambda_ramping:
+            def annealed_lam(lam_max, step, ramp_steps=150):
+                frac = min(1.0, step / ramp_steps)
+                return lam_max * (frac ** 2)  
+            
+            lambda_total = annealed_lam(lambda_total_penalty, step, ramp_steps=optimization_steps)
+        else:
+            lambda_total = lambda_total_penalty
+
+        loss = cost_pred + lambda_total * total_penalty
+
+        # Track best solution if return_best is True
+        if return_best and total_penalty < min_penalty_threshold and cost_pred < best_cost:
+            best_cost = cost_pred
+            best_edge_logits = edge_logits.clone().detach()
+
+        # Track metrics for plotting
+        cost_history.append(cost_pred.item())
+        total_penalty_history.append(total_penalty.item())
+        acyclic_penalty_history.append(P_acyclic.item())
+        triple_in_penalty_history.append(P_triple_in.item())
+        triple_out_penalty_history.append(P_triple_out.item())
+        join_in_penalty_history.append(P_join_in.item())
+        join_out_penalty_history.append(P_join_out.item())
+        entropy_penalty_history.append(P_entropy.item())
+
+        # Back‑prop & step -----------------------------------------------------
+        loss.backward()
+        
+        # Clip gradients
+        #torch.nn.utils.clip_grad_norm_([edge_logits], max_norm=5.0)
+        
+        optimiser.step()
+
+        # Log ------------------------------------------------------------------
+        if verbose and (step + 1) % 100 == 0:
+            print(
+                f"Step {step+1}/{optimization_steps}  "
+                f"Cost: {cost_pred.item():.2f}  Penalty: {total_penalty.item():.2f}  "
+            )
+
+    # Final hard adjacency -----------------------------------------------------
+    final_A = torch.zeros((N_NODES, N_NODES), device=device)
+    with torch.no_grad():
+        if return_best and best_edge_logits is not None:
+            final_edge_weights = (torch.sigmoid(best_edge_logits) >= 0.5).float()
+        else:
+            final_edge_weights = (torch.sigmoid(edge_logits) >= 0.5).float()
+        final_A[edge_index[0], edge_index[1]] = final_edge_weights
+
+    # Plot metrics if verbose
+    if verbose:
+        plot_optimization_metrics(
+            cost_history, 
+            total_penalty_history,
+            acyclic_penalty_history,
+            triple_in_penalty_history,
+            triple_out_penalty_history,
+            join_in_penalty_history,
+            join_out_penalty_history,
+            entropy_penalty_history
+        )
+
+    return final_A, triples_num
+
 
 
 def optimize_query(query_data, model, device='cpu', optimization_steps=500, verbose=True,
@@ -345,125 +553,129 @@ def adjacency_to_query_with_real_triples(A, triples_num, original_triples):
 def greedy_optimize_query(query_data, model, original_triples, device='cpu', verbose=True):
     """
     Use a greedy heuristic to build a query plan using the cost model.
-    
-    Args:
-        query_data: The torch geometric data for the query
-        model: The trained cost model
-        original_triples: List of original Triple objects
-        device: Device to run the optimization on
-        verbose: Whether to print progress information
-        
-    Returns:
-        A Query object representing the optimized plan
+    After picking the first triple pattern, every further candidate is
+    evaluated by creating a new join node that the current (sub-)plan
+    root and the candidate triple both point to.
     """
-    model.eval()  # Ensure model is in evaluation mode
+    import torch                                               # (local import keeps global namespace clean)
+
+    model.eval()
     triples_num = len(original_triples)
     
     if verbose:
         print("Starting greedy query optimization")
         print(f"Number of triple patterns: {triples_num}")
     
-    # Create a mapping from triple pattern to its features in the original data
-    # For 8tp, we need to adapt this approach since the data format might be different
-    # We'll use the first 8 nodes of the original data assuming they're the triple patterns
-    original_features = query_data.x[:triples_num].clone()
-    
-    # Initialize remaining triples and current subplan
-    remaining_triples = list(range(triples_num))
-    current_subplan = None
-    
-    # Keep track of which triple indices we've used
-    used_triple_indices = []
-    
-    # Repeat until all triples are used
-    while remaining_triples:
-        best_cost = float('inf')
-        best_idx = -1
-        best_new_subplan = None
-        
-        # If we don't have a current subplan, evaluate each triple individually
-        if current_subplan is None:
-            # Evaluate each triple pattern individually
-            for i in remaining_triples:
-                # Create a graph with just this triple pattern
-                single_node_x = original_features[i:i+1]
-                # No edges for a single node
-                empty_edge_index = torch.zeros((2, 0), dtype=torch.long, device=device)
-                
-                # Predict cost
-                with torch.no_grad():
-                    cost = model(single_node_x, empty_edge_index).item()
-                
-                if cost < best_cost:
-                    best_cost = cost
-                    best_idx = i
-                    best_new_subplan = original_triples[i]
-            
-            # Update current subplan with best triple
-            current_subplan = best_new_subplan
+    # ------------------------------------------------------------------
+    # Helper: build a graph consisting of the current plan + new triple
+    # ------------------------------------------------------------------
+    def build_join_graph(curr_x, curr_edge_index, curr_root_idx, candidate_feat):
+        """
+        curr_x            : node feature matrix of current plan
+        curr_edge_index   : edge index of current plan
+        curr_root_idx     : index of the root node of the current plan
+        candidate_feat    : (1, F) feature tensor of the triple to be added
+
+        returns:
+            new_x, new_edge_index, new_root_idx
+        """
+        # (1) new join node feature  (all-zeros + last dim = 1 to mark join)
+        join_feat = torch.zeros_like(candidate_feat)
+        join_feat[..., -1] = 1.0
+
+        # (2) concatenate features   [ current | candidate | join ]
+        new_x = torch.cat([curr_x, candidate_feat, join_feat], dim=0)
+
+        cand_node_idx = curr_x.size(0)          # position of the new triple node
+        join_node_idx = cand_node_idx + 1       # position of the new join node
+
+        # (3) copy existing edges and add two new ones (child → parent)
+        additional_edges = torch.tensor(
+            [[curr_root_idx, cand_node_idx],    # sources  (children)
+             [join_node_idx, join_node_idx]],   # targets  (parent - join)
+            dtype=torch.long,
+            device=device
+        )
+
+        if curr_edge_index.numel() == 0:
+            new_edge_index = additional_edges
         else:
-            # Evaluate each remaining triple joined with the current subplan
-            for i in remaining_triples:
-                # Create a join between current subplan and this triple
-                new_subplan = Join(left=current_subplan, right=original_triples[i])
-                
-                # For cost estimation, we can create a simple query with this join
-                temp_query = Query(root=new_subplan, triples_num=len(used_triple_indices) + 1)
-                
-                # Use model to estimate cost (this is approximate)
-                # In a more accurate implementation, we'd create proper graph representations for each join
-                
-                # Use a simplified approach with existing query data
-                # For a proper implementation, we would need to create the correct graph representation
-                # with nodes and edges that match this specific join
-                
-                # For now, we'll estimate based on the number of variables shared between the subplan and the new triple
-                # This is a heuristic and not as accurate as using the model directly
-                
-                # Count shared variables (simplified for this example)
-                current_vars = set()
-                if isinstance(current_subplan, Triple):
-                    for entity in [current_subplan.s, current_subplan.p, current_subplan.o]:
-                        if entity.is_variable:
-                            current_vars.add(entity.name)
-                else:
-                    current_vars = current_subplan.variables
-                
-                triple_vars = set()
-                for entity in [original_triples[i].s, original_triples[i].p, original_triples[i].o]:
-                    if entity.is_variable:
-                        triple_vars.add(entity.name)
-                
-                shared_vars = len(current_vars.intersection(triple_vars))
-                
-                # Use the model to predict cost if possible
-                # This is a simplified approach; in practice, we would create the proper graph representation
-                try:
-                    # Create a small graph with the current subplan and this candidate
-                    # This is simplified and might not work correctly in all cases
-                    estimated_cost = (triples_num - shared_vars) * 100  # Simple heuristic
-                    
-                    if estimated_cost < best_cost:
-                        best_cost = estimated_cost
-                        best_idx = i
-                        best_new_subplan = new_subplan
-                except Exception as e:
-                    if verbose:
-                        print(f"Error estimating cost for join with triple {i}: {e}")
-                    continue
-            
-            # Update current subplan with best join
-            current_subplan = best_new_subplan
-        
-        # Remove the chosen triple from remaining triples
+            new_edge_index = torch.cat([curr_edge_index, additional_edges], dim=1)
+
+        return new_x, new_edge_index, join_node_idx
+
+    # ------------------------------------------------------------------
+    # Step 1 : choose the cheapest single triple
+    # ------------------------------------------------------------------
+    original_features = query_data.x[:triples_num].clone().to(device)
+
+    choose_random = False # todo !!
+    if choose_random:
+        best_first_idx = random.randrange(triples_num)
+        with torch.no_grad():
+            best_first_cost = model(original_features[best_first_idx:best_first_idx + 1],
+                                  torch.zeros((2, 0), dtype=torch.long, device=device)).item()
+    else:
+        best_first_cost, best_first_idx = float('inf'), -1
+        for i in range(triples_num):
+            with torch.no_grad():
+                cost = model(original_features[i:i + 1],
+                             torch.zeros((2, 0), dtype=torch.long, device=device)).item()
+            if cost < best_first_cost:
+                best_first_cost, best_first_idx = cost, i
+
+    if verbose:
+        print(f"Initial best triple: {best_first_idx} (cost={best_first_cost:.4f})")
+
+    # initialise current plan ------------------------------------------------
+    current_x = original_features[best_first_idx:best_first_idx + 1]           # one node
+    current_edge_index = torch.zeros((2, 0), dtype=torch.long, device=device)  # no edges yet
+    current_root_idx = 0                                                       # only node is root
+    current_plan = original_triples[best_first_idx]
+
+    remaining_triples = list(range(triples_num))
+    remaining_triples.remove(best_first_idx)
+
+    # ------------------------------------------------------------------
+    # Greedily add triples one by one
+    # ------------------------------------------------------------------
+    while remaining_triples:
+        best_cost, best_idx = float('inf'), -1
+        best_x = best_edge_index = None
+        best_root_idx = None
+
+        for cand_idx in remaining_triples:
+            cand_feat = original_features[cand_idx:cand_idx + 1]
+
+            # build graph with extra join
+            new_x, new_edge_index, new_root_idx = build_join_graph(
+                current_x, current_edge_index, current_root_idx, cand_feat
+            )
+
+            # predict cost
+            with torch.no_grad():
+                cost = model(new_x, new_edge_index).item()
+
+            if cost < best_cost:
+                best_cost = cost
+                best_idx = cand_idx
+                best_x = new_x
+                best_edge_index = new_edge_index
+                best_root_idx = new_root_idx
+
+        # update current state with the best candidate -----------------
+        current_x = best_x
+        current_edge_index = best_edge_index
+        current_root_idx = best_root_idx
+        current_plan = Join(left=current_plan, right=original_triples[best_idx])
+
         remaining_triples.remove(best_idx)
-        used_triple_indices.append(best_idx)
         
         if verbose:
-            print(f"Selected triple {best_idx} with estimated cost {best_cost:.4f}")
+            print(f"Joined triple {best_idx}  ->  new cost {best_cost:.4f}  |  {len(remaining_triples)} remaining")
     
-    # Current subplan should now be the full plan
-    return Query(root=current_subplan, triples_num=triples_num)
+    # wrap everything into a Query object
+    return Query(root=current_plan, triples_num=triples_num)
 
 
 def random_join_plan(original_triples, seed=None):
@@ -490,7 +702,7 @@ def random_join_plan(original_triples, seed=None):
     return random_plan
 
 
-def plot_statistics(stats, show_plots=True, suffix=""):
+def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
     """
     Plot statistics about the optimization performance.
     
@@ -498,7 +710,11 @@ def plot_statistics(stats, show_plots=True, suffix=""):
         stats: Dictionary with statistics from evaluate_optimization
         show_plots: Whether to display the plots (if False, only save them)
         suffix: Optional suffix to add to saved filenames (e.g., "_iteration_10")
+        save_directory: Directory to save the plots to
     """
+    # Create save directory if it doesn't exist
+    os.makedirs(save_directory, exist_ok=True)
+    
     # Calculate mean costs for different strategies
     mean_gradient = np.mean(stats['gradient_costs'])
     mean_greedy = np.mean(stats['greedy_costs'])
@@ -520,7 +736,7 @@ def plot_statistics(stats, show_plots=True, suffix=""):
         plt.text(i, v * 1.05, f"{v:.1f}", ha='center')
     
     plt.tight_layout()
-    plt.savefig(f'mean_costs_comparison.png')
+    plt.savefig(os.path.join(save_directory, f'mean_costs_comparison{suffix}.png'))
     if show_plots:
         plt.show()
     else:
@@ -541,7 +757,7 @@ def plot_statistics(stats, show_plots=True, suffix=""):
     plt.title('Cost Distribution Comparison')
     plt.grid(axis='y', alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f'cost_distribution_comparison.png')
+    plt.savefig(os.path.join(save_directory, f'cost_distribution_comparison{suffix}.png'))
     if show_plots:
         plt.show()
     else:
@@ -581,7 +797,7 @@ def plot_statistics(stats, show_plots=True, suffix=""):
         plt.text(i, v + 1, f"{v:.1f}%", ha='center')
     
     plt.tight_layout()
-    plt.savefig(f'win_percentage.png')
+    plt.savefig(os.path.join(save_directory, f'win_percentage{suffix}.png'))
     if show_plots:
         plt.show()
     else:
@@ -608,16 +824,9 @@ def plot_statistics(stats, show_plots=True, suffix=""):
     plt.xscale('log')
     plt.yscale('log')
     
-    # Add annotations for points far from the line
-    for i in range(len(gradient_costs)):
-        ratio = greedy_costs[i] / gradient_costs[i] if gradient_costs[i] > 0 else 0
-        # Annotate points where one method is significantly better
-        if ratio > 2 or ratio < 0.5:
-            plt.annotate(f"Q{i}", (gradient_costs[i], greedy_costs[i]), 
-                         xytext=(5, 5), textcoords='offset points')
-    
+
     plt.tight_layout()
-    plt.savefig(f'gradient_vs_greedy.png')
+    plt.savefig(os.path.join(save_directory, f'gradient_vs_greedy{suffix}.png'))
     if show_plots:
         plt.show()
     else:
@@ -644,16 +853,39 @@ def plot_statistics(stats, show_plots=True, suffix=""):
     plt.xscale('log')
     plt.yscale('log')
     
-    # Add annotations for points far from the line
-    for i in range(len(gradient_costs)):
-        ratio = random_costs[i] / gradient_costs[i] if gradient_costs[i] > 0 else 0
-        # Annotate points where one method is significantly better
-        if ratio > 2 or ratio < 0.5:
-            plt.annotate(f"Q{i}", (gradient_costs[i], random_costs[i]), 
-                         xytext=(5, 5), textcoords='offset points')
     
     plt.tight_layout()
-    plt.savefig(f'gradient_vs_random.png')
+    plt.savefig(os.path.join(save_directory, f'gradient_vs_random{suffix}.png'))
+    if show_plots:
+        plt.show()
+    else:
+        plt.close()
+
+
+    # Plot scatter of greedy vs random costs (new)
+    plt.figure(figsize=(10, 8))
+    plt.scatter(greedy_costs, random_costs, alpha=0.7, s=70, c='orange', edgecolors='black')
+    
+    # Add 45-degree line (y=x)
+    max_val = max(np.max(greedy_costs), np.max(random_costs))
+    min_val = min(np.min(greedy_costs), np.min(random_costs))
+    # Add some padding to the line
+    line_min = min_val * 0.9
+    line_max = max_val * 1.1
+    plt.plot([line_min, line_max], [line_min, line_max], 'k--', alpha=0.7)
+    
+    plt.xlabel('Greedy Optimization Cost')
+    plt.ylabel('Random Plan Cost')
+    plt.title('Greedy vs Random Plan Cost Comparison')
+    plt.grid(alpha=0.3)
+    
+    # Set both axes to logarithmic scale
+    plt.xscale('log')
+    plt.yscale('log')
+    
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_directory, f'greedy_vs_random{suffix}.png'))
     if show_plots:
         plt.show()
     else:
@@ -740,8 +972,354 @@ def validate_plan(plan, expected_triples):
     return True, "Plan is valid"
 
 
+def visualize_adjacency_matrix(adjacency_matrix, triples_num, visualization_dir, query_idx, use_tree_layout=False):
+    """
+    Visualize the adjacency matrix as a directed graph using NetworkX.
+    
+    Args:
+        adjacency_matrix: PyTorch tensor or numpy array of shape (N_NODES, N_NODES)
+        triples_num: The number of triple nodes
+        visualization_dir: Directory to save the visualization
+        query_idx: Index of the current query (for filename)
+        use_tree_layout: If True, use a tree layout; otherwise use force-directed
+    """
+    import networkx as nx
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import torch
+    
+    # Convert to numpy if it's a PyTorch tensor
+    if isinstance(adjacency_matrix, torch.Tensor):
+        adjacency_matrix = adjacency_matrix.cpu().detach().numpy()
+    
+    # Create a directed graph from the adjacency matrix
+    G = nx.DiGraph()
+    
+    # Add nodes
+    n_nodes = adjacency_matrix.shape[0]
+    
+    # Add all nodes with colors
+    for i in range(n_nodes):
+        # Add node with appropriate color - blue for triple nodes, red for join nodes
+        if i < triples_num:
+            G.add_node(i, color='blue', node_type='triple')
+        else:
+            G.add_node(i, color='red', node_type='join')
+    
+    # Add all edges with their weights
+    for i in range(n_nodes):
+        for j in range(n_nodes):
+            weight = adjacency_matrix[i, j]
+            G.add_edge(i, j, weight=weight)
+    
+    # Get node colors
+    node_colors = [data['color'] for _, data in G.nodes(data=True)]
+    
+    # Create the plot
+    plt.figure(figsize=(12, 10))
+    
+    # Choose layout based on the parameter
+    if use_tree_layout:
+        # Find the root node - the join node with no outgoing edges
+        root = n_nodes - 1  # Default fallback
+        
+        # Only look for root when use_tree_layout is true
+        for node_idx in range(triples_num, n_nodes):
+            # Check if this node has no outgoing edges
+            if np.sum(adjacency_matrix[node_idx, :]) < 0.01:
+                root = node_idx
+                print(f"Found root node at index {root} (Join {root-triples_num})")
+                break
+        
+        # Use a tree layout
+        try:
+            # Remove edges with weights <= 0.3 to make tree structure clearer
+            G_tree = nx.DiGraph()
+            for node in G.nodes():
+                G_tree.add_node(node, **G.nodes[node])
+            
+            for u, v, d in G.edges(data=True):
+                if d['weight'] > 0.3:  # Only keep strong connections
+                    G_tree.add_edge(u, v, **d)
+            
+            # Use a hierarchical layout with the identified root at the top
+            pos = nx.drawing.nx_agraph.graphviz_layout(G_tree, prog='dot', root=root)
+            print(f"Using hierarchical layout with root = {root}")
+        except Exception as e:
+            print(f"Graphviz layout failed: {e}, falling back to basic tree layout")
+            try:
+                pos = nx.drawing.nx_pydot.graphviz_layout(G, prog='dot', root=root)
+                print("Using PyDot 'dot' layout")
+            except Exception as e:
+                print(f"PyDot layout failed: {e}, falling back to spring layout")
+                pos = nx.spring_layout(G, seed=42)
+    else:
+        # Use the original force-directed layout
+        pos = nx.spring_layout(G, seed=42)
+        print("Using spring layout")
+    
+    # Draw nodes
+    nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=500)
+    
+    # Draw edges with width proportional to weight
+    edge_weights = [G[u][v]['weight'] * 5 for u, v in G.edges()]
+    edge_colors = [plt.cm.coolwarm(weight/5) for weight in edge_weights]
+    
+    nx.draw_networkx_edges(G, pos, width=edge_weights, arrowsize=20, 
+                          edge_color=edge_colors, alpha=0.8)
+    
+    # Add labels
+    labels = {}
+    for i in range(n_nodes):
+        if i < triples_num:
+            labels[i] = f"T{i}"
+        else:
+            labels[i] = f"J{i-triples_num}"
+    
+    nx.draw_networkx_labels(G, pos, labels=labels, font_size=12, font_color='white')
+    
+    plt.title("Query Plan Visualization", fontsize=16)
+    
+    # Add colorbar
+    sm = plt.cm.ScalarMappable(cmap=plt.cm.coolwarm, norm=plt.Normalize(0, 1))
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=plt.gca(), pad=0.01, aspect=40)
+    cbar.set_label('Edge Weight', fontsize=12)
+    
+    plt.axis('off')
+    plt.tight_layout()
+    
+    # Save with layout type in filename
+    layout_type = "tree" if use_tree_layout else "force"
+    plt.savefig(f"{visualization_dir}/adjacency_matrix_query_{query_idx}_{layout_type}.png")
+    plt.close()
+    
+    return G
+
+
+def optimize_query_gumbel_lbfgs(
+    query_data,
+    model,
+    device: str = "cpu",
+    *,
+    optimization_steps: int = 500,
+    verbose: bool = True,
+    learning_rate: float = 0.1,
+    lbfgs_max_iter: int = 20,
+    lambda_acyclic: float = 1000.0,
+    lambda_triple_in: float = 1000.0,
+    lambda_triple_out: float = 1000.0,
+    lambda_join_in: float = 500.0,
+    lambda_join_out: float = 1000.0,
+    lambda_entropy: float = 10.0,
+    lambda_total_penalty: float = 1.0,
+    # Gumbel-Sigmoid specific hyper-parameters
+    init_tau: float = 10.0,
+    min_tau: float = 1.,
+    tau_decay: float = 0.999,
+    return_best: bool = True,
+):
+    """Gradient-based join-order search using **LBFGS** instead of AdamW.
+
+    This function is largely identical to :pyfunc:`optimize_query_gumbel` but
+    replaces the AdamW optimiser with PyTorch's LBFGS. The signature is kept
+    compatible so it can be used as a drop-in replacement.
+    """
+    import torch.optim as optim  # local import keeps global namespace clean
+
+    # ------------------------------------------------------------------
+    # Move data & bookkeeping
+    # ------------------------------------------------------------------
+    data = query_data.to(device)
+    N_NODES = len(data.x)
+    triples_num = (N_NODES + 1) // 2
+
+    # All directed candidate edges (no self-loops) ---------------------
+    src, dst = torch.where(~torch.eye(N_NODES, dtype=torch.bool))
+    edge_index = torch.stack([src, dst], dim=0).to(device)
+    num_edges = edge_index.size(1)
+
+    # Optimised parameters: edge logits (≈0 ⇒ p≈0.5) -------------------
+    edge_logits = 0.1 * (torch.rand(num_edges, device=device) - 0.5)
+    edge_logits.requires_grad_(True)
+
+    # ------------------------------------------------------------------
+    # LBFGS optimiser with more conservative line search
+    # ------------------------------------------------------------------
+    optimiser = optim.LBFGS([edge_logits], lr=learning_rate,
+                           max_iter=lbfgs_max_iter,
+                           max_eval=None,  # Allow more func evals
+                           tolerance_grad=1e-5,
+                           tolerance_change=1e-7,
+                           history_size=100,
+                           line_search_fn='strong_wolfe')
+
+    best_cost = float('inf')
+    best_edge_logits = None
+    best_penalty = float('inf')
+    no_improve_count = 0
+    max_no_improve = 5  # Early stopping if no improvement for this many steps
+
+    # Metric histories for optional plotting ---------------------------
+    cost_hist = []
+    tot_pen_hist = []
+    acyc_hist = []
+    triple_in_hist = []
+    triple_out_hist = []
+    join_in_hist = []
+    join_out_hist = []
+    entropy_hist = []
+    had_nan = False
+
+    def _compute_loss(tau, step_idx):
+        """Helper to compute loss & penalties given current *edge_logits*."""
+        nonlocal best_cost, best_edge_logits, best_penalty, had_nan
+        
+        edge_weights = sample_binary_concrete(edge_logits, tau)
+        cost_pred = model(data.x, edge_index, edge_weight=edge_weights)
+
+        # Check for NaN values early
+        if torch.isnan(cost_pred):
+            had_nan = True
+            raise ValueError("Cost prediction returned NaN")
+
+        # Build adjacency
+        A = torch.zeros((N_NODES, N_NODES), device=device)
+        A[edge_index[0], edge_index[1]] = edge_weights
+
+        in_deg, out_deg = A.sum(0), A.sum(1)
+        triple_nodes = torch.arange(triples_num, device=device)
+        join_nodes = torch.arange(triples_num, N_NODES, device=device)
+        root = N_NODES - 1
+        non_root_joins = torch.arange(triples_num, root, device=device)
+
+        # Penalties
+        P_triple_in = (in_deg[triple_nodes] ** 2).sum()
+        P_triple_out = ((out_deg[triple_nodes] - 1) ** 2).sum()
+        P_join_in = ((in_deg[join_nodes] - 2) ** 2).sum()
+        P_join_out = ((out_deg[non_root_joins] - 1) ** 2).sum() + out_deg[root] ** 2
+        P_acyclic = torch.trace(torch.matrix_exp(A)) - N_NODES
+
+        eps = 1e-10
+        probs = torch.sigmoid(edge_logits)
+        P_entropy = -(probs * torch.log(probs + eps) + (1 - probs) * torch.log(1 - probs + eps)).sum()
+
+        total_penalty = (
+            lambda_triple_in * P_triple_in
+            + lambda_triple_out * P_triple_out
+            + lambda_join_in * P_join_in
+            + lambda_join_out * P_join_out
+            + lambda_acyclic * P_acyclic
+            + lambda_entropy * P_entropy
+        )
+
+        # Check for NaN in penalties
+        if torch.isnan(total_penalty):
+            had_nan = True
+            raise ValueError("Penalty computation returned NaN")
+
+        # Gentle ramp-up for penalty weight ----------------------------
+        frac = min(1.0, step_idx / optimization_steps)
+        lambda_total = lambda_total_penalty * (frac ** 2)
+
+        loss_val = cost_pred + lambda_total * total_penalty
+
+        # Track best feasible solution ---------------------------------
+        curr_cost = float(cost_pred.item())
+        curr_penalty = float(total_penalty.item())
+        
+        if return_best and curr_penalty < best_penalty and curr_cost < best_cost:
+            best_cost = curr_cost
+            best_penalty = curr_penalty
+            best_edge_logits = edge_logits.clone().detach()
+
+        # Store metrics for plotting -----------------------------------
+        cost_hist.append(curr_cost)
+        tot_pen_hist.append(curr_penalty)
+        acyc_hist.append(float(P_acyclic.item()))
+        triple_in_hist.append(float(P_triple_in.item()))
+        triple_out_hist.append(float(P_triple_out.item()))
+        join_in_hist.append(float(P_join_in.item()))
+        join_out_hist.append(float(P_join_out.item()))
+        entropy_hist.append(float(P_entropy.item()))
+
+        return loss_val
+
+    # ------------------------------------------------------------------
+    # Outer loop – we call LBFGS.step() *optimization_steps* times
+    # ------------------------------------------------------------------
+    try:
+        for step in range(optimization_steps):
+            tau = _temperature_anneal(init_tau, min_tau, tau_decay, step, optimization_steps)
+
+            def closure():
+                optimiser.zero_grad()
+                try:
+                    loss_val = _compute_loss(tau, step)
+                    if torch.isnan(loss_val):
+                        raise ValueError("Loss computation returned NaN")
+                    loss_val.backward()
+                    return loss_val
+                except Exception as e:
+                    print(f"Error in closure at step {step}: {e}")
+                    return None
+
+            try:
+                closure_result = closure()
+                if closure_result is None or had_nan:
+                    print("Optimization failed due to NaN values")
+                    break
+                    
+                optimiser.step(closure)
+            except RuntimeError as e:
+                print(f"LBFGS step failed at step {step}: {e}")
+                break
+
+            # Early stopping check
+            if len(cost_hist) > 1 and abs(cost_hist[-1] - cost_hist[-2]) < 1e-4:
+                no_improve_count += 1
+            else:
+                no_improve_count = 0
+
+            if no_improve_count >= max_no_improve:
+                if verbose:
+                    print(f"Early stopping at step {step+1} - no improvement")
+                break
+
+            if verbose and (step + 1) % 100 == 0:
+                print(f"Step {step+1}/{optimization_steps}  Cost: {cost_hist[-1]:.2f}  Penalty: {tot_pen_hist[-1]:.2f}")
+
+    except KeyboardInterrupt:
+        print("\nOptimization interrupted - using best solution found so far")
+    except Exception as e:
+        print(f"Optimization failed with error: {e}")
+
+    # ------------------------------------------------------------------
+    # Build final *hard* adjacency
+    # ------------------------------------------------------------------
+    with torch.no_grad():
+        use_logits = best_edge_logits if (return_best and best_edge_logits is not None) else edge_logits
+        hard_weights = (torch.sigmoid(use_logits) >= 0.5).float()
+        final_A = torch.zeros((N_NODES, N_NODES), device=device)
+        final_A[edge_index[0], edge_index[1]] = hard_weights
+
+    # Plot optimisation metrics (if requested) -------------------------
+    if verbose and len(cost_hist) > 1 and not had_nan:  # Only plot if we have valid history
+        try:
+            plot_optimization_metrics(cost_hist, tot_pen_hist, acyc_hist,
+                                      triple_in_hist, triple_out_hist,
+                                      join_in_hist, join_out_hist, entropy_hist)
+        except Exception as e:
+            print(f"Failed to plot optimization metrics: {e}")
+
+    if had_nan:
+        raise ValueError("Optimization failed due to NaN values")
+
+    return final_A, triples_num
+
+
 def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimization_steps=500, 
-                         verbose=False, optimization_params=None):
+                         verbose=False, optimization_params=None, optimization_function=None, save_directory="."):
     """
     Evaluate the optimization algorithm on the given SPARQL queries.
     
@@ -752,10 +1330,20 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
         optimization_steps: Number of optimization steps per query
         verbose: Whether to print and plot detailed progress information
         optimization_params: Dictionary of optimization hyperparameters
+        optimization_function: Function to use for optimization (optimize_query_gumbel or optimize_query)
+        save_directory: Directory to save all outputs to
         
     Returns:
         Statistics about the optimization performance
     """
+    # Set default optimization function if not provided
+    if optimization_function is None:
+        optimization_function = optimize_query_gumbel
+    
+    # Create visualization directory
+    visualization_dir = os.path.join(save_directory, "plan_visualizations")
+    os.makedirs(visualization_dir, exist_ok=True)
+    
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -795,12 +1383,22 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             if verbose:
                 print(f"\nRunning gradient-based optimization for query {i}")
             
-            final_adjacency, triples_num = optimize_query(
+            final_adjacency, triples_num = optimization_function(
                 torch_data, model, device, 
                 optimization_steps=optimization_steps, 
                 verbose=verbose,
                 **optimization_params
             )
+
+            try:
+                # Visualize the adjacency matrix
+                print("\nVisualizing the optimized adjacency matrix:")
+                # Try both layouts
+                visualize_adjacency_matrix(final_adjacency, triples_num, visualization_dir, i, use_tree_layout=False)
+                visualize_adjacency_matrix(final_adjacency, triples_num, visualization_dir, i, use_tree_layout=True)
+                print(f"Saved adjacency matrix visualizations to {visualization_dir}/")
+            except Exception as e:
+                print(f"Warning: Failed to visualize adjacency matrix: {e}")
             
             # Convert adjacency to query plan
             gradient_plan = adjacency_to_query_with_real_triples(final_adjacency, triples_num, triple_objs)
@@ -816,14 +1414,12 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             gradient_cost = gradient_plan.root.get_cost()
             gradient_costs.append(gradient_cost)
 
-            # Create visualization directory if it doesn't exist
-            visualization_dir = "plan_visualizations"
-            os.makedirs(visualization_dir, exist_ok=True)
             gradient_plan.visualize(output_file=f"{visualization_dir}/gradient_plan_query_{i}")
             
             if verbose:
                 print(f"Gradient optimization complete. Final cost: {gradient_cost}")
                 print(f"Saved gradient plan visualization to {visualization_dir}/gradient_plan_query_{i}.png")
+
                 
         except Exception as e:
             print(f"Error in gradient optimization for query {i}: {e}")
@@ -853,8 +1449,6 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             if verbose:
                 print(f"Greedy optimization complete. Final cost: {greedy_cost}")
                 # Visualize the plan if verbose
-                visualization_dir = "plan_visualizations"
-                os.makedirs(visualization_dir, exist_ok=True)
                 greedy_plan.visualize(output_file=f"{visualization_dir}/greedy_plan_query_{i}")
                 print(f"Saved greedy plan visualization to {visualization_dir}/greedy_plan_query_{i}.png")
                 
@@ -884,8 +1478,6 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             if verbose:
                 print(f"Random plan created. Cost: {random_cost}")
                 # Visualize the plan if verbose
-                visualization_dir = "plan_visualizations"
-                os.makedirs(visualization_dir, exist_ok=True)
                 random_plan.visualize(output_file=f"{visualization_dir}/random_plan_query_{i}")
                 print(f"Saved random plan visualization to {visualization_dir}/random_plan_query_{i}.png")
                 
@@ -894,25 +1486,15 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             # Use infinity as a placeholder for failed random plans
             random_costs.append(float('inf'))
         
-        # Print progress every 5 queries and generate plots
+        # Print progress every query
         if (i + 1) % 1 == 0:
             print(f"\nProcessed {i+1}/{len(sparql_queries)} queries")
             if gradient_costs:
-                print(f"Average gradient cost: {np.mean(gradient_costs):.2f}")
+                print(f"Median gradient cost: {np.median(gradient_costs):.2f}")
             if greedy_costs:
-                print(f"Average greedy cost: {np.mean(greedy_costs):.2f}")
+                print(f"Median greedy cost: {np.median(greedy_costs):.2f}")
             if random_costs:
-                print(f"Average random cost: {np.mean(random_costs):.2f}")
-                
-            # Create intermediate statistics and save plots (without displaying)
-            intermediate_stats = {
-                'gradient_costs': gradient_costs,
-                'greedy_costs': greedy_costs,
-                'random_costs': random_costs
-            }
-            # Save plots without showing them, with a suffix indicating the iteration
-            plot_statistics(intermediate_stats, show_plots=False, suffix=f"_iter_{i+1}")
-            print(f"Saved intermediate plots at iteration {i+1}")
+                print(f"Median random cost: {np.median(random_costs):.2f}")
     
     # Calculate statistics
     stats = {
@@ -928,16 +1510,20 @@ if __name__ == "__main__":
     # Configuration for optimization
     config = {
         # General parameters
-        'queries_file': "sparql_queries_8_single/queries.pkl",
-        'model_path': "/home/tim/query_optimization/8tp_v3.pt",
-        'num_queries': 500,
-        'optimization_steps': 5000,
-        'verbose': True,
+        'queries_file': "datasets/sparql_queries_4_single/queries.pkl",
+        'model_path': "/home/tim/query_optimization/explicit_join_model/models/join_plus_tp_prediction_all_sizes.pt",
+        'num_queries': 3,
+        'optimization_steps': 2000,
+        'verbose': False,
+        'save_path': "optimization_results",  # Base directory for saving results
         
         # Query optimization hyperparameters
         'optimization_params': {
+            # Optimization procedure selection
+            'optimization_procedure': 'gumbel',  # 'gumbel' or 'normal'
+            
             # Optimizer parameters
-            'learning_rate': 0.01,
+            'learning_rate': 10,
             
             # Penalty weights
             'lambda_acyclic': 1000.0,    # Weight for acyclicity penalty
@@ -945,10 +1531,35 @@ if __name__ == "__main__":
             'lambda_triple_out': 1000.0, # Weight for triple out-degree penalty
             'lambda_join_in': 500.0,     # Weight for join in-degree penalty
             'lambda_join_out': 1000.0,   # Weight for join out-degree penalty
-            'lambda_entropy': 100.0,     # Weight for entropy penalty
-            'lambda_total_penalty': 1.0  # Overall weight for the total penalty
+            'lambda_entropy': 10.0,      # Weight for entropy penalty
+            'lambda_total_penalty': 1.0, # Overall weight for the total penalty
+            
+            # Gumbel-Sigmoid specific parameters
+            'init_tau': 10.0,            # Initial temperature for Gumbel-Sigmoid
+            'min_tau': 1.0,              # Minimum temperature for Gumbel-Sigmoid
+            'tau_decay': 0.999,          # Temperature decay rate
+            'use_temperature_annealing': True,  # Whether to use temperature annealing
+            
+            # Solution selection and penalty ramping
+            'return_best': True,         # Whether to return best feasible solution
+            'min_penalty_threshold': 30.0,  # Minimum penalty for accepting a solution
+            'use_lambda_ramping': True,  # Whether to ramp up lambda_total_penalty
         }
     }
+    
+    # Create unique save directory based on datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_directory = os.path.join(config['save_path'], f"run_{timestamp}")
+    os.makedirs(save_directory, exist_ok=True)
+    
+    print(f"Saving all results to: {save_directory}")
+    
+    # Save configuration to JSON file
+    config_copy = config.copy()
+    config_copy['save_directory'] = save_directory
+    config_copy['timestamp'] = timestamp
+    with open(os.path.join(save_directory, "config.json"), 'w') as f:
+        json.dump(config_copy, f, indent=2)
     
     # Print configuration
     print("Running optimization with the following configuration:")
@@ -961,6 +1572,13 @@ if __name__ == "__main__":
     # Load queries
     sparql_queries = load_sparql_queries(config['queries_file'], config['num_queries'])
     
+    # Select optimization function based on config
+    optimization_procedure = config['optimization_params'].pop('optimization_procedure')
+    if optimization_procedure == 'gumbel':
+        optimization_function = optimize_query_gumbel
+    else:  # 'normal'
+        optimization_function = optimize_query
+    
     # Evaluate optimization
     stats = evaluate_optimization(
         sparql_queries, 
@@ -968,8 +1586,64 @@ if __name__ == "__main__":
         num_queries=config['num_queries'],
         optimization_steps=config['optimization_steps'],
         verbose=config['verbose'],
-        optimization_params=config['optimization_params']
+        optimization_params=config['optimization_params'],
+        optimization_function=optimization_function,
+        save_directory=save_directory
     )
     
+    # Calculate final statistics
+    final_stats = {
+        'gradient': {
+            'mean': float(np.mean(stats['gradient_costs'])),
+            'median': float(np.median(stats['gradient_costs'])),
+            'std': float(np.std(stats['gradient_costs'])),
+            'min': float(np.min(stats['gradient_costs'])),
+            'max': float(np.max(stats['gradient_costs']))
+        },
+        'greedy': {
+            'mean': float(np.mean(stats['greedy_costs'])),
+            'median': float(np.median(stats['greedy_costs'])),
+            'std': float(np.std(stats['greedy_costs'])),
+            'min': float(np.min(stats['greedy_costs'])),
+            'max': float(np.max(stats['greedy_costs']))
+        },
+        'random': {
+            'mean': float(np.mean(stats['random_costs'])),
+            'median': float(np.median(stats['random_costs'])),
+            'std': float(np.std(stats['random_costs'])),
+            'min': float(np.min(stats['random_costs'])),
+            'max': float(np.max(stats['random_costs']))
+        },
+        'ratios': {
+            'gradient_to_random_mean': float(np.mean(np.array(stats['gradient_costs']) / np.array(stats['random_costs']))),
+            'greedy_to_random_mean': float(np.mean(np.array(stats['greedy_costs']) / np.array(stats['random_costs']))),
+            'gradient_to_greedy_mean': float(np.mean(np.array(stats['gradient_costs']) / np.array(stats['greedy_costs'])))
+        },
+        'win_rates': {
+            'gradient_vs_random': float(np.sum(np.array(stats['gradient_costs']) < np.array(stats['random_costs'])) / len(stats['gradient_costs']) * 100),
+            'greedy_vs_random': float(np.sum(np.array(stats['greedy_costs']) < np.array(stats['random_costs'])) / len(stats['greedy_costs']) * 100)
+        }
+    }
+    
+    # Save final statistics to JSON file
+    with open(os.path.join(save_directory, "final_statistics.json"), 'w') as f:
+        json.dump(final_stats, f, indent=2)
+    
+    # Print final statistics
+    print("\n" + "="*50)
+    print("FINAL STATISTICS")
+    print("="*50)
+    print(f"Gradient - Mean: {final_stats['gradient']['mean']:.2f}, Median: {final_stats['gradient']['median']:.2f}")
+    print(f"Greedy - Mean: {final_stats['greedy']['mean']:.2f}, Median: {final_stats['greedy']['median']:.2f}")
+    print(f"Random - Mean: {final_stats['random']['mean']:.2f}, Median: {final_stats['random']['median']:.2f}")
+    print(f"Gradient win rate vs Random: {final_stats['win_rates']['gradient_vs_random']:.1f}%")
+    print(f"Greedy win rate vs Random: {final_stats['win_rates']['greedy_vs_random']:.1f}%")
+    
     # Plot final statistics with display
-    plot_statistics(stats, show_plots=True)
+    plot_statistics(stats, show_plots=True, save_directory=save_directory)
+    
+    print(f"\nAll results saved to: {save_directory}")
+    print(f"- Configuration: config.json")
+    print(f"- Final statistics: final_statistics.json") 
+    print(f"- Plots: *.png files")
+    print(f"- Plan visualizations: plan_visualizations/ subdirectory")

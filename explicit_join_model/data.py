@@ -93,9 +93,55 @@ class Triple:
 			[0]
 		], axis=0)
 	
-	def get_cost(self) -> int:
-		return 0
+	def get_cardinality(self) -> int:
+		"""
+		Returns the cardinality (number of matching triples) for this triple pattern.
+		This is useful when the triple pattern is considered as a standalone query.
+		"""
+		query = f"""
+			SELECT COUNT(*) AS ?count
+			FROM <http://lubm>
+			WHERE {{ 
+				{self.where_body()}	
+			}}
+		"""
+		res = requests.get(
+			"http://127.0.0.1:8890/sparql/",
+			params={
+				"query": query,
+				"format": "csv",
+			},
+		).text
+		
+		m = re.match(r'"count"\n(\d+)\n', res)
+		
+		if not m:
+			num_trials = 3
+			while not m and num_trials > 0:
+				res = requests.get(
+					"http://127.0.0.1:8890/sparql/",
+					params={
+						"query": query,
+						"format": "csv",
+					},
+				).text
+				m = re.match(r'"count"\n(\d+)\n', res)
+				num_trials -= 1
 
+			if not m:
+				print("Error in the following query:", query)
+				raise RuntimeError("Query failed")
+
+		return int(m.group(1))
+	
+	def get_cost(self) -> int:
+		"""
+		Returns the cost of this triple pattern when used in a join.
+		For triple patterns, we always return 0 to avoid double-counting in join costs.
+		Use get_cardinality() to get the actual number of matching triples.
+		"""
+		return 0
+	
 	def add_to_graph(self, graph, node_id):
 		label = f"{self.s} {self.p} {self.o}"
 		graph.node(str(node_id), label=label, shape="box")
@@ -182,6 +228,49 @@ class Join:
 
 		return self_cardinality + left_cardinality + right_cardinality
 	
+	def get_cardinality(self) -> int:
+		query = f"""
+			SELECT COUNT(*) AS ?count
+			FROM <http://lubm>
+			WHERE {{ 
+				{self.where_body()}	
+			}}
+		"""
+		res = requests.get(
+			"http://127.0.0.1:8890/sparql/",
+			params={
+				"query": query,
+				"format": "csv",
+			},
+		).text
+		
+		m = re.match(r'"count"\n(\d+)\n', res)
+		
+		if not m:
+			num_trials = 3
+			while not m and num_trials > 0:
+				res = requests.get(
+					"http://127.0.0.1:8890/sparql/",
+					params={
+						"query": query,
+						"format": "csv",
+					},
+				).text
+				m = re.match(r'"count"\n(\d+)\n', res)
+				num_trials -= 1
+
+			if not m:
+				print("Error in the following query:", query)
+				raise RuntimeError("Query failed")
+
+		self_cardinality = int(m.group(1))
+
+		left_cardinality = self.left.get_cost()
+		right_cardinality = self.right.get_cost()
+
+		return self_cardinality
+	
+
 	def add_to_graph(self, graph, node_id):
 		# Create join node with bowtie symbol
 		join_id = node_id

@@ -72,7 +72,14 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
     # Create mapping from triple pattern to index
     triple_objs = [Triple(*(Entity(name=name) for name in triple[:3])) for triple in triples]
     triple_to_index = {str(triple): i for i, triple in enumerate(triple_objs)}
-    
+
+    card = join_plans[0].root.get_cardinality()
+    if card < MIN_CARDINALITY:
+        return None
+    else:
+        print(f"Query has cardinality {card}")
+
+
     for plan in join_plans:
         try:
             # Calculate cost
@@ -284,6 +291,8 @@ def visualize_and_save_plans(sparql_query: SPARQLQuery, query_idx: int, output_d
         except Exception as e:
             print(f"  Error visualizing plan {i} for query {query_idx}: {e}")
 
+
+
 if __name__ == "__main__":
     # Load the RDF2Vec embeddings
     with open("/home/tim/query_optimization/queries/rdf2vec100dim.pkl", "rb") as f:
@@ -295,9 +304,12 @@ if __name__ == "__main__":
     
     # Set paths
     input_file = "/home/tim/query_optimization/queries/Star_Queries.json"
-    dataset_dir = "dataset_stars_8_single"
-    sparql_queries_file = "sparql_queries_8_single/queries.pkl"
+    dataset_dir = "dataset_stars_4_single"
+    sparql_queries_file = "sparql_queries_4_single/queries.pkl"
     visualization_dir = "join_plan_visualizations"
+
+    MAX_QUERIES = 100
+    MIN_CARDINALITY = 1000
     
     # Create visualization directory
     os.makedirs(visualization_dir, exist_ok=True)
@@ -308,22 +320,31 @@ if __name__ == "__main__":
         queries = json.load(f)
     
     # Filter queries with exactly 8 triple patterns
-    queries_8tp = [q for q in queries if len(q["triples"]) == 8]
-    print(f"Found {len(queries_8tp)} queries with exactly 8 triple patterns")
+    queries_8tp = [q for q in queries if len(q["triples"]) == 5]
+    print(f"Found {len(queries_8tp)} queries with exactly 5 triple patterns")
+    
+    # Prefilter queries based on cardinality
     
     # Number of random plans to create per query
-    num_random_plans = 3
+    num_random_plans = 1
     
     # Process queries
     sparql_queries = []
     all_triples = []
     all_torch_data = []
+
+    n_queries = 0
     
     for i, query in enumerate(tqdm(queries_8tp[:], desc="Processing queries")):
+
         try:
-            print(f"Processing query {i+1}/{len(queries_8tp[:])}")
             sparql_query = query_to_sparql_query(query, rdf2vec_dict, counts_dict, num_plans=num_random_plans)
+            if sparql_query is None:
+                continue
             sparql_queries.append(sparql_query)
+            n_queries += 1
+            if n_queries > MAX_QUERIES:
+                break
             
             # Visualize and save all plans for this query
             #visualize_and_save_plans(sparql_query, i, visualization_dir)
@@ -348,6 +369,7 @@ if __name__ == "__main__":
             print(f"  Plans costs: {sparql_query.costs}")
             print(f"  Best plan index: {sparql_query.get_best_plan_index()}")
         except Exception as e:
+            raise
             print(f"Error processing query {i}: {e}")
     
     # Save all SPARQLQuery objects to a single file
