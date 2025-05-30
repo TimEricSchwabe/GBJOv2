@@ -62,6 +62,58 @@ class SingleFileQueryDataset(Dataset):
     def get(self, idx):
         return self.data_list[idx]
 
+class SingleFileRNNQueryDataset(Dataset):
+    """Dataset loader for the RNN training data stored in a single ``dataset.pt`` file.
+    Each datapoint is expected to be a dictionary (or any PyTorch container) with at
+    least the following keys:
+
+    ``x`` : ``torch.FloatTensor`` with shape ``(seq_len, feature_dim)`` –
+        the sequential triple-pattern embeddings in the *join order* that was
+        executed/generated for this query.
+    ``y`` : ``torch.FloatTensor`` with shape ``(seq_len,)`` –
+        the *incremental* cost after every time-step of that join order.  Position
+        0 must contain the standalone cardinality of the first triple-pattern;
+        positions ``1..seq_len-1`` contain the join cardinality introduced by the
+        corresponding join step **without** re-adding triple costs (see the
+        dataset generation script).
+
+    Additional keys are ignored by the loader and passed through unchanged so
+    that future extensions of the datapoint structure do not require changes to
+    this class.
+    """
+
+    def __init__(self, root, transform=None, pre_transform=None, pre_filter=None):
+
+        self.dataset_path = os.path.join(root, "dataset.pt")
+        super().__init__(root, transform, pre_transform, pre_filter)
+
+        if os.path.exists(self.dataset_path):
+
+            self.data_dict = torch.load(self.dataset_path)
+            self.data_list = self.data_dict["data"]
+        else:
+            raise FileNotFoundError(f"Dataset file not found at {self.dataset_path}")
+
+    # ------------------------------------------------------------------
+    @property
+    def raw_file_names(self):
+        return []
+
+    @property
+    def processed_file_names(self):
+        # Presence of the single file is sufficient.
+        return ["dataset.pt"] if os.path.exists(self.dataset_path) else []
+
+    def process(self):
+        # No on-the-fly processing – dataset generation happens offline.
+        pass
+
+    def len(self):
+        return len(self.data_list)
+
+    def get(self, idx):
+        return self.data_list[idx]
+
 def save_dataset(triples, torch_dataset, output_dir, clear_existing=False):
     """
     Save dataset to disk for batch loading

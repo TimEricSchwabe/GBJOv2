@@ -265,8 +265,6 @@ class Join:
 
 		self_cardinality = int(m.group(1))
 
-		left_cardinality = self.left.get_cost()
-		right_cardinality = self.right.get_cost()
 
 		return self_cardinality
 	
