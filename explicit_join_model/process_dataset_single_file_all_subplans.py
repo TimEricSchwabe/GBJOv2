@@ -475,20 +475,37 @@ def visualize_and_save_plans(sparql_query: SPARQLQuery, query_idx: int, output_d
         except Exception as e:
             print(f"  Error visualizing plan {i} for query {query_idx}: {e}")
 
+def has_all_variable_triple_pattern(query_data: dict) -> bool:
+    """
+    Check if any triple pattern in the query has all variables.
+    
+    Args:
+        query_data: Dictionary containing query data with "triples" key
+        
+    Returns:
+        True if any triple pattern has all variables, False otherwise
+    """
+    for triple in query_data["triples"]:
+        # Check if all components (subject, predicate, object) are variables
+        # Variables start with '?' in SPARQL
+        if all(component.startswith('?') for component in triple[:3]):  # [:3] to skip the trailing '.'
+            return True
+    return False
+
 if __name__ == "__main__":
     # Load the RDF2Vec embeddings
-    with open("/home/tim/query_optimization/queries/rdf2vec100dim.pkl", "rb") as f:
+    with open("/home/tim/query_optimization/datasets/queries/rdf2vec100dim.pkl", "rb") as f:
         rdf2vec_dict = pickle.load(f)
     
-    with open("/home/tim/query_optimization/queries/counts.pkl", "rb") as f:
+    with open("/home/tim/query_optimization/datasets/queries/counts.pkl", "rb") as f:
         counts_dict = pickle.load(f)
 
     
     # Set paths
-    input_file = "/home/tim/query_optimization/queries/Star_Queries.json"
-    dataset_dir = "dataset_stars_8_with_subplans"
-    sparql_queries_file = "sparql_queries_8_with_subplans/queries.pkl"
-    visualization_dir = "join_plan_visualizations_with_subplans"
+    input_file = "/home/tim/query_optimization/datasets/queries/Path_Queries.json"
+    dataset_dir = "dataset_path_8_with_subplans"
+    sparql_queries_file = "sparql_path_queries_8_with_subplans/queries.pkl"
+    visualization_dir = "join_plan_visualizations_path_8_with_subplans"
     
     # Create visualization directory
     os.makedirs(visualization_dir, exist_ok=True)
@@ -498,21 +515,21 @@ if __name__ == "__main__":
     with open(input_file, "r") as f:
         queries = json.load(f)
     
-    # Filter queries with exactly 8 triple patterns
-    queries_8tp = [q for q in queries if len(q["triples"]) == 8]
-    print(f"Found {len(queries_8tp)} queries with exactly 8 triple patterns")
+    # Filter queries with exactly 8 triple patterns and no all-variable patterns
+    queries_8tp = [q for q in queries if len(q["triples"]) == 4 and not has_all_variable_triple_pattern(q)]
+    print(f"Found {len(queries_8tp)} valid queries with exactly 8 triple patterns (excluding queries with all-variable patterns)")
     
     # Number of random plans to create per query
-    num_random_plans = 3
+    num_random_plans = 3 
     
     # Process queries
     sparql_queries = []
     all_triples = []
     all_torch_data = []
     
-    for i, query in enumerate(tqdm(queries_8tp[:6000], desc="Processing queries")):
+    for i, query in enumerate(tqdm(queries_8tp[:30000], desc="Processing queries")):
         try:
-            print(f"Processing query {i+1}/{len(queries_8tp[:6000])}")
+            print(f"Processing query {i+1}/{len(queries_8tp[:30000])}")
             sparql_query = query_to_sparql_query(query, rdf2vec_dict, counts_dict, num_plans=num_random_plans)
             sparql_queries.append(sparql_query)
             

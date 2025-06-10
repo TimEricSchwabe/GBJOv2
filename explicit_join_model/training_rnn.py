@@ -18,24 +18,52 @@ from data_loader import SingleFileRNNQueryDataset
 class CostRNNSeq(torch.nn.Module):
     def __init__(self, in_dim: int, hidden_dim: int = 128):
         super().__init__()
-        self.embed = torch.nn.Linear(in_dim, hidden_dim)
-        self.rnn   = torch.nn.LSTM(in_dim, hidden_dim, num_layers=2, batch_first=True)
+        self.embed = torch.nn.Linear(in_dim, hidden_dim) 
+        self.rnn   = torch.nn.RNN(hidden_dim, hidden_dim, num_layers=3, batch_first=True, dropout=0.2, nonlinearity='relu')
         self.head  = torch.nn.Sequential(
-            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.Linear(hidden_dim, hidden_dim // 2),
             torch.nn.ReLU(),
-            torch.nn.Linear(hidden_dim, 1)
+            torch.nn.Linear(hidden_dim // 2, 1)
         )
 
     def forward(self, seq_feats: torch.Tensor) -> torch.Tensor:  # (B, T, D)
         if seq_feats.dim() == 2:  # (T, D) → (1, T, D)
             seq_feats = seq_feats.unsqueeze(0)
 
-        #x = torch.relu(self.embed(seq_feats))  # (B, T, H)
-        x = seq_feats
+        x = self.embed(seq_feats)  # (B, T, H)
+        #x = seq_feats
         out_seq, _ = self.rnn(x)               # (B, T, H)
         cost_pred = self.head(out_seq).squeeze(-1)  # (B, T)
         
-        return cost_pred
+        return torch.abs(cost_pred)
+    
+
+class CostFFN(torch.nn.Module):
+    def __init__(self, in_dim: int, hidden_dim: int = 128):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(in_dim, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(0.2),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ReLU(), 
+            torch.nn.Dropout(0.2),
+            torch.nn.Linear(hidden_dim, hidden_dim // 2),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim // 2, 1)
+        )
+
+    def forward(self, seq_feats: torch.Tensor) -> torch.Tensor:  # (B, T, D)
+        if seq_feats.dim() == 2:  # (T, D) → (1, T, D)
+            seq_feats = seq_feats.unsqueeze(0)
+            
+        # Apply feedforward net to each timestep independently
+        B, T, D = seq_feats.shape
+        x = seq_feats.view(-1, D)  # (B*T, D)
+        x = self.net(x)  # (B*T, 1) 
+        cost_pred = x.view(B, T)  # (B, T)
+        
+        return torch.abs(cost_pred)
 
 
 def calculate_qerror(pred: torch.Tensor, true: torch.Tensor) -> torch.Tensor:
@@ -50,7 +78,15 @@ def collate_fn(batch):
     """Collate function to stack variable dictionaries."""
     x = torch.stack([item["x"] for item in batch], dim=0)  # (B, T, D)
     y = torch.stack([item["y"] for item in batch], dim=0)  # (B, T)
-    return {"x": x, "y": y}
+    
+    # Handle triples separately since they're not tensors
+    triples = [item.get("triples", []) for item in batch]
+    
+    return {
+        "x": x, 
+        "y": y,
+        "triples": triples  # Add triples to batch without affecting training
+    }
 
 
 def train_model(
@@ -64,8 +100,15 @@ def train_model(
     save_path: str | None = None,
     loss_type: str = "mse",
     target_position: str = "all",  # "all" | "first" | "last"
+    result_dir: Path | None = None,  # Add result_dir parameter
 ):
     best_perf = float("inf")
+    
+    # Lists to store metrics for plotting
+    val_losses = []
+    val_qerrors = []
+    val_mses = []
+    epochs = []
 
     for epoch in range(num_epochs):
         model.train()
@@ -116,6 +159,42 @@ def train_model(
             val_loss, val_mse, val_qerr = validate_model(
                 model, criterion, val_loader, device, loss_type, target_position
             )
+            
+            # Store metrics for plotting
+            epochs.append(epoch + 1)
+            val_losses.append(val_loss)
+            val_mses.append(val_mse)
+            val_qerrors.append(val_qerr)
+            
+            # Plot validation metrics
+            if result_dir:
+                fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
+                
+                ax1.plot(epochs, val_losses)
+                ax1.set_title('Validation Loss')
+                ax1.set_xlabel('Epoch')
+                ax1.set_ylabel('Loss')
+                ax1.grid(True)
+                
+                ax2.plot(epochs, val_mses)
+                ax2.set_title('Validation MSE')
+                ax2.set_xlabel('Epoch')
+                ax2.set_ylabel('MSE')
+                ax2.grid(True)
+                
+                ax3.plot(epochs, val_qerrors)
+                ax3.set_title('Validation Q-Error')
+                ax3.set_xlabel('Epoch')
+                ax3.set_ylabel('Q-Error')
+                ax3.grid(True)
+                
+                plt.tight_layout()
+                plt.savefig(result_dir / 'validation_metrics.png')
+                plt.close()
+                
+                # Plot predictions vs truth after each epoch
+                plot_prediction_vs_truth_seq(model, val_loader.dataset, device, result_dir, debug=False)
+            
             if val_loss < best_perf:
                 best_perf = val_loss
                 if save_path:
@@ -195,6 +274,7 @@ def plot_prediction_vs_truth_seq(
     dataset: torch.utils.data.Dataset,
     device: torch.device,
     result_dir: Path,
+    debug: bool = False,
 ):
     """Create scatter & box plots of predicted vs. true *incremental* costs.
 
@@ -203,7 +283,7 @@ def plot_prediction_vs_truth_seq(
     Plots are saved directly to result_dir/plots/.
     """
     model.eval()
-    loader = DataLoader(dataset, batch_size=256, shuffle=False, collate_fn=collate_fn)
+    loader = DataLoader(dataset, batch_size=128, shuffle=False, collate_fn=collate_fn)
 
     all_preds, all_trues = [], []
     with torch.no_grad():
@@ -215,6 +295,23 @@ def plot_prediction_vs_truth_seq(
 
             all_preds.append(y_pred.cpu())
             all_trues.append(y_true.cpu())
+
+            # Debug: Print triples for high qerror and specific cardinality range
+            if debug:
+                qerror = calculate_qerror(y_pred.cpu(), y_true.cpu())
+                if torch.any(qerror[0][0] > 1.4) and torch.any((y_pred[:,0].cpu() >= 193) & (y_pred[:,0].cpu() <= 197)):
+                    print("\nFound problematic prediction:")
+                    print(f"Triples: {batch['triples'][0]}")
+                    print(f"True cardinality: {y_true.cpu().numpy()}")
+                    print(f"Predicted cardinality: {y_pred.cpu().numpy()}")
+                    print(f"Q-error: {qerror.numpy()}\n")
+                else:
+                    print("No problematic prediction found")
+                    print(f"Triples: {batch['triples'][0]}")
+                    print(f"True cardinality: {y_true.cpu().numpy()}")
+                    print(f"Predicted cardinality: {y_pred.cpu().numpy()}")
+                    print(f"Q-error: {qerror.numpy()}\n")
+
 
     y_pred_all = torch.cat(all_preds, dim=0)  # (N, T)
     y_true_all = torch.cat(all_trues, dim=0)  # (N, T)
@@ -326,7 +423,7 @@ def plot_prediction_vs_truth_seq(
 def setup_result_dir(config: Dict) -> Path:
     """Create and return path to result directory with timestamp."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_dir = Path("training_results") / f"rnn_{timestamp}"
+    result_dir = Path(config["root_dir"]) / "training_results" / f"rnn_{timestamp}"
     result_dir.mkdir(parents=True, exist_ok=True)
 
     # Save configuration
@@ -357,12 +454,12 @@ if __name__ == "__main__":
         "node_feature_dim": 307,
         "hidden_dim": 512,
         "learning_rate": 1e-4,
-        "batch_size": 32,
-        "num_epochs": 50,
-        "loss_type": "mse",  # or "qerror"
-        "target_position": "last",  # "all" | "first" | "last"
+        "batch_size": 128,
+        "num_epochs": 200,
+        "loss_type": "mse",  # mse or "qerror"
+        "target_position": "first",  # "all" | "first" | "last"
         "root_dir": "/home/tim/query_optimization/",
-        "dataset_dir": "dataset_stars_8_tp_rnn",
+        "dataset_dir": "dataset_stars_1_tp_rnn",
         "enable_training": True,
     }
 
@@ -384,14 +481,14 @@ if __name__ == "__main__":
     val_size = int(0.2 * len(dataset))
     train_size = len(dataset) - val_size
 
-    #train_size=5
+    train_size=18000
 
     train_indices = list(range(train_size))
     #train_indices = [2, 3]
     val_indices = list(range(len(dataset) - val_size, len(dataset)))
     train_dataset = torch.utils.data.Subset(dataset, train_indices)
     val_dataset = torch.utils.data.Subset(dataset, val_indices)
-    #val_dataset = train_dataset
+    val_dataset = train_dataset
 
     #val_dataset = train_dataset #TODO: remove
     print(f"Train size: {train_size} | Val size: {val_size}")
@@ -426,13 +523,14 @@ if __name__ == "__main__":
             save_path=model_path,  # save best model in result dir
             loss_type=config["loss_type"],
             target_position=config["target_position"],
+            result_dir=result_dir,  # Pass result_dir to train_model
         )
         print("Training complete.")
     else:
         # Try to load from previous run
         try:
             # Look for most recent result directory
-            result_dirs = "/home/tim/query_optimization/training_results/v1"
+            result_dirs = "/home/tim/query_optimization/training_results/first_only"
             model_path = os.path.join(result_dirs, "model.pt")
             
             model.load_state_dict(torch.load(model_path, map_location=device))
@@ -443,7 +541,7 @@ if __name__ == "__main__":
 
     # ------ evaluation & plots -------------------------------------------
     print("Creating prediction plots …")
-    plot_prediction_vs_truth_seq(model, val_dataset, device, result_dir)
+    plot_prediction_vs_truth_seq(model, val_dataset, device, result_dir, debug=True)
 
     # ------ save results ------------------------------------------------
     save_training_results(model, result_dir, config)

@@ -11,6 +11,24 @@ from tqdm import tqdm
 import shutil
 from data_loader import QueryDataset
 
+
+def has_all_variable_triple_pattern(query_data: dict) -> bool:
+    """
+    Check if any triple pattern in the query has all variables.
+    
+    Args:
+        query_data: Dictionary containing query data with "triples" key
+        
+    Returns:
+        True if any triple pattern has all variables, False otherwise
+    """
+    for triple in query_data["triples"]:
+        # Check if all components (subject, predicate, object) are variables
+        # Variables start with '?' in SPARQL
+        if all(component.startswith('?') for component in triple[:3]):  # [:3] to skip the trailing '.'
+            return True
+    return False
+
 @dataclass
 class SPARQLQuery:
     """Class to hold multiple join plans for a 8-triple pattern query"""
@@ -295,21 +313,22 @@ def visualize_and_save_plans(sparql_query: SPARQLQuery, query_idx: int, output_d
 
 if __name__ == "__main__":
     # Load the RDF2Vec embeddings
-    with open("/home/tim/query_optimization/queries/rdf2vec100dim.pkl", "rb") as f:
+    with open("/home/tim/query_optimization/datasets/queries/rdf2vec100dim.pkl", "rb") as f:
         rdf2vec_dict = pickle.load(f)
     
-    with open("/home/tim/query_optimization/queries/counts.pkl", "rb") as f:
+    with open("/home/tim/query_optimization/datasets/queries/counts.pkl", "rb") as f:
         counts_dict = pickle.load(f)
 
     
     # Set paths
-    input_file = "/home/tim/query_optimization/queries/Star_Queries.json"
-    dataset_dir = "dataset_stars_4_single"
-    sparql_queries_file = "sparql_queries_4_single/queries.pkl"
+    input_file = "/home/tim/query_optimization/datasets/queries/Path_Queries.json"
+    dataset_dir = "datasets/dataset_path_4"
+    sparql_queries_file = "datasets/sparql_queries_path_4/queries.pkl"
     visualization_dir = "join_plan_visualizations"
 
     MAX_QUERIES = 100
     MIN_CARDINALITY = 1000
+    N_TRIPLES = 4
     
     # Create visualization directory
     os.makedirs(visualization_dir, exist_ok=True)
@@ -320,8 +339,10 @@ if __name__ == "__main__":
         queries = json.load(f)
     
     # Filter queries with exactly 8 triple patterns
-    queries_8tp = [q for q in queries if len(q["triples"]) == 5]
-    print(f"Found {len(queries_8tp)} queries with exactly 5 triple patterns")
+    queries_8tp = [q for q in queries if len(q["triples"]) == N_TRIPLES]
+    # Filter queries for min cardinality
+    queries_8tp = [q for q in queries_8tp if q["y"] >= MIN_CARDINALITY and not has_all_variable_triple_pattern(q)]
+    print(f"Found {len(queries_8tp)} queries with exactly {N_TRIPLES} triple patterns and min cardinality {MIN_CARDINALITY}")
     
     # Prefilter queries based on cardinality
     
@@ -335,7 +356,7 @@ if __name__ == "__main__":
 
     n_queries = 0
     
-    for i, query in enumerate(tqdm(queries_8tp[:], desc="Processing queries")):
+    for i, query in enumerate(tqdm(queries_8tp[:MAX_QUERIES], desc="Processing queries")):
 
         try:
             sparql_query = query_to_sparql_query(query, rdf2vec_dict, counts_dict, num_plans=num_random_plans)
@@ -378,4 +399,4 @@ if __name__ == "__main__":
     # Save dataset to a single file
     save_dataset_single_file(all_triples, all_torch_data, dataset_dir)
     
-    print("\nDataset conversion complete!") 
+    print("\nDataset conversion complete!")

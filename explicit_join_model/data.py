@@ -144,6 +144,9 @@ class Triple:
 	
 	def add_to_graph(self, graph, node_id):
 		label = f"{self.s} {self.p} {self.o}"
+		# Escape double quotes to avoid Graphviz syntax errors
+		if '"' in label:
+			label = label.replace('"', '\\"')
 		graph.node(str(node_id), label=label, shape="box")
 		return node_id
 

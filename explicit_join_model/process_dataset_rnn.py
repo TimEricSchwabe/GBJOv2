@@ -7,6 +7,7 @@ from typing import List
 import numpy as np
 import torch
 from tqdm import tqdm
+from torch_geometric.data import Data  # For GNN datapoints
 
 from data import Entity, Triple, Join, Query
 from data_loader import save_dataset_single_file
@@ -40,8 +41,8 @@ def generate_datapoint(
         {var for t in triple_objs for var in t.variables},
         key=lambda v: v.name,
     )
-    rng = random.Random()
-    rng.shuffle(variables)
+    #rng = random.Random()
+    #rng.shuffle(variables)
     variable_id_dict = {var: idx for idx, var in enumerate(variables)}
 
     # -------- embeddings in permutation order ------------------------------
@@ -77,15 +78,62 @@ def generate_datapoint(
 
     return triples_where, data_dict
 
+# -----------------------------------------------------------------------------
+# ----------------- NEW: GNN datapoint (first triple only) ---------------------
+# -----------------------------------------------------------------------------
+
+def generate_gnn_datapoint_first_triple(
+    triples_raw: List[List[str]],
+    permutation: List[int],
+    rdf2vec_dict,
+    counts_dict,
+) -> tuple[List[str], Data]:
+    """Create a *single-node* GNN datapoint from the *first* triple of the plan.
+
+    The node feature is the 307-dim embedding of that triple pattern; the target
+    *y* is its standalone cardinality.
+    """
+
+    # Construct Triple objects -------------------------------------------------
+    triple_objs = [
+        Triple(*(Entity(name) for name in tp[:3])) for tp in triples_raw
+    ]
+
+    first_idx = permutation[0]
+    first_tp = triple_objs[first_idx]
+
+    # ---------------- variable ↦ id mapping -----------------------------------
+    variables: list[Entity] = sorted(
+        {var for t in triple_objs for var in t.variables},
+        key=lambda v: v.name,
+    )
+    variable_id_dict = {var: idx for idx, var in enumerate(variables)}
+
+    # ---------------- embedding ----------------------------------------------
+    embed = first_tp.get_embedding(variable_id_dict, rdf2vec_dict, counts_dict)
+    x_tensor = torch.tensor(embed, dtype=torch.float32).unsqueeze(0)  # (1, 307)
+
+    # Empty edge_index for single node graph
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+
+    # Target = cardinality of first triple
+    y_tensor = torch.tensor([float(first_tp.get_cardinality())], dtype=torch.float32)
+
+    data = Data(x=x_tensor, edge_index=edge_index, y=y_tensor)
+
+    triples_where = [first_tp.where_body()]
+
+    return triples_where, data
+
 if __name__ == "__main__":
     # ---------------- configuration ----------------------------------
     input_json = "/home/tim/query_optimization/datasets/queries/Star_Queries.json"
     rdf2vec = "/home/tim/query_optimization/datasets/queries/rdf2vec100dim.pkl"
     counts = "/home/tim/query_optimization/datasets/queries/counts.pkl"
-    output_dir = "dataset_stars_8_tp_rnn"
-    num_plans = 3 # Random permutations per query
-    max_queries = 30000  # Maximum number of queries to process 
-    triples_num = 5  # Only use queries with exactly this number of triple patterns
+    output_dir = "dataset_stars_1_tp_rnn"
+    num_plans = 1 # Random permutations per query
+    max_queries = 20000  # Maximum number of queries to process 
+    triples_num = 2  # Only use queries with exactly this number of triple patterns
 
     # ---------------- load data ----------------------------------
     print("Loading RDF2Vec embeddings …")
@@ -111,6 +159,10 @@ if __name__ == "__main__":
     all_triples: list[list[str]] = []
     all_data: list[dict] = []
 
+    # For GNN dataset (first-triple only)
+    gnn_triples: list[list[str]] = []
+    gnn_data: list[Data] = []
+
     for qi, q in enumerate(tqdm(raw_queries, desc="Processing queries")):
         triples_raw = q["triples"]
         n = len(triples_raw)
@@ -124,11 +176,23 @@ if __name__ == "__main__":
                 )
                 all_triples.append(triples_where)
                 all_data.append(data_dict)
+
+                # --- corresponding GNN datapoint (single node) --------------
+                gnn_triples_single, data_single = generate_gnn_datapoint_first_triple(
+                    triples_raw, perm, rdf2vec_dict, counts_dict
+                )
+                gnn_triples.append(gnn_triples_single)
+                gnn_data.append(data_single)
             except Exception as e:
                 print(f"  Error generating datapoint for query {qi} (plan {p_i}): {e}")
 
     # ---------------- save ---------------------------------------------------
     print(f"Saving {len(all_data)} datapoints → {output_dir}/dataset.pt …")
     save_dataset_single_file(all_triples, all_data, output_dir)
+
+    # ---------------- save GNN dataset ---------------------------------------
+    output_dir_gnn = f"{output_dir}_first_triple_gnn"
+    print(f"Saving {len(gnn_data)} GNN (first-triple) datapoints → {output_dir_gnn}/dataset.pt …")
+    save_dataset_single_file(gnn_triples, gnn_data, output_dir_gnn)
 
     print("Done.")

@@ -7,6 +7,10 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torch_geometric.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Dict
 
 from model import CostGNN, CostGNNv2
 from data_loader import QueryDataset, SingleFileQueryDataset
@@ -24,7 +28,7 @@ def calculate_qerror(pred, true):
 
 def train_model(model, optimizer, criterion, train_loader, val_loader=None, 
                 num_epochs=100, device='cpu', save_path="best_model.pt", 
-                loss_type="mse"):
+                loss_type="mse", result_dir=None, dataset_dir=None):
     """
     Train the model and validate on the validation dataset
     
@@ -38,9 +42,16 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
         device: Device to train on (cpu or cuda)
         save_path: Path to save the best model
         loss_type: Type of loss function to use ('mse' or 'qerror')
+        result_dir: Directory to save training results and plots
     """
     model.train()
     best_performance = float('inf')
+    
+    # Lists to store metrics for plotting
+    val_losses = []
+    val_qerrors = []
+    val_mses = []
+    epochs = []
     
     for epoch in range(num_epochs):
         total_loss = 0
@@ -80,6 +91,42 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
         qerror_metric = 0
         if val_loader:
             perf, mse_metric, qerror_metric = validate_model(model, criterion, val_loader, device, loss_type=loss_type)
+            
+            # Store metrics for plotting
+            epochs.append(epoch + 1)
+            val_losses.append(perf)
+            val_mses.append(mse_metric)
+            val_qerrors.append(qerror_metric)
+            
+            # Plot validation metrics
+            if result_dir:
+                fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
+                
+                ax1.plot(epochs, val_losses)
+                ax1.set_title('Validation Loss')
+                ax1.set_xlabel('Epoch')
+                ax1.set_ylabel('Loss')
+                ax1.grid(True)
+                
+                ax2.plot(epochs, val_mses)
+                ax2.set_title('Validation MSE')
+                ax2.set_xlabel('Epoch')
+                ax2.set_ylabel('MSE')
+                ax2.grid(True)
+                
+                ax3.plot(epochs, val_qerrors)
+                ax3.set_title('Validation Q-Error')
+                ax3.set_xlabel('Epoch')
+                ax3.set_ylabel('Q-Error')
+                ax3.grid(True)
+                
+                plt.tight_layout()
+                plt.savefig(result_dir / 'validation_metrics.png')
+                plt.close()
+                
+                # Plot predictions vs truth after each epoch
+                plot_prediction_vs_truth(model, val_loader.dataset, device, result_dir, dataset_dir=None, debug=False)
+            
             if perf < best_performance:
                 best_performance = perf
                 # Save the model when there's a new best performance
@@ -150,7 +197,7 @@ def validate_model(model, criterion, val_loader, device='cpu', loss_type="mse"):
     return avg_loss, avg_mse, avg_qerror
 
 
-def plot_prediction_vs_truth(model, val_dataset, device, root_dir=None, dataset_dir=None):
+def plot_prediction_vs_truth(model, val_dataset, device, result_dir=None, dataset_dir=None, debug=False):
     """Plot predicted vs true values with expanded visualizations and metrics"""
     model.eval()
     data = next(iter(DataLoader(val_dataset, batch_size=10000, shuffle=True)))
@@ -172,9 +219,12 @@ def plot_prediction_vs_truth(model, val_dataset, device, root_dir=None, dataset_
     print(f"  Median Q-Error: {median_qerror:.4f}")
     print(f"  MSE: {mse:.4f}")
     
-    # Create directory for plots if it doesn't exist
-    plots_dir = 'prediction_plots'
-    os.makedirs(plots_dir, exist_ok=True)
+    # Create directory for plots
+    if result_dir:
+        plots_dir = result_dir / 'plots'
+    else:
+        plots_dir = Path('prediction_plots')
+    plots_dir.mkdir(parents=True, exist_ok=True)
     
     # Plot overall scatter plot
     fig, ax = plt.subplots(figsize=(10, 8))
@@ -186,7 +236,7 @@ def plot_prediction_vs_truth(model, val_dataset, device, root_dir=None, dataset_
     ax.set_yscale("log")
     ax.set_title(f"Overall: Mean Q-Error={mean_qerror:.2f}, Median Q-Error={median_qerror:.2f}")
     
-    plt.savefig(os.path.join(plots_dir, 'prediction_vs_truth_overall.png'))
+    plt.savefig(plots_dir / 'prediction_vs_truth_overall.png')
     plt.close()
     
     # Try to get query sizes from dataset
@@ -211,10 +261,10 @@ def plot_prediction_vs_truth(model, val_dataset, device, root_dir=None, dataset_
             # Load metadata from the original data file if needed
             try:
                 # This assumes the dataset metadata is stored separately and has size information
-                if root_dir and dataset_dir:
-                    dataset_path = os.path.join(root_dir, dataset_dir)
-                    dataset_file = os.path.join(dataset_path, 'dataset.pt')
-                    if os.path.exists(dataset_file):
+                if result_dir and dataset_dir:
+                    dataset_path = result_dir.parent.parent / dataset_dir
+                    dataset_file = dataset_path / 'dataset.pt'
+                    if dataset_file.exists():
                         metadata = torch.load(dataset_file)
                         if 'triples' in metadata:
                             triples_data = metadata['triples']
@@ -225,7 +275,7 @@ def plot_prediction_vs_truth(model, val_dataset, device, root_dir=None, dataset_
                                 else:
                                     query_sizes.append(0)
                 else:
-                    raise ValueError("Root directory or dataset directory not provided")
+                    raise ValueError("Result directory or dataset directory not provided")
             except Exception as e:
                 print(f"Error loading query size metadata: {e}")
                 # Default to uniform distribution for demonstration
@@ -256,10 +306,11 @@ def plot_prediction_vs_truth(model, val_dataset, device, root_dir=None, dataset_
                     'count': size_mask.sum().item()
                 }
                 
-                print(f"Size {size} Metrics (n={size_mask.sum().item()}):")
-                print(f"  Mean Q-Error: {mean_qerror_size:.4f}")
-                print(f"  Median Q-Error: {median_qerror_size:.4f}")
-                print(f"  MSE: {mse_size:.4f}")
+                if debug:
+                    print(f"Size {size} Metrics (n={size_mask.sum().item()}):")
+                    print(f"  Mean Q-Error: {mean_qerror_size:.4f}")
+                    print(f"  Median Q-Error: {median_qerror_size:.4f}")
+                    print(f"  MSE: {mse_size:.4f}")
                 
                 # Plot scatter for this size
                 fig, ax = plt.subplots(figsize=(8, 6))
@@ -275,7 +326,7 @@ def plot_prediction_vs_truth(model, val_dataset, device, root_dir=None, dataset_
                 ax.set_yscale("log")
                 ax.set_title(f"Size {size}: Mean Q-Error={mean_qerror_size:.2f}, Median Q-Error={median_qerror_size:.2f}")
                 
-                plt.savefig(os.path.join(plots_dir, f'prediction_vs_truth_size_{size}.png'))
+                plt.savefig(plots_dir / f'prediction_vs_truth_size_{size}.png')
                 plt.close()
         
         # Create boxplot of q-errors by size
@@ -303,12 +354,63 @@ def plot_prediction_vs_truth(model, val_dataset, device, root_dir=None, dataset_
         plt.axhline(y=1, color='r', linestyle='-', alpha=0.3)
         
         plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, 'qerror_boxplot_by_size.png'))
+        plt.savefig(plots_dir / 'qerror_boxplot_by_size.png')
         plt.close()
+        
+        # Save metrics as JSON if result_dir is provided
+        if result_dir:
+            metrics = {
+                "overall": {
+                    "mean_qerror": mean_qerror,
+                    "median_qerror": median_qerror,
+                    "mse": mse,
+                    "n_samples": len(data.y),
+                },
+                "by_size": {
+                    str(size): {
+                        "mean_qerror": metrics_data['mean_qerror'],
+                        "median_qerror": metrics_data['median_qerror'],
+                        "mse": metrics_data['mse'],
+                        "n_samples": metrics_data['count'],
+                    }
+                    for size, metrics_data in size_metrics.items()
+                }
+            }
+            with open(result_dir / "metrics.json", "w") as f:
+                json.dump(metrics, f, indent=2)
         
     except Exception as e:
         print(f"Error creating size-specific plots: {e}")
         print("Falling back to overall plot only")
+
+
+def setup_result_dir(config: Dict) -> Path:
+    """Create and return path to result directory with timestamp."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    result_dir = Path(config["root_dir"]) / "training_results" / f"gnn_{timestamp}"
+    result_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save configuration
+    with open(result_dir / "config.json", "w") as f:
+        # Convert paths to strings for JSON serialization
+        config_json = {
+            k: str(v) if isinstance(v, Path) else v
+            for k, v in config.items()
+        }
+        json.dump(config_json, f, indent=2)
+
+    return result_dir
+
+
+def save_training_results(
+    model: nn.Module,
+    result_dir: Path,
+    config: Dict,
+):
+    """Save model and config to result directory."""
+    # Save model weights
+    torch.save(model.state_dict(), result_dir / "model.pt")
+    print(f"Results saved to {result_dir}")
 
 
 if __name__ == "__main__":
@@ -320,28 +422,31 @@ if __name__ == "__main__":
         'hidden_dim': 512,          # Hidden layer dimension
         
         # Training parameters
-        'learning_rate': 0.001,
-        'batch_size': 1,
-        'num_epochs': 2000,
+        'learning_rate': 0.0001,
+        'batch_size': 128,
+        'num_epochs': 1,
         'loss_type': 'mse',         # Options: 'mse', 'qerror'
         
         # Dataset parameters
         'use_single_file': True,
-        'train_size': 15000,
-        'val_size': 10000,
+        'train_size': 38000,
+        'val_size': 5000,
         
         # Paths
         'root_dir': '/home/tim/query_optimization/',
-        'dataset_dir': 'dataset_stars_8_with_subplans',
-        'model_save_path': 'best_model_local.pt',
+        'dataset_dir': 'datasets/dataset_path_8_with_subplans',
         
         # Other settings
-        'enable_training': False,    # Set to False to skip training
+        'enable_training': True,    # Set to False to skip training
     }
     
     # Set device (GPU if available, else CPU)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    
+    # Setup result directory
+    result_dir = setup_result_dir(config)
+    model_save_path = result_dir / "model.pt"
     
     # Load dataset
     if config['use_single_file']:
@@ -367,7 +472,8 @@ if __name__ == "__main__":
     train_indices = list(range(train_size))
     val_indices = list(range(total_size - val_size, total_size))
     train_dataset = torch.utils.data.Subset(dataset, train_indices)
-    val_dataset = torch.utils.data.Subset(dataset, val_indices)
+    #val_dataset = torch.utils.data.Subset(dataset, val_indices)
+    val_dataset = train_dataset
     
     # Create data loaders
     train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
@@ -390,9 +496,6 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
     criterion = nn.MSELoss()
     
-    # Full path for model saving
-    save_path = os.path.join(config['root_dir'], config['model_save_path'])
-    
     # Train model if enabled
     if config['enable_training']:
         train_model(
@@ -403,21 +506,25 @@ if __name__ == "__main__":
             val_loader=val_loader,
             num_epochs=config['num_epochs'],
             device=device,
-            save_path=save_path,
-            loss_type=config['loss_type']
+            save_path=str(model_save_path),
+            loss_type=config['loss_type'],
+            result_dir=result_dir  # Pass result_dir to train_model
         )
-        print(f"Model training complete. Best model saved at: {save_path}")
+        print(f"Model training complete. Best model saved at: {model_save_path}")
     else:
         print("Training skipped as per configuration.")
         
         # If not training, try to load a pre-trained model
         pretrained_model_path = os.path.join(config['root_dir'], 'join_plus_tp_prediction_all_sizes.pt')
         try:
-            pass
             model.load_state_dict(torch.load(pretrained_model_path, map_location=device))
             print(f"Loaded pre-trained model from {pretrained_model_path}")
         except FileNotFoundError:
             print(f"No pre-trained model found at {pretrained_model_path}")
     
     # Plot prediction vs truth
-    plot_prediction_vs_truth(model, val_dataset, device, config['root_dir'], config['dataset_dir']) 
+    plot_prediction_vs_truth(model, val_dataset, device, result_dir, config['dataset_dir'], debug=False)
+    
+    # Save training results
+    save_training_results(model, result_dir, config)
+    print(f"Training run completed. Results saved in {result_dir}") 

@@ -91,6 +91,7 @@ class SingleFileRNNQueryDataset(Dataset):
 
             self.data_dict = torch.load(self.dataset_path)
             self.data_list = self.data_dict["data"]
+            self.triples = self.data_dict["triples"]
         else:
             raise FileNotFoundError(f"Dataset file not found at {self.dataset_path}")
 
@@ -112,7 +113,9 @@ class SingleFileRNNQueryDataset(Dataset):
         return len(self.data_list)
 
     def get(self, idx):
-        return self.data_list[idx]
+        data = self.data_list[idx]
+        data["triples"] = self.triples[idx]  # Add triples to the data dictionary
+        return data
 
 def save_dataset(triples, torch_dataset, output_dir, clear_existing=False):
     """
