@@ -9,11 +9,15 @@ from scipy.stats import binned_statistic
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
 # Use absolute path with file:// scheme
-experiment_path = f"file://{os.path.abspath('ray_results/join_optim_hpo')}"
+experiment_path = f"file://{os.path.abspath('ray_results/join_optim_hpofull')}"
 analysis = ExperimentAnalysis(experiment_path)
 
 # Get results as DataFrame
 df = analysis.results_df
+
+df.to_csv('ray_results/results.csv', index=False)
+
+exit()
 
 # Create directory for plots
 os.makedirs('analysis_plots', exist_ok=True)
