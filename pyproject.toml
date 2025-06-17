@@ -5,6 +5,7 @@ description = "Continous Query Optimization for SPARQL"
 readme = "README.md"
 requires-python = "~=3.10"
 dependencies = [
+    "gensim>=4.3.3",
     "graphviz>=0.20.3",
     "ipykernel>=6.29.5",
     "matplotlib>=3.10.3",
@@ -12,6 +13,7 @@ dependencies = [
     "numpy<2.0",
     "pyrdf2vec>=0.2.3",
     "ray>=2.46.0",
+    "rdflib>=7.1.4",
     "torch==1.13.1",
     "torch-geometric>=2.6.1",
 ]
