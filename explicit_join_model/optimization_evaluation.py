@@ -1,4 +1,12 @@
+import sys
 import os
+# Add the parent directory to Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(os.path.dirname(__file__))
+
+# Import the classes
+from create_data.process_dataset_with_subplans_individual import SPARQLQuery
+
 import pickle
 import numpy as np
 import torch
@@ -15,7 +23,7 @@ import torch.optim as optim
 
 from data import Triple, Join, Query, Entity
 from model import CostGNNv2
-from explicit_join_model.process_dataset_single_file import SPARQLQuery
+from create_data.process_dataset_single_file import SPARQLQuery
 
 import time
 
@@ -1197,6 +1205,7 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
     has_pred_grad = 'predicted_gradient_costs' in stats and len(stats['predicted_gradient_costs']) > 0
     has_pred_greedy = 'predicted_greedy_costs' in stats and len(stats['predicted_greedy_costs']) > 0
     has_true_best = 'true_best_predicted_costs' in stats and len(stats['true_best_predicted_costs']) > 0
+    has_exhaustive = 'predicted_exhaustive_costs' in stats and len(stats['predicted_exhaustive_costs']) > 0
     
     if has_predicted:
         mean_predicted = np.mean(stats['predicted_best_costs'])
@@ -1206,16 +1215,21 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
         mean_pred_greedy = np.mean(stats['predicted_greedy_costs'])
     if has_true_best:
         mean_true_best = np.mean(stats['true_best_predicted_costs'])
+    if has_exhaustive:
+        mean_exhaustive = np.mean(stats['predicted_exhaustive_costs'])
     
     # Plot mean costs comparison
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 6))
     
     labels = ['Gradient', 'Greedy', 'Random']
     means = [mean_gradient, mean_greedy, mean_random]
     
     if has_predicted:
-        labels.append('BestPredicted')
+        labels.append('DP-Best')
         means.append(mean_predicted)
+    if has_exhaustive:
+        labels.append('Exhaustive')
+        means.append(mean_exhaustive)
     if has_pred_grad:
         labels.append('GradPred')
         means.append(mean_pred_grad)
@@ -1226,7 +1240,7 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
         labels.append('TrueBestPred')
         means.append(mean_true_best)
     
-    bar_colors_master = ['blue', 'green', 'orange', 'purple', 'red', 'brown', 'pink']
+    bar_colors_master = ['blue', 'green', 'orange', 'purple', 'cyan', 'red', 'brown', 'pink']
     plt.bar(labels, means, color=bar_colors_master[:len(labels)])
     plt.ylabel('Mean Cost')
     plt.title('Comparison of Mean Costs')
@@ -1244,7 +1258,7 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
         plt.close()
     
     # Plot cost comparison as boxplot (log scale)
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 6))
     
     data = [
         stats['gradient_costs'],
@@ -1254,6 +1268,8 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
     
     if has_predicted:
         data.append(stats['predicted_best_costs'])
+    if has_exhaustive:
+        data.append(stats['predicted_exhaustive_costs'])
     if has_pred_grad:
         data.append(stats['predicted_gradient_costs'])
     if has_pred_greedy:
@@ -1263,7 +1279,9 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
     
     labels_box = ['Gradient', 'Greedy', 'Random']
     if has_predicted:
-        labels_box.append('BestPred')
+        labels_box.append('DP-Best')
+    if has_exhaustive:
+        labels_box.append('Exhaustive')
     if has_pred_grad:
         labels_box.append('GradPred')
     if has_pred_greedy:
@@ -1537,6 +1555,24 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
         else:
             plt.close()
 
+    # NEW: Scatter plot comparing DP vs Exhaustive search results
+    if has_predicted and has_exhaustive:
+        plt.figure(figsize=(10, 8))
+        plt.scatter(stats['predicted_best_costs'], stats['predicted_exhaustive_costs'], alpha=0.7, s=70, c='purple', edgecolors='black')
+        mn = min(min(stats['predicted_best_costs']), min(stats['predicted_exhaustive_costs'])) * 0.9
+        mx = max(max(stats['predicted_best_costs']), max(stats['predicted_exhaustive_costs'])) * 1.1
+        plt.plot([mn, mx], [mn, mx], 'k--', alpha=0.7)
+        plt.xscale('log'); plt.yscale('log')
+        plt.xlabel('DP Best Predicted Cost')
+        plt.ylabel('Exhaustive Best Predicted Cost')
+        plt.title('Dynamic Programming vs Exhaustive Search Comparison')
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_directory, f'dp_vs_exhaustive{suffix}.png'))
+        if show_plots:
+            plt.show()
+        else:
+            plt.close()
+
 
 def count_triples_in_plan(plan):
     """
@@ -1745,6 +1781,225 @@ def visualize_adjacency_matrix(adjacency_matrix, triples_num, visualization_dir,
 
 
 
+
+# ----------------------------------------------------------------------
+# Dynamic-Programming join-order enumeration 
+# ----------------------------------------------------------------------
+def dp_leftdeep_best_plan(query_data, model, device="cpu"):
+    """
+    Return the *predicted-cost–optimal* left-deep join plan for the given
+    query under the learnt CostGNN model, using dynamic programming instead
+    of factorial exhaustive search.
+
+    Parameters
+    ----------
+    query_data : torch_geometric.data.Data
+        Node-feature matrix x (nTP + nJoin × F) of *one* random plan plus
+        triple-count.  We ignore the supplied edges and create our own.
+    model      : CostGNNv2
+        Trained cost model in eval mode.
+    device     : "cpu" | "cuda"
+        Device on which to run the CostGNN.
+
+    Returns
+    -------
+    best_A     : torch.Tensor  (2n-1, 2n-1)  hard 0/1 adjacency matrix
+    best_cost  : float         exp(predicted log-cost)
+    """
+    model.eval()
+    data = query_data.to(device)
+    n_triples = (data.x.size(0) + 1) // 2
+    F = data.x.size(1)
+
+    # ------------------------------------------------------------------
+    # Pre-build template node-feature matrix: first n triple features,
+    # followed by (n-1) identical join-node features.
+    # ------------------------------------------------------------------
+    triple_feats = data.x[:n_triples].clone()
+    join_feat    = torch.zeros(F, device=device);  join_feat[-1] = 1.0
+    join_feats   = join_feat.unsqueeze(0).repeat(n_triples - 1, 1)
+    node_feats   = torch.cat([triple_feats, join_feats], dim=0)
+
+    # DP table: key = frozenset({indices of triples}); value = (cost, A)
+    dp = {}
+
+    # Level k = 1 : singleton plans (cost = 0, no joins)
+    for i in range(n_triples):
+        key = frozenset({i})
+        dp[key] = (0.0,
+                   torch.zeros((2 * n_triples - 1,
+                                2 * n_triples - 1),
+                               device=device))
+
+    # Levels k = 2 … n_triples
+    for k in range(2, n_triples + 1):
+        for subset in itertools.combinations(range(n_triples), k):
+            S = frozenset(subset)
+            best_cost, best_A = float("inf"), None
+
+            # Try every triple as the *last* right child
+            for last in subset:
+                left_set = S - {last}
+                left_cost, left_A = dp[left_set]
+
+                # Build adjacency for (left ⨝ last)
+                A = left_A.clone()
+                idx_join = n_triples + k - 2            # next free join idx
+                # connect children → parent
+                #   a) root of left plan
+                if len(left_set) == 1:
+                    child_left = list(left_set)[0]      # single triple
+                else:
+                    child_left = n_triples + len(left_set) - 2  # left sub-plan root
+                A[child_left, idx_join] = 1.
+                #   b) last triple
+                A[last, idx_join] = 1.
+
+                # Build edge_index and weights for CostGNN
+                src, dst = torch.where(A > 0.5)
+                edge_idx = torch.stack([src, dst], dim=0)
+
+                with torch.no_grad():
+                    log_pred = model(node_feats, edge_idx).item()
+                    pred_cost = float(np.exp(log_pred))
+
+                total_cost = pred_cost
+
+                if total_cost < best_cost:
+                    best_cost, best_A = total_cost, A
+
+            dp[S] = (best_cost, best_A)
+
+    full_key = frozenset(range(n_triples))
+    return dp[full_key][1], dp[full_key][0]
+
+
+def exhaustive_leftdeep_best_plan(query_data, model, device="cpu"):
+    """
+    Return the *predicted-cost–optimal* left-deep join plan for the given
+    query under the learnt CostGNN model, using exhaustive search over all
+    n! permutations of triple patterns.
+
+    Parameters
+    ----------
+    query_data : torch_geometric.data.Data
+        Node-feature matrix x (nTP + nJoin × F) of *one* random plan plus
+        triple-count.  We ignore the supplied edges and create our own.
+    model      : CostGNNv2
+        Trained cost model in eval mode.
+    device     : "cpu" | "cuda"
+        Device on which to run the CostGNN.
+
+    Returns
+    -------
+    best_A     : torch.Tensor  (2n-1, 2n-1)  hard 0/1 adjacency matrix
+    best_cost  : float         exp(predicted log-cost)
+    """
+    model.eval()
+    data = query_data.to(device)
+    n_triples = (data.x.size(0) + 1) // 2
+    F = data.x.size(1)
+
+    # Pre-build template node-feature matrix: first n triple features,
+    # followed by (n-1) identical join-node features.
+    triple_features = data.x[:n_triples].clone()
+    join_feature = torch.zeros(F, device=device)
+    join_feature[-1] = 1.0  # mark join node
+    join_features = join_feature.unsqueeze(0).repeat(n_triples - 1, 1)
+    node_features_template = torch.cat([triple_features, join_features], dim=0)
+
+    best_pred_cost = float('inf')
+    best_adj = None
+
+    for perm in itertools.permutations(range(n_triples)):
+        perm_tensor = torch.tensor(perm, device=device)
+        A_candidate = left_deep_adj_from_perm(perm_tensor).to(device)
+
+        src_e, dst_e = torch.where(A_candidate > 0.5)
+        if src_e.numel() == 0:
+            continue  # should never happen
+
+        edge_idx = torch.stack([src_e, dst_e], dim=0)
+
+        with torch.no_grad():
+            pred_cost_val = model(node_features_template, edge_idx).item()
+            pred_cost_val = float(np.exp(pred_cost_val))
+
+        if pred_cost_val < best_pred_cost:
+            best_pred_cost = pred_cost_val
+            best_adj = A_candidate
+
+    return best_adj, best_pred_cost
+
+
+def plan_to_string(plan):
+    """
+    Convert a query plan (Query object) to a string representation.
+    
+    Args:
+        plan: Query object representing a join plan
+        
+    Returns:
+        str: String representation of the plan structure
+    """
+    def node_to_string(node):
+        if isinstance(node, Triple):
+            return f"({node.s} {node.p} {node.o})"
+        elif isinstance(node, Join):
+            left_str = node_to_string(node.left)
+            right_str = node_to_string(node.right)
+            return f"Join({left_str}, {right_str})"
+        else:
+            return str(node)
+    
+    if plan is None:
+        return "None"
+    
+    return node_to_string(plan.root)
+
+
+def plans_are_equivalent(plan1, plan2):
+    """
+    Check if two query plans are equivalent, considering that joins are symmetric.
+    
+    Args:
+        plan1: First Query object to compare
+        plan2: Second Query object to compare
+        
+    Returns:
+        bool: True if the plans are equivalent, False otherwise
+    """
+    if plan1 is None or plan2 is None:
+        return plan1 == plan2
+    
+    def normalize_node(node):
+        """
+        Normalize a node to a canonical form for comparison.
+        For joins, we sort the children to handle symmetry.
+        """
+        if isinstance(node, Triple):
+            # For triples, create a normalized representation
+            return ('Triple', str(node.s), str(node.p), str(node.o))
+        elif isinstance(node, Join):
+            # For joins, normalize both children and sort them
+            left_norm = normalize_node(node.left)
+            right_norm = normalize_node(node.right)
+            # Sort to handle join symmetry - smaller one first
+            children = sorted([left_norm, right_norm])
+            return ('Join', children[0], children[1])
+        else:
+            return str(node)
+    
+    # Compare the normalized forms
+    try:
+        norm1 = normalize_node(plan1.root)
+        norm2 = normalize_node(plan2.root)
+        return norm1 == norm2
+    except Exception:
+        # If there's any error in comparison, fall back to False
+        return False
+
+
 def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimization_steps=500, 
                          verbose=False, optimization_params=None, optimization_function=None, save_directory="."):
     """
@@ -1800,6 +2055,11 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
     # NEW arrays for predicted costs of gradient and greedy methods
     predicted_gradient_costs = []
     predicted_greedy_costs = []
+    # NEW: exhaustive search results
+    predicted_exhaustive_costs = []
+    
+    # NEW: Detailed results for JSON export
+    detailed_results = []
     
     # Process each query
     for i, query in enumerate(tqdm(sparql_queries, desc="Evaluating queries")):
@@ -1807,65 +2067,40 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
         # For 8TP, we select one of the random plans as the base for optimization
         plan_idx = 0  # Just use the first plan
         torch_data = query.torch_data[plan_idx]
+        triple_objs = [Triple(*(Entity(name=name) for name in triple[:3])) for triple in query.triples]
+
         
         if torch_data is None:
             print(f"Warning: Query {i} has null torch_data for plan {plan_idx}. Skipping.")
             continue
         
-        # Prepare the triple objects
-        triple_objs = [Triple(*(Entity(name=name) for name in triple[:3])) for triple in query.triples]
+        # Prepare query triples for JSON
+        query_triples = [[str(triple.s), str(triple.p), str(triple.o)] for triple in triple_objs]
         
-        # ------------------------------------------------------------------
-        # Step 0: Exhaustive left-linear search to find the permutation of
-        # triple patterns that yields the *lowest predicted cost* according
-        # to the learnt CostGNN model.  For n triples, we evaluate all n!
-        # permutations, build the corresponding left-deep tree adjacency and
-        # keep the one with minimum predicted cost.  The true cost of this
-        # plan is evaluated only for the best permutation.
-        # ------------------------------------------------------------------
-        triples_num = len(triple_objs)
-        feature_dim = torch_data.x.size(1)
+        # Run DP-based best plan search
+        best_adj, best_pred_cost = dp_leftdeep_best_plan(torch_data, model, device)
+        
+        # Run exhaustive search for comparison
+        exhaustive_adj, exhaustive_pred_cost = exhaustive_leftdeep_best_plan(torch_data, model, device)
 
-        # (i) node feature matrix: original triple features + simple join features
-        triple_features = torch_data.x[:triples_num].to(device)
-        join_feature = torch.zeros(feature_dim, device=device)
-        join_feature[-1] = 1.0  # mark join node
-        join_features = join_feature.unsqueeze(0).repeat(triples_num - 1, 1)
-        node_features_template = torch.cat([triple_features, join_features], dim=0)
-
-        best_pred_cost = float('inf')
-        best_adj = None
-
-        for perm in itertools.permutations(range(triples_num)):
-            perm_tensor = torch.tensor(perm, device=device)
-            A_candidate = left_deep_adj_from_perm(perm_tensor).to(device)
-
-            src_e, dst_e = torch.where(A_candidate > 0.5)
-            if src_e.numel() == 0:
-                continue  # should never happen
-
-            edge_idx = torch.stack([src_e, dst_e], dim=0)
-            edge_w = torch.ones(edge_idx.size(1), device=device)
-
-            with torch.no_grad():
-                pred_cost_val = model(node_features_template, edge_idx).item()
-                pred_cost_val = float(np.exp(pred_cost_val))
-
-            if pred_cost_val < best_pred_cost:
-                best_pred_cost = pred_cost_val
-                best_adj = A_candidate
-
-        # Store best predicted plan info, but don't add to arrays yet
-        # (we'll add only if all methods succeed)
         best_pred_plan = None
         true_cost_best_pred = float('inf')
         try:
+            triples_num = len(triple_objs)
             best_pred_plan = adjacency_to_query_with_real_triples(
                 best_adj, triples_num, triple_objs)
             true_cost_best_pred = best_pred_plan.root.get_cost()
         except Exception as e:
             print(f"Warning: Failed to compute true cost for best predicted plan for query {i}: {e}")
             true_cost_best_pred = float('inf')
+
+        # Convert exhaustive plan
+        exhaustive_plan = None
+        try:
+            exhaustive_plan = adjacency_to_query_with_real_triples(
+                exhaustive_adj, triples_num, triple_objs)
+        except Exception as e:
+            print(f"Warning: Failed to convert exhaustive plan for query {i}: {e}")
 
         # starting timer
         start_time = time.time()
@@ -1879,6 +2114,11 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
         random_cost = float('inf')
         grad_pred_cost = float('inf')  
         greedy_pred_cost = float('inf')
+        
+        # Initialize plan variables
+        gradient_plan = None
+        greedy_plan = None
+        random_plan = None
         
         # ---------------------------------------------------------------   ---
         # Step 2: Run gradient-based optimization
@@ -1929,14 +2169,14 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             if animation_data is not None and verbose:
                 try:
                     print("Creating optimization animation...")
-                    create_optimization_animation(
-                        animation_data, 
-                        visualization_dir, 
-                        i, 
-                        fps=10,
-                        use_tree_layout=True,
-                        max_edge_weight=2.0  # For dual-softmax which can go up to 2
-                    )
+                    # create_optimization_animation(
+                    #     animation_data, 
+                    #     visualization_dir, 
+                    #     i, 
+                    #     fps=10,
+                    #     use_tree_layout=True,
+                    #     max_edge_weight=2.0  # For dual-softmax which can go up to 2
+                    # )
                     print(f"Saved optimization animation to {visualization_dir}/")
                 except Exception as e:
                     print(f"Warning: Failed to create optimization animation: {e}")
@@ -2045,6 +2285,39 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
         true_best_predicted_costs.append(true_cost_best_pred)
         predicted_gradient_costs.append(grad_pred_cost)
         predicted_greedy_costs.append(greedy_pred_cost)
+        predicted_exhaustive_costs.append(exhaustive_pred_cost)
+        
+        # NEW: Create detailed result for this query
+        query_result = {
+            "query_id": i,
+            "query_triples": query_triples,
+            "ntriplepattern": len(triple_objs),
+            "plans": {
+                "exhaustive": {
+                    "plan_string": plan_to_string(exhaustive_plan),
+                    "real_cost": exhaustive_plan.root.get_cost() if exhaustive_plan else float('inf'),
+                    "predicted_cost": float(exhaustive_pred_cost)
+                },
+                "greedy": {
+                    "plan_string": plan_to_string(greedy_plan),
+                    "real_cost": float(greedy_cost),
+                    "predicted_cost": float(greedy_pred_cost)
+                },
+                "gradient": {
+                    "plan_string": plan_to_string(gradient_plan),
+                    "real_cost": float(gradient_cost),
+                    "predicted_cost": float(grad_pred_cost)
+                },
+                "dp": {
+                    "plan_string": plan_to_string(best_pred_plan),
+                    "real_cost": float(true_cost_best_pred),
+                    "predicted_cost": float(best_pred_cost)
+                }
+            },
+            "greedy_equal_exhaustive": plans_are_equivalent(greedy_plan, exhaustive_plan),
+            "gradient_equal_exhaustive": plans_are_equivalent(gradient_plan, exhaustive_plan)
+        }
+        detailed_results.append(query_result)
         
         # Print progress every query
         if (i + 1) % 1 == 0:
@@ -2056,6 +2329,12 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             if random_costs:
                 print(f"Median random cost: {np.median(random_costs):.2f}")
     
+    # Save detailed results to JSON
+    detailed_results_file = os.path.join(save_directory, "detailed_results.json")
+    with open(detailed_results_file, 'w') as f:
+        json.dump(detailed_results, f, indent=2)
+    print(f"Saved detailed results to: {detailed_results_file}")
+    
     # Calculate statistics
     stats = {
         'gradient_costs': gradient_costs,
@@ -2064,7 +2343,8 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
         'predicted_best_costs': predicted_best_costs,
         'true_best_predicted_costs': true_best_predicted_costs,
         'predicted_gradient_costs': predicted_gradient_costs,
-        'predicted_greedy_costs': predicted_greedy_costs
+        'predicted_greedy_costs': predicted_greedy_costs,
+        'predicted_exhaustive_costs': predicted_exhaustive_costs
     }
     # Save plots without showing them, with a suffix indicating the iteration
     print(f"Saving plots to {save_directory}")
@@ -2096,12 +2376,12 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
 if __name__ == "__main__":
     # Configuration for optimization
 
-    config = {
+    configold = {
         # General parameters
-        'queries_file': "/home/tim/query_optimization/datasets/sparql_queries_path_4_tp/queries.pkl",
+        'queries_file': "/home/tim/query_optimization/datasets/sparql_path_queries/queries.pkl",
         'model_path': "/home/tim/query_optimization/explicit_join_model/models/path_model.pt",
-        'num_queries': 10,
-        'optimization_steps': 20,
+        'num_queries': 50,
+        'optimization_steps': 1000,
         'verbose': False,
         'save_path': "optimization_results",  # Base directory for saving results
         
@@ -2111,7 +2391,7 @@ if __name__ == "__main__":
             'optimization_procedure': 'gumbel',  # 'gumbel' or 'normal'
             
             # Optimizer parameters
-            'learning_rate': 10,
+            'learning_rate': 1,
             
             # Penalty weights
             'lambda_acyclic': 1000.0,    # Weight for acyclicity penalty
@@ -2141,11 +2421,11 @@ if __name__ == "__main__":
 
 
 
-    configbest = {
+    config = {
         # General parameters
-        'queries_file': "/home/tim/query_optimization/datasets/sparql_queries_path_4/queries.pkl",
+        'queries_file': "/home/tim/query_optimization/datasets/sparql_queries_path_4_tp/queries.pkl",
         'model_path': "/home/tim/query_optimization/explicit_join_model/models/path_model.pt",
-        'num_queries': 50,
+        'num_queries': 100,
         'optimization_steps': 1746,
         'verbose': False,
         'save_path': "optimization_results",  # Base directory for saving results
