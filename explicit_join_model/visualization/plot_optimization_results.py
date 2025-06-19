@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 # Configuration flags
-RESULTS_DIR = "/home/tim/query_optimization/optimization_results/run_20250619_095821"  # Directory containing detailed_results.json
+RESULTS_DIR = "/home/tim/query_optimization/optimization_results/run_20250619_150150"  # Directory containing detailed_results.json
 OUTPUT_DIR = None  # If None, will use RESULTS_DIR/plots
 
 # Plot type flags

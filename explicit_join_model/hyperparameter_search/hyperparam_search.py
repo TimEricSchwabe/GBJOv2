@@ -28,7 +28,7 @@ from optimization_evaluation import (
 
 from data import Triple, Entity
 from model import CostGNNv2
-from process_dataset_single_file import SPARQLQuery
+from explicit_join_model.create_data.process_dataset_single_file import SPARQLQuery
 
 
 

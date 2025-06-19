@@ -1,270 +1,314 @@
-# Continuous Query Optimization for SPARQL - Explicit Model
+# Gradient Based Query Optimization
+
+This repository implements a gradient-based approach for optimizing SPARQL query join orders using a Graph Neural Network (GNN) cost model. Instead of iteratively traversing the discrete search space of query plans, the approach presented here performs a gradient-based search in the continous relaxation of the search space.
+
+## Overview
+
+The project consists of several components:
+
+1. **Data Generation**: Scripts to process SPARQL queries and generate training/evaluation datasets
+2. **Cost Model Training**: A Graph Neural Network (CostGNN) that learns to predict query execution costs
+3. **Gradient-Based Optimization**: Differentiable optimization procedures for finding optimal join orders
+4. **Evaluation Framework**: Comprehensive evaluation comparing gradient-based optimization against baseline methods
+5. **Visualization Tools**: Rich plotting and animation capabilities for analyzing optimization results
+
+## Data Generation
+
+The `create_data/` directory contains scripts for generating datasets from SPARQL query files:
+
+### process_dataset_single_file.py
+
+**Purpose**: Generates training data for the Cost GNN by creating multiple random join plans for each query.
+
+**Usage**:
+```bash
+python create_data/process_dataset_single_file.py
+```
+
+**Functionality**:
+- Takes raw SPARQL queries and generates multiple random join orders (default: 10 per query)
+- Calculates true execution costs for each join plan using `get_cost()` method
+- Creates torch geometric `Data` objects with:
+  - Node embeddings (307-dimensional features including RDF2Vec embeddings and cardinality estimates)
+  - Adjacency matrices representing join trees
+  - Cost labels for supervised learning
+- Filters out queries with very low cardinality or all-variable triple patterns
+- Saves processed queries as pickle files for training
+
+**Key Parameters**:
+- `num_plans`: Number of random join orders per query (default: 10)
+- `MIN_CARDINALITY`: Minimum query cardinality threshold for inclusion
+- `rdf2vec_dict`: Pre-computed RDF2Vec embeddings for entities
+- `counts_dict`: Entity frequency statistics
+
+### process_dataset_with_subplans_individual.py
+
+**Purpose**: Generates evaluation data for optimization algorithms by creating single join plans and their subplans.
+
+**Usage**:
+```bash
+python create_data/process_dataset_with_subplans_individual.py
+```
+
+**Functionality**:
+- Creates one main join plan per query (no cost calculation to save time)
+- Generates left-linear subplans of sizes 3 to n-1 for gradient optimization
+- Sets costs to `None` since true costs are expensive to compute during evaluation
+- Creates consistent triple-to-index mappings across different plans
+- Saves queries individually for efficient loading during optimization
+
+**Key Features**:
+- `extract_subplans_left_linear()`: Generates subplans of all sizes for optimization
+- `join_order_to_adjacency_matrix_consistent()`: Ensures consistent node indexing
+- `calculate_costs=False`: Skips expensive cost calculations for evaluation data
 
 
-### Core Files
+## Cost Model Training
 
-- **data.py**: Contains core data structures for representing SPARQL queries and join plans.
-  - `Entity`, `Triple`, `Join`, and `Query` classes for query representation
-  - Functions for creating random join orders and converting plans to adjacency matrices
-  - Utility functions for working with query plans
+### cost_model_training.py
 
-- **model.py**: Implements the neural network models for cost prediction.
-  - `GINConv`: Modified Graph Isomorphism Network layer
-  - `CostGNN`: Graph neural network model for cost prediction
-  - `CostGNNv2`: Enhanced version with residual connections and layer normalization
+**Purpose**: Trains the CostGNN model to predict query execution costs from graph representations.
 
-- **training.py**: Contains code for training the cost prediction model.
-  - Functions for training and validating the model
-  - Hyperparameter configuration in the main block
-  - Usage: `python training.py` to train the model with configured parameters
+**Usage**:
+```bash
+python cost_model_training.py
+```
 
-- **data_loader.py**: Provides utilities for loading and managing datasets.
-  - `QueryDataset`: Dataset class for loading individual query plan samples
-  - `SingleFileQueryDataset`: Optimized dataset class that loads all data from a single file
-  - Functions for saving and loading dataset metadata
+**Key Components**:
 
-- **process_dataset_single_file.py**: Processes SPARQL queries into a format suitable for training.
-  - Converts raw SPARQL queries into various join plans with associated costs
-  - Creates PyTorch Geometric graph representations of the plans
-  - Saves processed data for efficient training
-  - Usage: `python process_dataset_single_file.py` to process raw queries into training data
+#### Model Architecture
+- **CostGNN**: Graph Convolutional Network with 307-dimensional input features ((s,p,o) embeddings + simple statistics concatenated)
+- **Hidden layers**: 512-dimensional by default
+- **Output**: Single cost prediction (log-transformed)
 
-- **optimization_evaluation.py**: Implements and evaluates the query optimization approach.
-  - `optimize_query`: Implements gradient-based optimization of query plans
-  - Functions for evaluating optimized plans against greedy and random baselines
-  - Visualization and comparison of optimization results
-  - Usage: `python optimization_evaluation.py` to run optimization experiments
+#### Training Configuration
+```python
+config = {
+    'dataset_dir': 'path/to/training/data',
+    'model_path': 'models/cost_model.pt',
+    'num_epochs': 100,
+    'batch_size': 32,
+    'learning_rate': 0.001,
+    'hidden_dim': 512,
+    'loss_type': 'mse',  # or 'qerror'
+    'device': 'cuda',
+    'train_test_split': 0.8
+}
+```
 
-### Workflow
+#### Loss Functions
+- **MSE Loss**: Mean squared error on log-transformed costs
+- **Q-Error Loss**: Database-specific metric: `max(pred/true, true/pred)`
 
-1. **Data Processing**: Run `process_dataset_single_file.py` to convert raw SPARQL queries into training data
-2. **Model Training**: Run `training.py` to train the cost prediction model
-3. **Optimization**: Run `optimization_evaluation.py` to optimize query plans and evaluate performance
+#### Model Evaluation
+- `validate_model()`: validation with multiple metrics
+- `plot_prediction_vs_truth()`: Visualization of model accuracy
 
-### Configuration
+## Optimization Evaluation
 
-Both training and optimization phases use a configuration dictionary in their respective main blocks:
+### evaluation.py
+
+**Purpose**: Main evaluation script comparing gradient-based optimization against Greedy Heuristic, Dynamic Programming, Exhaustive Search and Random Selection.
+
+**Usage**:
+```bash
+python evaluation.py
+```
+
+#### Configuration System
+
+the evaluation is onfigures using a dictionary as follows:
 
 ```python
-# Example from training.py
 config = {
-    'model_type': 'CostGNNv2',  
-    'node_feature_dim': 307,    
-    'hidden_dim': 512,          
-    'learning_rate': 0.001,
-    'batch_size': 32,
-    'num_epochs': 2000,
-    # ... other parameters
-}
-
-# Example from optimization_evaluation.py
-config = {
-    'queries_file': "sparql_queries_8_single/queries.pkl",
-    'model_path': "/path/to/model.pt",
-    'num_queries': 500,
-    'optimization_steps': 5000,
+    # Data and Model
+    'queries_file': "path/to/queries.pkl", # Filepath to queries generated using process_dataset_with_subplans_individual.py
+    'model_path': "path/to/trained_model.pt", # Path of the weights of the trained CostGNN
+    'num_queries': 1000, # on how many queries to evaluate
+    'optimization_steps': 1000, # how many steps the gradient based optimizer takes
+    'use_true_costs': False,  # Whether to calculate true costs and run the optimized plans on the database
+    'use_exhaustive': False,  # Whether to run exhaustive search baseline
+    'verbose': False, # Show gradient based cost descent and penalties over time after each query
+    'save_path': "optimization_results", 
+    
+    # Optimization Parameters
     'optimization_params': {
-        'learning_rate': 0.01,
-        'lambda_acyclic': 1000.0,
-        # ... other hyperparameters
+        # Core Algorithm
+        'optimization_procedure': 'gumbel',  # 'gumbel' only
+        'learning_rate': 1.0, # learning rate of the gradient descent adam optimizer
+        
+        # Constraint Penalties (enforcing valid join trees)
+        'lambda_acyclic': 1000.0,      # Acyclicity constraint
+        'lambda_triple_in': 1000.0,    # Triple node in-degree ≤ 1  
+        'lambda_triple_out': 1000.0,   # Triple node out-degree ≤ 1
+        'lambda_join_in': 500.0,       # Join node in-degree ≤ 1
+        'lambda_join_out': 1000.0,     # Join node out-degree = 2
+        'lambda_left_linear': 1000.0,  # Left-linear tree structure, set to 0 to allow for bushy plans
+        'lambda_entropy': 0.0,          # Edge weight entropy regularization
+        'lambda_total_penalty': 1.0,    # Overall penalty weight
+        
+        # Gumbel-Softmax Parameters
+        'init_tau': 10.0,              # Initial temperature
+        'min_tau': 1.0,                # Minimum temperature  
+        'tau_decay': 0.999,            # Temperature decay rate
+        'use_temperature_annealing': True,
+        
+        # Solution Selection
+        'return_best': True,           # Return best feasible solution
+        'min_penalty_threshold': 0.1,  # Feasibility threshold (how low do the penalties need to be to be accepted ?)
+        'use_lambda_ramping': True,     # Gradually increase penalty weights
+        'logit_sampling': 'dual-softmax',  # Sampling method (sigmoid, softmax or dual-softmax)
+        
+        # Animation and Debugging
+        'save_animation_data': False,
+        'animation_save_interval': 10
     }
 }
 ```
 
-Adjust these configuration dictionaries to experiment with different settings.
+#### Optimization Methods Compared
 
----
+1. **Gradient-Based** (`optimize_query_gumbel`):
+   - Performs Gradient-Based Search in the continously relaxed search space of plans 
+   - Enforces plan validity constraints via penalty functions
+   - Supports both left-linear and bushy trees (controlled by `lambda_left_linear`)
 
-# Continuous Query Optimization for SPARQL  
+2. **Greedy** (`greedy_optimize_query`):
+   - Iteratively adds lowest-cost joins
+   - Fast but potentially suboptimal
 
----
+3. **Random** (`random_join_plan`):
+   - Random join ordering baseline
 
-## 1  Introduction and Motivation  
+4. **Dynamic Programming** (`dp_leftdeep_best_plan`):
+   - Uses trained cost model for plan evaluation (similar to greedy)
 
-Modern query optimizers usually rely on either  
+5. **Exhaustive Search** (`exhaustive_leftdeep_best_plan`):
+   - Brute-force optimal solution (optional, expensive)
 
-* **Dynamic-programming search** – explores every join order at *O(3ⁿ)* cost; quickly intractable for large *n*.  
-* **Greedy heuristics** – choose locally optimal sub-plans in *O(n²)* time but can miss the global optimum under realistic cost models.  
-* **Reinforcement-learning (RL) methods** – sometimes outperform heuristics but are data-hungry, unstable to train, and often as slow as greedy search.  
 
-This project explores a **continuous, gradient-based alternative**:
 
-1. Represent a query plan as a *continuous* adjacency matrix **A**.  
-2. Train a neural **cost model** **Ĉ(·)** (a GNN) that predicts the runtime cost.  
-3. Use gradient descent on **A** (plus validity penalties) to minimize the predicted cost and recover a discrete, valid join order.
+#### Output Files
 
-If successful, the method combines the expressiveness of learned cost models with the efficiency of differentiable optimization, potentially beating DP, greedy, and RL approaches on both quality–cost trade-off and scalability.
+The evaluation saves the following results to the save_path specified in the config:
 
----
+- `config.json`:  configuration used
+- `detailed_results.json`: Per-query results with all methods (for visualization, see below)
+- `final_statistics.json`: Aggregated performance metrics
+- `plan_visualizations/`: Graph visualizations of found plans
+- `animation_data/`: Data for creating optimization animations
 
-## 2  Representation of Queries and Plans  
+## Visualization Tools
 
-### 2.1  Query Representation  
+The `visualization/` directory provides comprehensive analysis and plotting capabilities:
 
-* Embed every triple-pattern (tp) with vector embeddings (e.g., RDF2Vec).  
-* Investigate:  
-  * Path or sub-query embeddings.  
-  * Jointly learning embeddings while training the cost model. citeturn0file0  
 
-### 2.2  Plan Representation & Continuous Relaxation  
 
-* Store the plan in an *n+(n-1) × n+(n-1)* adjacency matrix **A** (one node per tp and one node per join).  
-* Relax binary edges to **Aᵢⱼ ∈ (0,1)** during optimization.  
-* After optimization, threshold (e.g., 0.5) or apply Gumbel-Softmax / straight-through tricks to obtain a valid {0,1} plan. 
+### plot_optimization_results.py
 
----
+**Plotting script for analyzing saved optimization results:**
 
-## 3  Learning the Cost Model  
+**Usage**:
+```bash
+python visualization/plot_optimization_results.py
+```
 
-A **Graph Neural Network (GNN)** is trained offline on triples (X_q, A_q, C_q):  
+**Configuration**:
+```python
+RESULTS_DIR = "path/to/optimization_results/run_timestamp"
+# Plot type flags
+SKIP_BOXPLOT = False
+SKIP_BARPLOT = False
+SKIP_SCATTER = False
+SKIP_RATIOS = False
+SKIP_SIZE_ANALYSIS = False
+SKIP_SUMMARY = False
+EXCLUDE_TRUE_COSTS = True  # New flag to exclude true costs from plots
 
-* **X_q** – node features (tp embeddings).  
-* **A_q** – adjacency of a known plan.  
-* **C_q** – measured execution cost.  
+# Data inclusion flags
+INCLUDE_PREDICTED = True  # Include predicted costs in boxplot
+EXCLUDE_EXHAUSTIVE = True  # Exclude exhaustive search from plots
+EXCLUDE_GREEDY = False  # Exclude greedy method from plots
+EXCLUDE_GRADIENT = False  # Exclude gradient method from plots
+EXCLUDE_DP = False  # Exclude DP method from plots
+```
 
-The loss is Mean-Squared Error (or similar) between **Ĉ_q** and **C_q**. See *Algorithm 1* for pseudocode. 
 
----
 
-## 4  Gradient-Based Optimization of Query Plans  
+### optimization_space_visualization.py
 
-1. **Initialize** **A** with random values in (0,1).  
-2. **Predict cost** **Ĉ(A)** via the trained GNN.  
-3. **Add penalties** for invalid plans:  
-   * **Acyclicity:** Pₐ = tr(eᴬ) − n  
-   * **Triple node constraints:**
-     * **No incoming edges:** P_triple_in = Σ(in_degreeₜ)²
-     * **Exactly one outgoing edge:** P_triple_out = Σ(out_degreeₜ - 1)²
-   * **Join node constraints:**
-     * **Exactly two incoming edges:** P_join_in = Σ(in_degreeⱼ - 2)²
-     * **One outgoing edge (except root):** P_join_out = Σ(out_degreeⱼ - 1)² + (out_degree_root)²
-   * **Entropy penalty (optional):** Encourages weights to be either 0 or 1
-   * **L1 penalty (optional):** Encourages keeping only the strongest connections
-4. **Update** *Aᵢⱼ ← Aᵢⱼ − α ∂L/∂Aᵢⱼ* with learning rate α.  
-5. **Clamp** to [0,1], iterate *I* steps.  
-6. **Threshold** to obtain a discrete plan, then extract a join order via topological sort. citeturn0file0  
+**visualization of optimization landscapes for queries of size 3:**
 
-### 4.1  Guaranteeing Valid Plans  
+- plots the cost landscapes with points being superpositions of the 3 possible plans 
+- plots the gradient trajectory taken during optimization
 
-Penalty terms enforce acyclicity and degree bounds; weights λ₁–λ₃ are meta-optimized. Bushy or multi-way joins can be allowed by relaxing constraints. citeturn0file0  
 
-### 4.2  Discrete Sampling with Gumbel-Softmax  
 
-Soft edges can be sharpened by  
+### optim_animation.py
+
+**Creates MP4 animations of the optimization process:**
+
+
+
+**Animation Features**:
+- **Graph Evolution**: Shows how adjacency matrix changes during optimization
+- **Cost Tracking**: Cost and Penalty over time -corresponding to currently shown graph
+- **Edge Weight Visualization**: Color and thickness indicate edge strengths
+
+
+## Usage Examples
+
+### Complete Workflow
+
+1. **Generate Training Data**:
+```bash
+python create_data/process_dataset_single_file.py
+```
+
+2. **Train Cost Model**:
+```bash
+python cost_model_training.py
+```
+
+3. **Run Optimization Evaluation**:
+```bash
+python evaluation.py
+```
+
+4. **Generate Visualization**:
+```bash
+python visualization/plot_optimization_results.py
+```
+
+
+## Dependencies
+
+- **PyTorch**: Neural network implementation
+- **PyTorch Geometric**: Graph neural networks
+- **NetworkX**: Graph manipulation and visualization
+- **NumPy/SciPy**: Numerical computations
+- **Matplotlib**: Plotting and animations
+- **tqdm**: Progress tracking
+- **pickle/json**: Data serialization
+
+## File Structure Summary
 
 ```
-zᵢⱼ = σ((αᵢⱼ + gᵢⱼ) / τ),   gᵢⱼ ~ Gumbel(0,1)
-```  
-
-Annealing τ→0 gradually moves **A** from continuous to almost binary while retaining gradients. citeturn0file0  
-
----
-
-
-## 6  Expected Contributions  
-
-1. A novel **gradient-based join-order optimizer** driven by a learned cost model.  
-2. Effective continuous-to-discrete relaxation strategies for query plans.  
-3. Empirical insights on query/plan representations and penalty design.  
-4. Benchmarks vs. classic and RL optimizers on large knowledge graphs. citeturn0file0  
-
-
-
-## Appendix A  Algorithms  
-
-<details>
-<summary><strong>Algorithm 1 – Cost GNN Training</strong></summary>
-
-```text
-Input :
-  Training set {(X_q, A_q, C_q)}_{q=1..Q}
-  Epochs E
-Output:
-  Trained cost model Ĉ(·)
-
-Initialize Θ randomly
-for epoch = 1 … E do
-    for each query q do
-        Ĉ_q ← Ĉ(X_q, A_q ; Θ)          ▷ forward
-        L  ← MSE(Ĉ_q , C_q)            ▷ loss
-        Θ  ← Θ − η ∂L/∂Θ              ▷ gradient step
-    end for
-end for
-return Θ
+explicit_join_model/
+├── README.md                    # This file
+├── data.py                      # Core data structures (Triple, Join, Query)
+├── model.py                     # CostGNN architecture
+├── data_loader.py               # PyTorch data loading utilities for CostGNN training
+├── cost_model_training.py       # CostGNN training
+├── evaluation.py                # Main optimization evaluation
+├── create_data/                 # Data generation scripts
+│   ├── process_dataset_single_file.py           # CostGNN Training data generation
+│   ├── process_dataset_with_subplans_individual.py  # Evaluation data
+├── optimization/                # Optimization algorithms
+├── visualization/               # Plotting and analysis tools
+│   ├── evaluation_plots.py                     # Core plotting functions
+│   ├── plot_optimization_results.py           # Standalone result analysis
+│   ├── optimization_space_visualization.py    # 3-D Cost Landscape Visualization
+│   └── optim_animation.py                     # Optimization animation
+└── utils/                       # Utility functions
 ```
-</details> citeturn0file0  
-
-<details>
-<summary><strong>Algorithm 2 – Gradient-Based Join Order Optimization</strong></summary>
-
-```text
-Input :
-  Trained model Ĉ(·), node features X
-  Number of triple patterns triples_num
-  Optimization steps I
-  Penalty weights λ_acyclic, λ_triple_in, λ_triple_out, λ_join_in, λ_join_out, λ_entropy, λ_l1
-Output:
-  Discrete plan (adjacency or join order)
-
-Initialize edge_weights randomly in [0.4, 0.6]
-Initialize optimizer (Adam)
-for step = 1 … I do
-    # Convert edge_weights to adjacency matrix A
-    A ← zeros(N_NODES, N_NODES)
-    A[edge_index[0], edge_index[1]] ← edge_weights
-    
-    Ĉ ← Ĉ(X, edge_index, edge_weights)          ▷ predicted cost
-    L_obj ← Ĉ
-    
-    # Calculate in-degree and out-degree
-    in_degree ← sum(A, dim=0)
-    out_degree ← sum(A, dim=1)
-    
-    # Calculate penalties
-    P_triple_in ← sum(in_degree[triple_nodes]²)
-    P_triple_out ← sum((out_degree[triple_nodes] - 1)²)
-    P_join_in ← sum((in_degree[join_nodes] - 2)²)
-    P_join_out ← sum((out_degree[join_nodes_except_root] - 1)²) + out_degree[root]²
-    P_acyclic ← trace(matrix_exp(A)) - N_NODES
-    
-    # Optional penalties (if enabled)
-    temperature ← max(0.5, 10.0 * (1.0 - step/I))
-    if USE_ENTROPY_PENALTY:
-        P_entropy ← entropy_penalty(A, temperature)
-    if USE_L1_PENALTY:
-        P_l1 ← l1_penalty(A, triple_nodes, join_nodes)
-    
-    # Total loss
-    L_pen ← λ_acyclic·P_acyclic + λ_triple_in·P_triple_in + λ_triple_out·P_triple_out + 
-            λ_join_in·P_join_in + λ_join_out·P_join_out
-    if USE_ENTROPY_PENALTY:
-        L_pen ← L_pen + λ_entropy·P_entropy
-    if USE_L1_PENALTY:
-        L_pen ← L_pen + λ_l1·P_l1
-    
-    L ← L_obj + L_pen
-    
-    # Update using optimizer
-    optimizer.step(L)
-    
-    # Clamp edge weights to [0,1]
-    edge_weights ← clamp(edge_weights, 0, 1)
-end for
-
-# Thresholding
-A[A < 0.5] ← 0
-A[A ≥ 0.5] ← 1
-
-return A
-```
-</details> citeturn0file0  
-
----
-
-### Notation Key
-* **A** – adjacency matrix (plan)  *X* – node features  
-* **Ĉ** – learned cost estimator  *C* – true execution cost  
-* **P_triple_in**, **P_triple_out**, **P_join_in**, **P_join_out**, **P_acyclic**, **P_entropy**, **P_l1** – penalty terms  
-* **α** – learning rate  *λ* – penalty weights  *τ* – temperature for entropy penalty  
-
----
