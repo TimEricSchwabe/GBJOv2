@@ -9,7 +9,7 @@ from scipy.stats import binned_statistic
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
 # Use absolute path with file:// scheme
-experiment_path = f"file://{os.path.abspath('ray_results/join_optim_hpofull')}"
+experiment_path = f"file://{os.path.abspath('/home/tim/query_optimization/ray_results/join_optim_hpo')}"
 analysis = ExperimentAnalysis(experiment_path)
 
 # Get results as DataFrame
@@ -17,7 +17,6 @@ df = analysis.results_df
 
 df.to_csv('ray_results/results.csv', index=False)
 
-exit()
 
 # Create directory for plots
 os.makedirs('analysis_plots', exist_ok=True)
@@ -150,4 +149,36 @@ for i, param in enumerate(numeric_params, 1):
 
 plt.tight_layout()
 plt.savefig('analysis_plots/parameter_cost_trends.png')
+plt.close()
+
+# 6. Pareto front: Mean Cost vs Failure Rate
+
+def compute_pareto_front(dataframe: pd.DataFrame, cost_col: str, fail_col: str) -> pd.DataFrame:
+    """Return the subset of dataframe that lies on the Pareto front for two minimisation objectives."""
+    # Sort by the first objective (cost) so we can do a single pass
+    sorted_df = dataframe.sort_values(cost_col)
+    pareto_rows = []
+    min_failure = np.inf  # keep track of best (lowest) failure rate seen so far
+    for _, row in sorted_df.iterrows():
+        failure_val = row[fail_col]
+        if failure_val < min_failure:
+            pareto_rows.append(row)
+            min_failure = failure_val
+    return pd.DataFrame(pareto_rows)
+
+# Compute Pareto-efficient trials
+pareto_df = compute_pareto_front(df, cost_col="mean_cost", fail_col="failure_rate")
+
+# Plot all trials and highlight the Pareto front
+plt.figure(figsize=(8, 6))
+plt.scatter(df['mean_cost'], df['failure_rate'], alpha=0.2, label='All Trials', color='gray', s=20)
+plt.scatter(pareto_df['mean_cost'], pareto_df['failure_rate'], color='red', label='Pareto Front', s=40)
+plt.plot(pareto_df['mean_cost'], pareto_df['failure_rate'], color='red', linewidth=2)
+plt.xscale('log')
+plt.xlabel('Mean Cost (log scale)')
+plt.ylabel('Failure Rate')
+plt.title('Pareto Front: Mean Cost vs Failure Rate')
+plt.legend()
+plt.tight_layout()
+plt.savefig('analysis_plots/pareto_front.png')
 plt.close()
