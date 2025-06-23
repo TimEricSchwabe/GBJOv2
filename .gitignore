@@ -14,3 +14,4 @@ datasets/
 *.bmp
 *.tiff
 *.ttl
+**/__pycache__/
