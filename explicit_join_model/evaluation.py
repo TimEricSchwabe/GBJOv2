@@ -30,7 +30,6 @@ from data import Triple, Join, Query, Entity
 from model import CostGNNv2
 from create_data.process_dataset_single_file import SPARQLQuery
 
-# Import from our refactored modules
 from optimization import (
     optimize_query_gumbel,
     greedy_optimize_query,
@@ -117,6 +116,9 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
     # NEW: exhaustive search results (only if enabled)
     if use_exhaustive:
         predicted_exhaustive_costs = []
+    
+    # NEW: Track gradient optimization failures
+    gradient_failures = 0
     
     # NEW: Detailed results for JSON export
     detailed_results = []
@@ -259,17 +261,22 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             # Convert adjacency to query plan (always create for saving plan structure)
             gradient_plan = None
             try:
+                raise Exception("Here it is")
                 gradient_plan = adjacency_to_query_with_real_triples(final_adjacency, triples_num, triple_objs)
+                # @Roman: replace this here like:
+                # gradient_plan = adjacency_to_query_with_new_algorithm(final_adjacency, triples_num, triple_objs)
                 
                 # Validate that the plan contains all expected triple patterns
                 is_valid, validation_msg = validate_plan(gradient_plan, triple_objs)
                 if not is_valid:
                     print(f"Warning: Invalid gradient plan for query {i}: {validation_msg}")
                     print("Skipping this query")
+                    gradient_failures += 1
                     continue
             except Exception as e:
                 print(f"Warning: Failed to convert gradient plan for query {i}: {e}")
                 print("Skipping this query")
+                gradient_failures += 1
                 continue
 
             end_time = time.time()
@@ -301,6 +308,7 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             #raise e
             print(f"Error in gradient optimization for query {i}: {e}")
             # Skip this query
+            gradient_failures += 1
             continue
         
         # Run greedy optimization
@@ -452,7 +460,8 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
         'predicted_best_costs': predicted_best_costs,
         'true_best_predicted_costs': true_best_predicted_costs,
         'predicted_gradient_costs': predicted_gradient_costs,
-        'predicted_greedy_costs': predicted_greedy_costs
+        'predicted_greedy_costs': predicted_greedy_costs,
+        'gradient_failures': gradient_failures
     }
     
     # Add exhaustive costs only if exhaustive search was performed
@@ -460,8 +469,8 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
         stats['predicted_exhaustive_costs'] = predicted_exhaustive_costs
     
     # Save plots without showing them, with a suffix indicating the iteration
-    print(f"Saving plots to {save_directory}")
-    plot_statistics(stats, show_plots=False, save_directory=save_directory)
+    #print(f"Saving plots to {save_directory}")
+    #plot_statistics(stats, show_plots=False, save_directory=save_directory)
     
     # Save metadata for animation generation
     animation_metadata = {
@@ -489,15 +498,15 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
 if __name__ == "__main__":
     # Configuration for optimization
 
-    config = {
+    config_standard = {
         # General parameters
         'queries_file': "/home/tim/query_optimization/datasets/optimization_stars_3_to_8/queries.pkl",
         'model_path': "/home/tim/query_optimization/explicit_join_model/models/star_model.pt",
         'num_queries': 10000,
-        'optimization_steps': 100,
+        'optimization_steps': 1000,
         'use_true_costs': False,
         'use_exhaustive': False,
-        'verbose': False,
+        'verbose': True,
         'save_path': "optimization_results",  # Base directory for saving results
         
         # Query optimization hyperparameters
@@ -527,7 +536,7 @@ if __name__ == "__main__":
             # Solution selection and penalty ramping
             'return_best': True,         # Whether to return best feasible solution
             'min_penalty_threshold': 0.1,  # Minimum penalty for accepting a solution
-            'use_lambda_ramping': True,  # Whether to ramp up lambda_total_penalty
+            'use_lambda_ramping': False,  # Whether to ramp up lambda_total_penalty
             
             # Sampling method selection
             'logit_sampling': 'dual-softmax',  # 'sigmoid', 'softmax' or 'dual-softmax',
@@ -541,13 +550,13 @@ if __name__ == "__main__":
 
 
 
-    config_best = {
+    config_top3 = {
         # General parameters
-        'queries_file': "/home/tim/query_optimization/sparql_star_query_10/queries.pkl",
+        'queries_file': "/home/tim/query_optimization/datasets/optimization_stars_3_to_8/queries.pkl",
         'model_path': "/home/tim/query_optimization/explicit_join_model/models/star_model.pt",
-        'num_queries': 1000000,
-        'optimization_steps': 1746,
-        'verbose': True,
+        'num_queries': 30,
+        'optimization_steps': 476,
+        'verbose': False,
         'use_exhaustive': False,
         'use_true_costs': False,  # Set to False to skip expensive true cost calculations
         'save_path': "optimization_results",  # Base directory for saving results
@@ -558,27 +567,27 @@ if __name__ == "__main__":
             'optimization_procedure': 'gumbel',  # 'gumbel' or 'normal'
             
             # Optimizer parameters
-            'learning_rate': 0.133,
+            'learning_rate': 4,
             
             # Penalty weights
-            'lambda_acyclic': 2065.0,    # Weight for acyclicity penalty
-            'lambda_triple_in': 2390.0,  # Weight for triple in-degree penalty
-            'lambda_triple_out': 105.0, # Weight for triple out-degree penalty
-            'lambda_join_in': 387.0,     # Weight for join in-degree penalty
-            'lambda_join_out': 2610.0,   # Weight for join out-degree penalty
+            'lambda_acyclic': 4720.0,    # Weight for acyclicity penalty
+            'lambda_triple_in': 1441.0,  # Weight for triple in-degree penalty
+            'lambda_triple_out': 825.0, # Weight for triple out-degree penalty
+            'lambda_join_in': 818.0,     # Weight for join in-degree penalty
+            'lambda_join_out': 4136.0,   # Weight for join out-degree penalty
             'lambda_entropy': 0.0,      # Weight for entropy penalty
             'lambda_total_penalty': 1, # Overall weight for the total penalty
-            'lambda_left_linear': 3290.0, # Weight for left-linear penalty
+            'lambda_left_linear': 308.0, # Weight for left-linear penalty
             
             # Gumbel-Sigmoid specific parameters
-            'init_tau': 8.2,            # Initial temperature for Gumbel-Sigmoid
+            'init_tau': 10,            # Initial temperature for Gumbel-Sigmoid
             'min_tau': 1.0,              # Minimum temperature for Gumbel-Sigmoid
-            'tau_decay': 0.976,          # Temperature decay rate
+            'tau_decay': 0.973,          # Temperature decay rate
             'use_temperature_annealing': True,  # Whether to use temperature annealing
             
             # Solution selection and penalty ramping
             'return_best': True,         # Whether to return best feasible solution
-            'min_penalty_threshold': 5.0,  # Minimum penalty for accepting a solution
+            'min_penalty_threshold': 1.6,  # Minimum penalty for accepting a solution
             'use_lambda_ramping': True,  # Whether to ramp up lambda_total_penalty
             
             # Sampling method selection
@@ -589,6 +598,57 @@ if __name__ == "__main__":
             'animation_save_interval': 10,   # Save animation data every N steps
         }
     }
+
+
+    config = {
+        # General parameters
+        'queries_file': "/home/tim/query_optimization/datasets/optimization_stars_3_to_8/queries.pkl",
+        'model_path': "/home/tim/query_optimization/explicit_join_model/models/star_model.pt",
+        'num_queries': 70,
+        'optimization_steps': 1470,
+        'verbose': False,
+        'use_exhaustive': False,
+        'use_true_costs': False,  # Set to False to skip expensive true cost calculations
+        'save_path': "optimization_results",  # Base directory for saving results
+        
+        # Query optimization hyperparameters
+        'optimization_params': {
+            # Optimization procedure selection
+            'optimization_procedure': 'gumbel',  # 'gumbel' or 'normal'
+            
+            # Optimizer parameters
+            'learning_rate': 2.2,
+            
+            # Penalty weights
+            'lambda_acyclic': 2064.0,    # Weight for acyclicity penalty
+            'lambda_triple_in': 3318.0,  # Weight for triple in-degree penalty
+            'lambda_triple_out': 993.0, # Weight for triple out-degree penalty
+            'lambda_join_in': 1725.0,     # Weight for join in-degree penalty
+            'lambda_join_out': 4583.0,   # Weight for join out-degree penalty
+            'lambda_entropy': 0.0,      # Weight for entropy penalty
+            'lambda_total_penalty': 1, # Overall weight for the total penalty
+            'lambda_left_linear': 3180.0, # Weight for left-linear penalty
+            
+            # Gumbel-Sigmoid specific parameters
+            'init_tau': 6.2,            # Initial temperature for Gumbel-Sigmoid
+            'min_tau': 1.0,              # Minimum temperature for Gumbel-Sigmoid
+            'tau_decay': 0.978,          # Temperature decay rate
+            'use_temperature_annealing': True,  # Whether to use temperature annealing
+            
+            # Solution selection and penalty ramping
+            'return_best': True,         # Whether to return best feasible solution
+            'min_penalty_threshold': 5.4,  # Minimum penalty for accepting a solution
+            'use_lambda_ramping': True,  # Whether to ramp up lambda_total_penalty
+            
+            # Sampling method selection
+            'logit_sampling': 'softmax',  # 'sigmoid', 'softmax' or 'dual-softmax',
+
+            # Animation parameters
+            'save_animation_data': False,    # Whether to save data for creating animations
+            'animation_save_interval': 10,   # Save animation data every N steps
+        }
+    }
+    
     
     # Create unique save directory based on datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -642,7 +702,8 @@ if __name__ == "__main__":
             'median': float(np.median(stats['gradient_costs'])),
             'std': float(np.std(stats['gradient_costs'])),
             'min': float(np.min(stats['gradient_costs'])),
-            'max': float(np.max(stats['gradient_costs']))
+            'max': float(np.max(stats['gradient_costs'])),
+            'failure_rate': float(stats['gradient_failures'] / len(sparql_queries))
         },
         'greedy': {
             'mean': float(np.mean(stats['greedy_costs'])),
@@ -678,6 +739,7 @@ if __name__ == "__main__":
     print("FINAL STATISTICS")
     print("="*50)
     print(f"Gradient - Mean: {final_stats['gradient']['mean']:.2f}, Median: {final_stats['gradient']['median']:.2f}")
+    print(f"Gradient failure rate: {final_stats['gradient']['failure_rate']:.1%}")
     print(f"Greedy - Mean: {final_stats['greedy']['mean']:.2f}, Median: {final_stats['greedy']['median']:.2f}")
     print(f"Random - Mean: {final_stats['random']['mean']:.2f}, Median: {final_stats['random']['median']:.2f}")
     print(f"Gradient win rate vs Random: {final_stats['win_rates']['gradient_vs_random']:.1f}%")
