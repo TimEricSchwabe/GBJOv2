@@ -15,3 +15,4 @@ datasets/
 *.tiff
 *.ttl
 *.pkl
+**/__pycache__/
