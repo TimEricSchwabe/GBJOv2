@@ -14,8 +14,12 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
+import scienceplots
+plt.style.use('science')
+
+
 # Configuration flags
-RESULTS_DIR = "/home/tim/query_optimization/optimization_results/run_20250619_150150"  # Directory containing detailed_results.json
+RESULTS_DIR = "/home/tim/query_optimization/optimization_results/9-to-15-stars-v1"  # Directory containing detailed_results.json
 OUTPUT_DIR = None  # If None, will use RESULTS_DIR/plots
 
 # Plot type flags
@@ -160,6 +164,7 @@ def extract_costs_and_metrics(data: List[Dict]) -> Dict[str, List[float]]:
     }
     
     for query_result in data:
+        
         if 'plans' not in query_result:
             continue
             
@@ -738,11 +743,217 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
             plt.close()
 
     # NEW: MSE between predicted methods and predicted DP costs by query size
-    if (has_dp_pred and len(stats['query_sizes']) > 0 and len(stats['predicted_best_costs']) > 0):
+    if (len(stats['query_sizes']) > 0 and 
+        ((has_gradient_pred and len(stats['predicted_gradient_costs']) > 0) or 
+         (has_greedy_pred and len(stats['predicted_greedy_costs']) > 0))):
         
-        # Check if we have gradient or greedy predicted data to compare with DP predicted
+        # NEW: Mean predicted costs by query size for gradient and greedy methods
         if ((has_gradient_pred and len(stats['predicted_gradient_costs']) > 0) or 
             (has_greedy_pred and len(stats['predicted_greedy_costs']) > 0)):
+            
+            # Get unique query sizes and sort them
+            unique_sizes = sorted(list(set(stats['query_sizes'])))
+            
+            # Calculate mean predicted costs for each query size
+            gradient_mean_by_size = []
+            greedy_mean_by_size = []
+            dp_mean_by_size = []
+            valid_sizes_mean = []
+            
+            for size in unique_sizes:
+                # Get indices for this query size
+                size_indices = [i for i, s in enumerate(stats['query_sizes']) if s == size]
+                
+                if len(size_indices) < 1:  # Need at least 1 query for mean
+                    continue
+                
+                valid_sizes_mean.append(size)
+                
+                # Calculate mean for gradient predicted if available
+                if has_gradient_pred and len(stats['predicted_gradient_costs']) > 0:
+                    gradient_pred_costs_size = [stats['predicted_gradient_costs'][i] for i in size_indices 
+                                              if i < len(stats['predicted_gradient_costs'])]
+                    if gradient_pred_costs_size:
+                        gradient_mean_by_size.append(np.mean(gradient_pred_costs_size))
+                    else:
+                        gradient_mean_by_size.append(np.nan)
+                else:
+                    gradient_mean_by_size.append(np.nan)
+                
+                # Calculate mean for greedy predicted if available
+                if has_greedy_pred and len(stats['predicted_greedy_costs']) > 0:
+                    greedy_pred_costs_size = [stats['predicted_greedy_costs'][i] for i in size_indices 
+                                            if i < len(stats['predicted_greedy_costs'])]
+                    if greedy_pred_costs_size:
+                        greedy_mean_by_size.append(np.mean(greedy_pred_costs_size))
+                    else:
+                        greedy_mean_by_size.append(np.nan)
+                else:
+                    greedy_mean_by_size.append(np.nan)
+                
+                # Calculate mean for DP predicted costs for reference (only if DP data is available)
+                if has_dp_pred and len(stats['predicted_best_costs']) > 0:
+                    dp_pred_costs_size = [stats['predicted_best_costs'][i] for i in size_indices 
+                                        if i < len(stats['predicted_best_costs'])]
+                    if dp_pred_costs_size:
+                        dp_mean_by_size.append(np.mean(dp_pred_costs_size))
+                    else:
+                        dp_mean_by_size.append(np.nan)
+                else:
+                    dp_mean_by_size.append(np.nan)
+            
+            # Create the mean predicted costs bar plot
+            if valid_sizes_mean and len(valid_sizes_mean) >= 1:
+                plt.figure(figsize=(12, 8))
+                
+                x_positions = np.arange(len(valid_sizes_mean))
+                
+                # Determine how many methods we have to adjust bar width
+                num_methods = 0
+                if has_gradient_pred and not all(np.isnan(gradient_mean_by_size)):
+                    num_methods += 1
+                if has_greedy_pred and not all(np.isnan(greedy_mean_by_size)):
+                    num_methods += 1
+                if has_dp_pred and not all(np.isnan(dp_mean_by_size)):
+                    num_methods += 1
+                
+                width = 0.8 / max(num_methods, 1)  # Adjust width based on number of methods
+                
+                bar_pos = 0
+                
+                # Plot gradient mean if available
+                if has_gradient_pred and not all(np.isnan(gradient_mean_by_size)):
+                    gradient_mean_clean = [mean if not np.isnan(mean) else 0 for mean in gradient_mean_by_size]
+                    plt.bar(x_positions + (bar_pos - num_methods/2 + 0.5) * width, gradient_mean_clean, width, 
+                           label='Mean Pred Gradient Cost', color='blue', alpha=0.7)
+                    bar_pos += 1
+                
+                # Plot greedy mean if available
+                if has_greedy_pred and not all(np.isnan(greedy_mean_by_size)):
+                    greedy_mean_clean = [mean if not np.isnan(mean) else 0 for mean in greedy_mean_by_size]
+                    plt.bar(x_positions + (bar_pos - num_methods/2 + 0.5) * width, greedy_mean_clean, width, 
+                           label='Mean Pred Greedy Cost', color='green', alpha=0.7)
+                    bar_pos += 1
+                
+                # Plot DP mean for reference (only if DP data is available)
+                if has_dp_pred and not all(np.isnan(dp_mean_by_size)):
+                    dp_mean_clean = [mean if not np.isnan(mean) else 0 for mean in dp_mean_by_size]
+                    plt.bar(x_positions + (bar_pos - num_methods/2 + 0.5) * width, dp_mean_clean, width, 
+                           label='Mean Pred DP Cost', color='purple', alpha=0.7)
+                    bar_pos += 1
+                
+                plt.xlabel('Query Size (Number of Triple Patterns)')
+                plt.ylabel('Mean Predicted Cost')
+                plt.title('Mean Predicted Costs by Query Size')
+                plt.xticks(x_positions, valid_sizes_mean)
+                plt.yscale('log')
+                plt.legend()
+                plt.grid(axis='y', alpha=0.3)
+                
+                # Add value labels on bars
+                bar_pos = 0
+                if has_gradient_pred and not all(np.isnan(gradient_mean_by_size)):
+                    for i, mean_cost in enumerate(gradient_mean_clean):
+                        if mean_cost > 0:
+                            plt.text(i + (bar_pos - num_methods/2 + 0.5) * width, mean_cost * 1.1, f"{mean_cost:.1e}", 
+                                   ha='center', va='bottom', rotation=45, fontsize=8)
+                    bar_pos += 1
+                
+                if has_greedy_pred and not all(np.isnan(greedy_mean_by_size)):
+                    for i, mean_cost in enumerate(greedy_mean_clean):
+                        if mean_cost > 0:
+                            plt.text(i + (bar_pos - num_methods/2 + 0.5) * width, mean_cost * 1.1, f"{mean_cost:.1e}", 
+                                   ha='center', va='bottom', rotation=45, fontsize=8)
+                    bar_pos += 1
+                
+                if has_dp_pred and not all(np.isnan(dp_mean_by_size)):
+                    for i, mean_cost in enumerate(dp_mean_clean):
+                        if mean_cost > 0:
+                            plt.text(i + (bar_pos - num_methods/2 + 0.5) * width, mean_cost * 1.1, f"{mean_cost:.1e}", 
+                                   ha='center', va='bottom', rotation=45, fontsize=8)
+                    bar_pos += 1
+                
+                plt.tight_layout()
+                plt.savefig(os.path.join(save_directory, f'mean_predicted_costs_by_query_size{suffix}.png'))
+                if show_plots:
+                    plt.show()
+                else:
+                    plt.close()
+                
+                # NEW: Line plot version for AAAI submission
+                #plt.figure(figsize=(10, 6))
+                plt.figure()
+                #####################################################
+                ### LINE PLOT PREDICTED COSTS BY QUERY SIZE
+                #####################################################
+                # Plot lines for available methods
+                if has_gradient_pred and not all(np.isnan(gradient_mean_by_size)):
+                    gradient_mean_clean = [mean if not np.isnan(mean) else None for mean in gradient_mean_by_size]
+                    # Filter out None values for plotting
+                    gradient_sizes = [valid_sizes_mean[i] for i, mean in enumerate(gradient_mean_clean) if mean is not None]
+                    gradient_costs = [mean for mean in gradient_mean_clean if mean is not None]
+                    
+                    #plt.plot(gradient_sizes, gradient_costs, 'o-', 
+                    #        color='#1f77b4', linewidth=2.5, markersize=8, 
+                    #        label='Gradient-based', markeredgewidth=1.5, markeredgecolor='white')
+                    plt.plot(gradient_sizes, gradient_costs, 'o-', 
+                            label='Gradient-based', markeredgecolor='white')
+                
+                if has_greedy_pred and not all(np.isnan(greedy_mean_by_size)):
+                    greedy_mean_clean = [mean if not np.isnan(mean) else None for mean in greedy_mean_by_size]
+                    # Filter out None values for plotting
+                    greedy_sizes = [valid_sizes_mean[i] for i, mean in enumerate(greedy_mean_clean) if mean is not None]
+                    greedy_costs = [mean for mean in greedy_mean_clean if mean is not None]
+                    
+                    plt.plot(greedy_sizes, greedy_costs, 's-', 
+                            label='Greedy', markeredgecolor='white')
+                
+                # Format for publication quality
+                plt.xlabel('Query Size')
+                plt.ylabel('Mean Predicted Cost')
+                plt.yscale('log')
+                
+                # Customize legend
+                plt.legend(frameon=True,
+                          loc='best', framealpha=0.)
+                
+                # Customize grid
+                #plt.grid(True, alpha=0.3, linestyle='--', linewidth=0.8)
+                
+                # Customize tick labels
+                #plt.xticks(fontsize=12)
+                #plt.yticks(fontsize=12)
+                
+                # Set margins and layout
+                plt.margins(x=0.05, y=0.05)
+                plt.tight_layout()
+                
+                # Save with high DPI for publication
+                plt.savefig(os.path.join(save_directory, f'mean_predicted_costs_lineplot{suffix}.png'), 
+                           dpi=300, bbox_inches='tight')
+                plt.savefig(os.path.join(save_directory, f'mean_predicted_costs_lineplot{suffix}.pdf'), 
+                           bbox_inches='tight')
+                if show_plots:
+                    plt.show()
+                else:
+                    plt.close()
+                
+                # Print summary statistics
+                print(f"\nMean Predicted Costs Analysis by Query Size:")
+                print(f"Query sizes analyzed: {valid_sizes_mean}")
+                if has_gradient_pred and not all(np.isnan(gradient_mean_by_size)):
+                    print(f"Mean Predicted Gradient Costs by size: {[f'{mean:.2e}' if not np.isnan(mean) else 'N/A' for mean in gradient_mean_by_size]}")
+                if has_greedy_pred and not all(np.isnan(greedy_mean_by_size)):
+                    print(f"Mean Predicted Greedy Costs by size: {[f'{mean:.2e}' if not np.isnan(mean) else 'N/A' for mean in greedy_mean_by_size]}")
+                if has_dp_pred and not all(np.isnan(dp_mean_by_size)):
+                    print(f"Mean Predicted DP Costs by size: {[f'{mean:.2e}' if not np.isnan(mean) else 'N/A' for mean in dp_mean_by_size]}")
+            else:
+                print("Note: No query sizes have sufficient data for mean predicted costs analysis")
+        
+        # Check if we have gradient or greedy predicted data to compare with DP predicted (only do MSE analysis if DP is available)
+        if (has_dp_pred and len(stats['predicted_best_costs']) > 0 and 
+            ((has_gradient_pred and len(stats['predicted_gradient_costs']) > 0) or 
+             (has_greedy_pred and len(stats['predicted_greedy_costs']) > 0))):
             
             # Get unique query sizes and sort them
             unique_sizes = sorted(list(set(stats['query_sizes'])))

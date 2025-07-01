@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import List, Tuple
 import numpy as np
 from torch_geometric.data import Data, DataLoader
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from data import Triple, Join, Query, Entity, join_order_to_adjacency_matrix, random, Datapoint, random_join_order
 from tqdm import tqdm
 import shutil
@@ -31,7 +33,7 @@ def has_all_variable_triple_pattern(query_data: dict) -> bool:
 
 @dataclass
 class SPARQLQuery:
-    """Class to hold multiple join plans for a 8-triple pattern query"""
+    """Class to hold multiple join plans for query"""
     triples: List[List[str]]
     join_plans: List[Query]
     costs: List[float]
@@ -321,14 +323,15 @@ if __name__ == "__main__":
 
     
     # Set paths
-    input_file = "/home/tim/query_optimization/datasets/queries/Path_Queries.json"
-    dataset_dir = "datasets/dataset_path_4"
-    sparql_queries_file = "datasets/sparql_queries_path_4/queries.pkl"
-    visualization_dir = "join_plan_visualizations"
+    input_file = "/home/tim/CQOS-dataset/lubm/star/Queries_9_to_14.json"
+    dataset_dir = "datasets/dataset_star_9_to_14"
+    sparql_queries_file = "sparql_queries_star_9_to_14/queries.pkl"
+    visualization_dir = "join_plan_visualizations_star"
 
-    MAX_QUERIES = 100
-    MIN_CARDINALITY = 1000
+    MAX_QUERIES = 10000000000000000
+    MIN_CARDINALITY = 4
     N_TRIPLES = 4
+    SAVE_INTERVAL = 100
     
     # Create visualization directory
     os.makedirs(visualization_dir, exist_ok=True)
@@ -339,15 +342,17 @@ if __name__ == "__main__":
         queries = json.load(f)
     
     # Filter queries with exactly 8 triple patterns
-    queries_8tp = [q for q in queries if len(q["triples"]) == N_TRIPLES]
+    #queries_8tp = [q for q in queries if len(q["triples"]) == N_TRIPLES]
+    queries_8tp = queries
     # Filter queries for min cardinality
     queries_8tp = [q for q in queries_8tp if q["y"] >= MIN_CARDINALITY and not has_all_variable_triple_pattern(q)]
     print(f"Found {len(queries_8tp)} queries with exactly {N_TRIPLES} triple patterns and min cardinality {MIN_CARDINALITY}")
+    #Shuffle queries
+    random.shuffle(queries_8tp)
     
-    # Prefilter queries based on cardinality
     
     # Number of random plans to create per query
-    num_random_plans = 1
+    num_random_plans = 3
     
     # Process queries
     sparql_queries = []
@@ -389,14 +394,26 @@ if __name__ == "__main__":
             # Print costs for debugging
             print(f"  Plans costs: {sparql_query.costs}")
             print(f"  Best plan index: {sparql_query.get_best_plan_index()}")
+
+            # Save every SAVE_INTERVAL queries
+            if (n_queries % SAVE_INTERVAL) == 0:
+                print(f"\nSaving checkpoint at {n_queries} queries...")
+                
+                # Save SPARQLQuery objects checkpoint
+                save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
+                
+                # Save dataset checkpoint
+                save_dataset_single_file(all_triples, all_torch_data, dataset_dir)
+                
+                print(f"Checkpoint saved at {n_queries} queries")
+
         except Exception as e:
             raise
             print(f"Error processing query {i}: {e}")
     
-    # Save all SPARQLQuery objects to a single file
+    # Save final results
+    print("\nSaving final results...")
     save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
-    
-    # Save dataset to a single file
     save_dataset_single_file(all_triples, all_torch_data, dataset_dir)
     
     print("\nDataset conversion complete!")

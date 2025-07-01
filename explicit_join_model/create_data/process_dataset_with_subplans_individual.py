@@ -1,6 +1,5 @@
 import sys
 import os
-# Add the parent directory to Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import pickle
@@ -415,15 +414,15 @@ if __name__ == "__main__":
 
     
     # Set paths
-    input_file = "/home/tim/query_optimization/datasets/queries/LUBM_stars_10.json"
-    sparql_queries_file = "sparql_star_query_10/queries.pkl"
+    input_file = "/home/tim/CQOS-dataset/lubm/star/star_queries.json"
+    sparql_queries_file = "NEW_DATASET/queries.pkl"
     visualization_dir = "None"
 
     # Number of random plans to create per query
     num_random_plans = 1
     # Min Cardinality
-    min_cardinality = 0
-    n_triple_sizes = [10]  # Multiple triple sizes to process
+    min_cardinality = 10
+    n_triple_sizes = [3,4,5,6,7,8,9,10,11,12,13,14]  # Multiple triple sizes to process
     n_queries = 20  # Number of queries to collect for each size
     include_subplans = False  # Set to True to generate and include subplans
     calculate_subplan_costs = False  # Set to True to calculate real costs for subplans using root.get_cost()

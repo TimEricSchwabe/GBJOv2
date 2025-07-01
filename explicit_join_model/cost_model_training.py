@@ -15,6 +15,9 @@ from typing import Dict
 from model import CostGNN, CostGNNv2
 from data_loader import QueryDataset, SingleFileQueryDataset
 
+import scienceplots
+plt.style.use('science')
+
 
 def calculate_qerror(pred, true):
     """Calculate Q-Error between predicted and true values"""
@@ -227,16 +230,25 @@ def plot_prediction_vs_truth(model, val_dataset, device, result_dir=None, datase
     plots_dir.mkdir(parents=True, exist_ok=True)
     
     # Plot overall scatter plot
-    fig, ax = plt.subplots(figsize=(10, 8))
-    ax.scatter(y_true.cpu().detach().numpy(), y_pred.cpu().detach().numpy(), alpha=0.1)
-    ax.axline((0, 0), slope=1, color="red", alpha=0.5, zorder=1)
+    #fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots()
+
+    # Convert to numpy arrays for correlation calculation
+    y_true_np = y_true.cpu().detach().numpy()
+    y_pred_np = y_pred.cpu().detach().numpy()
+    correlation = np.corrcoef(y_true_np, y_pred_np)[0,1]
+
+    ax.plot(y_true_np, y_pred_np, alpha=0.1, color='black',
+    marker="x", linestyle="none", markersize=2)
+    ax.axline((0, 0), slope=1, color="black", alpha=0.5, zorder=1)
     ax.set_xlabel("True cost")
     ax.set_ylabel("Predicted cost")
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_title(f"Overall: Mean Q-Error={mean_qerror:.2f}, Median Q-Error={median_qerror:.2f}")
+    #ax.text(0.05, 0.95, f'$r$={correlation:.3f}', 
+    #        transform=ax.transAxes, verticalalignment='top')
     
-    plt.savefig(plots_dir / 'prediction_vs_truth_overall.png')
+    plt.savefig(plots_dir / 'prediction_vs_truth_overall.pdf')
     plt.close()
     
     # Try to get query sizes from dataset
@@ -286,7 +298,7 @@ def plot_prediction_vs_truth(model, val_dataset, device, result_dir=None, datase
         
         # Create plots for each query size
         size_metrics = {}
-        for size in range(1, 9):  # Sizes 1-8
+        for size in range(1, 14):  # Sizes 1-8
             # Get data for this size
             size_mask = (query_sizes == size)
             if size_mask.sum() > 0:
@@ -429,15 +441,15 @@ if __name__ == "__main__":
         
         # Dataset parameters
         'use_single_file': True,
-        'train_size': 38000,
-        'val_size': 5000,
+        'train_size': 130000,
+        'val_size': 20000,
         
         # Paths
         'root_dir': '/home/tim/query_optimization/',
-        'dataset_dir': 'datasets/dataset_path_8_with_subplans',
+        'dataset_dir': '/home/tim/query_optimization/datasets/star_plan_datasets_training/LUBM_STAR',
         
         # Other settings
-        'enable_training': True,    # Set to False to skip training
+        'enable_training': False,    # Set to False to skip training
     }
     
     # Set device (GPU if available, else CPU)
@@ -516,6 +528,7 @@ if __name__ == "__main__":
         
         # If not training, try to load a pre-trained model
         pretrained_model_path = os.path.join(config['root_dir'], 'join_plus_tp_prediction_all_sizes.pt')
+        pretrained_model_path = "/home/tim/query_optimization/explicit_join_model/models/star_model.pt"
         try:
             model.load_state_dict(torch.load(pretrained_model_path, map_location=device))
             print(f"Loaded pre-trained model from {pretrained_model_path}")

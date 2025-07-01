@@ -185,6 +185,7 @@ def evaluate_optimization_efficient(sparql_queries, model, num_queries=None,
                 print(f"Gradient cost: {cost_pred}")
 
         except Exception as e:
+            print(f"Error in gradient optimization for query {i}: {e}")
             if verbose:
                 print(f"Error in gradient optimization for query {i}: {e}")
             num_failures += 1
@@ -211,18 +212,21 @@ SEARCH_SPACE = {
     "lambda_acyclic": tune.uniform(1e2, 5e3),
     "lambda_triple_in": tune.uniform(1e2, 5e3),
     "lambda_triple_out": tune.uniform(1e2, 5e3),
-    "lambda_join_in": tune.uniform(1e2, 2e3),
+    "lambda_join_in": tune.uniform(1e2, 5e3),
     "lambda_join_out": tune.uniform(1e2, 5e3),
     "lambda_entropy": 0,
     "lambda_left_linear": tune.uniform(1e2, 5e3),
 
     "use_lambda_ramping": tune.choice([True, False]),
     "logit_sampling": tune.choice(['sigmoid', 'softmax', 'dual-softmax']),
+    "lambda_ramp_exponent": tune.uniform(0.1, 10.0),
+    "min_penalty_threshold": tune.uniform(0.1, 10.0),
 
     "init_tau": tune.uniform(1.0, 20.0),
     "tau_decay": tune.loguniform(0.95, 0.9999),
-
-    "lambda_total_penalty": 1.0,
+    "lambda_total_penalty": tune.uniform(0.1, 5.0),
+    "lr_warmup_steps": tune.uniform(0, 200),
+    "gradient_clip_norm": tune.uniform(1, 5.0),
 }
 
 
@@ -231,9 +235,9 @@ SEARCH_SPACE = {
 # -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    queries_file = "/home/tim/query_optimization/datasets/optimization_stars_3_to_8/queries.pkl"
+    queries_file = "/home/tim/query_optimization/datasets/optimization_stars_3_to_14/queries.pkl"
     model_path = "/home/tim/query_optimization/explicit_join_model/models/star_model.pt"
-    num_queries = 50  # Number of queries to evaluate per trial
+    num_queries = 80  # Number of queries to evaluate per trial
     procedure = "gumbel"  # Which optimiser variant to tune ("normal" or "gumbel")
     max_trials = 1000  # HPO budget – number of configs to explore
     cpus_per_trial = 2

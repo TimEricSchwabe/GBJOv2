@@ -52,25 +52,35 @@ def optimize_query_gumbel(
     return_best: bool = True,
     min_penalty_threshold: float = 1.0,
     use_lambda_ramping: bool = True,
+    lambda_ramp_exponent: float = 2.0,
     logit_sampling: str = 'sigmoid',  # 'sigmoid', 'softmax' or 'dual-softmax'
     # Animation parameters
     save_animation_data: bool = False,
     animation_save_interval: int = 10,
+    # Gradient optimization improvements
+    gradient_clip_norm: float = 5.0,
+    use_lr_scheduling: bool = True,
+    lr_warmup_steps: int = 200,
 ):
     """Gradient-based join-order search with **Straight-Through Gumbel-Sigmoid**.
 
     The signature and return values mirror `optimize_query()` so the rest of
     your code remains unchanged.
     """
+
+
+    
     # Move data ----------------------------------------------------------------
     data = query_data.to(device)
     N_NODES = len(data.x)
     triples_num = (N_NODES + 1) // 2  # n triples ➜ 2n‑1 nodes
 
+
     # Enumerate all candidate edges (excluding self‑loops) ----------------------
     src, dst = torch.where(~torch.eye(N_NODES, dtype=torch.bool))
     edge_index = torch.stack([src, dst], dim=0).to(device)
     num_edges = edge_index.size(1)
+
 
     # Optimised parameters: edge logits ------------------------------------------------
     edge_logits = torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device=device)
@@ -82,6 +92,22 @@ def optimize_query_gumbel(
         optimiser = optim.AdamW([edge_logits, edge_logits_slot2], lr=learning_rate)
     else:
         optimiser = optim.AdamW([edge_logits], lr=learning_rate)
+    
+    # Learning rate scheduler for warmup and decay
+    if use_lr_scheduling:
+        def lr_schedule(step):
+            # This function returns a multiplier for the base learning_rate
+            # Actual LR = learning_rate * lr_schedule(step)
+            if step < lr_warmup_steps:
+                # Linear warmup from 0 to learning_rate
+                if lr_warmup_steps == 0:
+                    return 1
+                else:
+                    return (step + 1) / lr_warmup_steps  # 0 → 1.0
+            else:
+                return 1
+        
+        scheduler = optim.lr_scheduler.LambdaLR(optimiser, lr_lambda=lr_schedule)
     
     # Track best solution if return_best is True
     best_cost = float('inf')
@@ -250,6 +276,16 @@ def optimize_query_gumbel(
             + lambda_left_linear * P_left_linear
         )
 
+        total_penalty_raw = (
+            P_triple_in
+            + P_triple_out
+            + P_join_in
+            + P_join_out
+            + P_acyclic
+            + P_entropy
+            + P_left_linear
+        )
+
         # Save cost and penalty for animation if enabled ----------------------
         if save_animation_data and step % animation_save_interval == 0:
             animation_data['cost_history'].append(cost_pred.item())
@@ -259,7 +295,7 @@ def optimize_query_gumbel(
         if use_lambda_ramping:
             def annealed_lam(lam_max, step, ramp_steps=150):
                 frac = min(1.0, step / ramp_steps)
-                return lam_max * (frac ** 2)  
+                return lam_max * (frac ** lambda_ramp_exponent)  
             
             lambda_total = annealed_lam(lambda_total_penalty, step, ramp_steps=optimization_steps)
         else:
@@ -269,7 +305,7 @@ def optimize_query_gumbel(
 
         # Track best solution if return_best is True
         if logit_sampling == 'dual-softmax':
-            if return_best and total_penalty < min_penalty_threshold and cost_pred < best_cost:
+            if return_best and total_penalty_raw < min_penalty_threshold and cost_pred < best_cost:
                 best_cost = cost_pred
                 best_edge_logits = edge_logits.clone().detach()
                 best_edge_logits_slot2 = edge_logits_slot2.clone().detach()
@@ -278,13 +314,13 @@ def optimize_query_gumbel(
             #    best_edge_logits = edge_logits.clone().detach()
             #    best_edge_logits_slot2 = edge_logits_slot2.clone().detach()
         else:
-            if return_best and total_penalty < min_penalty_threshold and cost_pred < best_cost:
+            if return_best and total_penalty_raw < min_penalty_threshold and cost_pred < best_cost:
                 best_cost = cost_pred
                 best_edge_logits = edge_logits.clone().detach()
 
         # Track metrics for plotting
-        cost_history.append(cost_pred.item())
-        total_penalty_history.append(total_penalty.item())
+        cost_history.append(cost_pred.item() + total_penalty_raw.item()) #ToDo: Check
+        total_penalty_history.append(total_penalty_raw.item())
         acyclic_penalty_history.append(P_acyclic.item())
         triple_in_penalty_history.append(P_triple_in.item())
         triple_out_penalty_history.append(P_triple_out.item())
@@ -295,16 +331,40 @@ def optimize_query_gumbel(
         # Back‑prop & step -----------------------------------------------------
         loss.backward()
         
-        # Clip gradients
-        #torch.nn.utils.clip_grad_norm_([edge_logits], max_norm=5.0)
+        # Gradient improvements -----------------------------------------------
+        if logit_sampling == 'dual-softmax':
+            params_to_clip = [edge_logits, edge_logits_slot2]
+        else:
+            params_to_clip = [edge_logits]
+            
+        # Monitor gradient norms before clipping
+        grad_norms = []
+        for param in params_to_clip:
+            if param.grad is not None:
+                grad_norm = param.grad.norm().item()
+                grad_norms.append(grad_norm)
+        
+        max_grad_norm = max(grad_norms) if grad_norms else 0.0
+        
+        # Apply gradient clipping to prevent exploding gradients
+        if gradient_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=gradient_clip_norm)
+        
+        
         
         optimiser.step()
+        
+        # Update learning rate schedule
+        if use_lr_scheduling:
+            scheduler.step()
 
         # Log ------------------------------------------------------------------
         if verbose and (step + 1) % 100 == 0:
+            current_lr = optimiser.param_groups[0]['lr']
             print(
                 f"Step {step+1}/{optimization_steps}  "
-                f"Cost: {cost_pred.item():.2f}  Penalty: {total_penalty.item():.2f}  "
+                f"Cost: {cost_pred.item():.2f}  Penalty: {total_penalty_raw.item():.2f}  "
+                f"LR: {current_lr:.6f}  Grad: {max_grad_norm:.4f}"
             )
 
     # Final hard adjacency -----------------------------------------------------
@@ -377,6 +437,7 @@ def optimize_query_gumbel(
     with torch.no_grad():
         final_log_cost = model(data.x, edge_index, edge_weight=final_edge_weights).item()
     predicted_cost_exp = float(np.exp(final_log_cost))
+
 
     if save_animation_data:
         return final_A, triples_num, predicted_cost_exp, animation_data
@@ -685,3 +746,189 @@ def exhaustive_leftdeep_best_plan(query_data, model, device="cpu"):
             best_adj = A_candidate
 
     return best_adj, best_pred_cost
+
+# -----------------------------------------------------------------------------
+# Fast, minimal gradient-based optimiser (benchmarking only)
+# -----------------------------------------------------------------------------
+
+def optimize_query_gradient_optimized(
+    query_data,
+    model,
+    *,
+    optimization_steps: int = 250,
+    learning_rate: float = 0.01,
+    device: str = "cpu",
+    lambda_acyclic: float = 1000.0,
+    lambda_triple_in: float = 1000.0,
+    lambda_triple_out: float = 1000.0,
+    lambda_join_in: float = 500.0,
+    lambda_join_out: float = 1000.0,
+    lambda_left_linear: float = 1000.0,
+    lambda_entropy: float = 10.0,
+    lambda_total_penalty: float = 1.0,
+    # Gumbel-Sigmoid specific hyper-parameters
+    init_tau: float = 10.0,
+    min_tau: float = 1.0,
+    tau_decay: float = 0.999,
+    use_temperature_annealing: bool = True,
+    use_lambda_ramping: bool = True,
+    lambda_ramp_exponent: float = 2.0,
+):
+    """Ultra-lightweight gradient-based optimiser for benchmarking.
+
+    • *No* logging / animation / metric tracking.
+    • Uses Gumbel sampling with tau annealing like the original.
+    • Includes lambda ramping and acyclicity penalty.
+    • Returns the **raw (non-thresholded)** adjacency matrix after the final
+      optimisation step so callers can benchmark total runtime externally.
+    • Includes all crucial constraints from the original function.
+
+    Parameters
+    ----------
+    query_data : torch_geometric.data.Data
+        Input graph containing *one* random plan of the query (only the node
+        feature matrix is used).
+    model : CostGNNv2
+        Trained cost model (parameters are *not* updated).
+    optimization_steps : int, default=250
+        Number of gradient steps.
+    learning_rate : float, default=0.01
+        Step size for Adam optimiser.
+    device : "cpu" | "cuda", default="cpu"
+        Compute device.
+
+    Returns
+    -------
+    torch.Tensor  (N, N)
+        Dense adjacency with continuous weights in (0,1).
+    """
+    import torch  # local import for maximal JIT-fusion opportunities
+
+    model.eval()
+    # Disable gradients for model parameters to save memory & runtime
+    for p in model.parameters():
+        p.requires_grad = False
+
+    data = query_data.to(device)
+    N = data.x.size(0)
+    triples_num = (N + 1) // 2  #  n triples ➜ 2n-1 nodes
+
+    # ------------------------------------------------------------------
+    # Pre-compute edge_index  (all possible directed edges except self)
+    # ------------------------------------------------------------------
+    src, dst = torch.where(~torch.eye(N, dtype=torch.bool, device=device))
+    edge_index = torch.stack([src, dst], dim=0)
+    num_edges = edge_index.size(1)
+
+    # Trainable logits (initialised close to 0 for stable sigmoid)
+    edge_logits = torch.zeros(num_edges, device=device, requires_grad=True)
+
+    optimiser = torch.optim.AdamW([edge_logits], lr=learning_rate)
+
+    # Pre-compute constraint masks for invalid edge types
+    triple_to_triple = (edge_index[0] < triples_num) & (edge_index[1] < triples_num)
+    join_to_triple = (edge_index[0] >= triples_num) & (edge_index[1] < triples_num)
+    invalid_edges = triple_to_triple | join_to_triple
+    root_outgoing = (edge_index[0] == (N - 1))
+
+    # Helper tensors for degree computations
+    src_vec, dst_vec = edge_index  # aliases
+
+    triple_nodes = torch.arange(triples_num, device=device)
+    join_nodes = torch.arange(triples_num, N, device=device)
+    root = N - 1
+    non_root_joins = torch.arange(triples_num, root, device=device)
+
+    for step in range(optimization_steps):
+        optimiser.zero_grad()
+
+        # Temperature annealing for Gumbel sampling
+        if use_temperature_annealing:
+            tau = _temperature_anneal(init_tau, min_tau, tau_decay, step, optimization_steps)
+        else:
+            tau = init_tau
+
+        # Use original Binary Concrete (Gumbel-Sigmoid) sampling
+        edge_weights = sample_binary_concrete(edge_logits, tau)
+        
+        # Apply structural constraints
+        edge_weights[invalid_edges] = 0.0
+        edge_weights[root_outgoing] = 0.0
+
+        # Build adjacency matrix
+        A = torch.zeros((N, N), device=device)
+        A[edge_index[0], edge_index[1]] = edge_weights
+
+        # Degree statistics
+        in_deg, out_deg = A.sum(0), A.sum(1)
+
+        # Structural penalties (vectorised)
+        P_triple_in = (in_deg[triple_nodes] ** 2).sum()
+        P_triple_out = ((out_deg[triple_nodes] - 1) ** 2).sum()
+        P_join_in = ((in_deg[join_nodes] - 2) ** 2).sum()
+        P_join_out = ((out_deg[non_root_joins] - 1) ** 2).sum() + out_deg[root] ** 2
+        
+        # Acyclicity penalty
+        P_acyclic = torch.trace(torch.matrix_exp(A)) - N
+
+        # Left-deep / linear join order constraint
+        child_triple_counts = A[:triples_num, :][:, join_nodes].sum(0)   # (#joins,)
+        child_join_counts   = A[join_nodes, :][:, join_nodes].sum(0)      # (#joins,)
+
+        if len(join_nodes) > 0:  # Guard against trivial 0-TP queries
+            # (1) first join (index 0 in join_nodes): [2 triple, 0 join]
+            P_first = (child_triple_counts[0] - 2) ** 2 + (child_join_counts[0]) ** 2
+
+            # (2) remaining joins: [1 triple, 1 join]
+            if len(join_nodes) > 1:
+                P_rest_triple = ((child_triple_counts[1:] - 1) ** 2).sum()
+                P_rest_join   = ((child_join_counts[1:] - 1) ** 2).sum()
+                P_left_linear = P_first + P_rest_triple + P_rest_join
+            else:
+                P_left_linear = P_first
+        else:
+            P_left_linear = torch.tensor(0.0, device=device)
+
+        # Entropy penalty (binary entropy for sigmoid sampling)
+        eps = 1e-10
+        probs = torch.sigmoid(edge_logits)
+        P_entropy = -(probs * torch.log(probs + eps) + (1 - probs) * torch.log(1 - probs + eps)).sum()
+
+        # Aggregate penalties
+        total_penalty = (
+            lambda_acyclic * P_acyclic
+            + lambda_triple_in * P_triple_in
+            + lambda_triple_out * P_triple_out
+            + lambda_join_in * P_join_in
+            + lambda_join_out * P_join_out
+            + lambda_left_linear * P_left_linear
+            + lambda_entropy * P_entropy
+        )
+
+        # Lambda ramping logic
+        if use_lambda_ramping:
+            def annealed_lam(lam_max, step, ramp_steps=150):
+                frac = min(1.0, step / ramp_steps)
+                return lam_max * (frac ** lambda_ramp_exponent)  
+            
+            lambda_total = annealed_lam(lambda_total_penalty, step, ramp_steps=optimization_steps)
+        else:
+            lambda_total = lambda_total_penalty
+
+        # Model prediction
+        cost_pred = model(data.x, edge_index, edge_weight=edge_weights)
+
+        loss = cost_pred + lambda_total * total_penalty
+        loss.backward()
+        optimiser.step()
+
+    # Build final dense adjacency (continuous weights, no thresholding)
+    with torch.no_grad():
+        final_edge_weights = sample_binary_concrete(edge_logits, min_tau)
+        final_edge_weights[invalid_edges] = 0.0
+        final_edge_weights[root_outgoing] = 0.0
+        
+        final_A = torch.zeros((N, N), device=device)
+        final_A[src_vec, dst_vec] = final_edge_weights.detach()
+        
+    return final_A

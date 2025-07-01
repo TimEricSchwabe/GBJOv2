@@ -10,6 +10,12 @@ import numpy as np
 import itertools
 import pickle
 from data import Triple, Join, Query, Entity
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '.', '..'))
+from create_data.process_dataset_single_file import SPARQLQuery
+import random
+
 
 def left_deep_adj_from_perm(pi):
     """
@@ -272,7 +278,10 @@ def load_sparql_queries(queries_file: str, num_queries):
     
     if num_queries is not None:
         print(f"Loaded {num_queries} SPARQL queries from {queries_file}")
+        random.shuffle(sparql_queries)
         return sparql_queries[-num_queries:]
     print(f"Loaded {len(sparql_queries)} SPARQL queries from {queries_file}")
     return sparql_queries
+
+
 

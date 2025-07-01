@@ -12,7 +12,7 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 experiment_path = f"file://{os.path.abspath('/home/tim/query_optimization/ray_results/join_optim_hpo')}"
 analysis = ExperimentAnalysis(experiment_path)
 
-# Get results as DataFrame
+# Get results as DataFrame  
 df = analysis.results_df
 
 df.to_csv('ray_results/results.csv', index=False)
@@ -33,7 +33,7 @@ sns.barplot(x=correlations.values[:-1], y=correlations.index[:-1])
 plt.title("Parameter Importance")
 plt.xticks(rotation=45)
 
-# Learning rate vs cost
+# PLOT: Learning rate vs cost
 plt.subplot(2, 2, 2)
 sns.scatterplot(data=df, x='config/learning_rate', y='mean_cost')
 plt.xscale('log')
@@ -95,10 +95,13 @@ plt.savefig('analysis_plots/top_k_heatmap.png')
 plt.close()
 
 # Print summary statistics
-print("\nTop 5 configurations:")
-best_trials = df.nsmallest(5, 'mean_cost')
+failure_threshold = 0.1  # Set maximum acceptable failure rate
+filtered_df = df[df['failure_rate'] <= failure_threshold]
+print(f"\nTop 5 configurations with failure rate <= {failure_threshold}:")
+best_trials = filtered_df.nsmallest(5, 'mean_cost')
 for _, trial in best_trials.iterrows():
     print(f"\nMean Cost: {trial['mean_cost']:.2f}")
+    print(f"Failure Rate: {trial['failure_rate']:.3f}")
     for param in param_cols:
         param_name = param.replace('config/', '')
         if isinstance(trial[param], (int, float)):
@@ -115,7 +118,62 @@ plt.tight_layout()
 plt.savefig('analysis_plots/correlation_matrix.png')
 plt.close()
 
-# Add new plot for average cost across parameter values
+# Cost Scatter  + Mean
+plt.figure(figsize=(15, 10))
+n_params = len(numeric_params)
+n_cols = 3
+n_rows = (n_params + n_cols - 1) // n_cols
+
+for i, param in enumerate(numeric_params, 1):
+    # Create subplot with two y-axes
+    ax1 = plt.subplot(n_rows, n_cols, i)
+    ax2 = ax1.twinx()
+    param_name = param.replace('config/', '')
+    
+    # Sort the data by parameter value
+    sorted_data = df.sort_values(by=param)
+    
+    # Apply LOWESS smoothing for mean_cost
+    smoothed_cost = lowess(sorted_data['mean_cost'], 
+                          sorted_data[param],
+                          frac=0.3,  # span for smoothing
+                          it=1)      # number of iterations
+                          
+    # Apply LOWESS smoothing for failure_rate
+    smoothed_failure = lowess(sorted_data['failure_rate'],
+                            sorted_data[param], 
+                            frac=0.3,
+                            it=1)
+    
+    # Plot raw data points and cost trend on left axis
+    ax1.scatter(df[param], df['mean_cost'], alpha=0.2, color='gray', s=10)
+    ax1.plot(smoothed_cost[:, 0], smoothed_cost[:, 1], color='red', linewidth=2, label='Mean Cost')
+    
+    # Plot failure rate trend on right axis
+    ax2.plot(smoothed_failure[:, 0], smoothed_failure[:, 1], color='blue', linewidth=2, label='Failure Rate')
+    
+    # Set axis labels and scales
+    ax1.set_xlabel(param_name)
+    ax1.set_ylabel('Mean Cost', color='red')
+    ax2.set_ylabel('Failure Rate', color='blue')
+    
+    if 'learning_rate' in param.lower():
+        ax1.set_xscale('log')
+    ax1.set_yscale('log')
+    ax2.set_ylim(0, 1)  # Set failure rate axis from 0 to 1
+    
+    plt.title(f'Cost & Failure Rate vs {param_name}')
+    
+    # Add legends for both axes
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+
+plt.tight_layout()
+plt.savefig('analysis_plots/parameter_cost_trends.png')
+plt.close()
+
+# Failure Rate Scatter + Mean Failure Rate Trend
 plt.figure(figsize=(15, 10))
 n_params = len(numeric_params)
 n_cols = 3
@@ -128,27 +186,27 @@ for i, param in enumerate(numeric_params, 1):
     # Sort the data by parameter value
     sorted_data = df.sort_values(by=param)
     
-    # Apply LOWESS smoothing
-    smoothed = lowess(sorted_data['mean_cost'], 
-                     sorted_data[param],
-                     frac=0.3,  # span for smoothing
-                     it=1)      # number of iterations
+    # Apply LOWESS smoothing for mean_cost
+    smoothed_cost = lowess(sorted_data['failure_rate'], 
+                          sorted_data[param],
+                          frac=0.3,
+                          it=1)
     
-    # Plot raw data points with transparency
-    plt.scatter(df[param], df['mean_cost'], alpha=0.2, color='gray', s=10)
+    # Plot failure rate scatter and mean cost trend
+    plt.scatter(df[param], df['failure_rate'], alpha=0.2, color='gray', s=10, label='Failure Rate')
+    plt.plot(smoothed_cost[:, 0], smoothed_cost[:, 1], color='red', linewidth=2, label='Mean Failure Rate')
     
-    # Plot smoothed line
-    plt.plot(smoothed[:, 0], smoothed[:, 1], color='red', linewidth=2)
-    
-    plt.title(f'Average Cost vs {param_name}')
     plt.xlabel(param_name)
-    plt.ylabel('Mean Cost')
+    plt.ylabel('Value')
+    
     if 'learning_rate' in param.lower():
         plt.xscale('log')
-    plt.yscale('log')
+    
+    plt.title(f'Failure Rate & Mean Cost vs {param_name}')
+    plt.legend()
 
 plt.tight_layout()
-plt.savefig('analysis_plots/parameter_cost_trends.png')
+plt.savefig('analysis_plots/parameter_failure_trends.png')
 plt.close()
 
 # 6. Pareto front: Mean Cost vs Failure Rate

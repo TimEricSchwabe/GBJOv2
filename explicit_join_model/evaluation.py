@@ -51,13 +51,14 @@ from utils.data_utils import (
     validate_plan,
     plan_to_string,
     plans_are_equivalent,
-    load_sparql_queries
+    load_sparql_queries,
+    #query_to_adjacency_matrix
 )
 
 
 def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimization_steps=500, 
                          verbose=False, optimization_params=None, optimization_function=None, save_directory=".", 
-                         use_exhaustive=True, use_true_costs=True):
+                         use_exhaustive=True, use_true_costs=True, use_dp=True):
     """
     Evaluate the optimization algorithm on the given SPARQL queries.
     
@@ -72,6 +73,7 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
         save_directory: Directory to save all outputs to
         use_exhaustive: Whether to perform exhaustive search (default: True)
         use_true_costs: Whether to calculate true costs for plans (default: True)
+        use_dp: Whether to perform dynamic programming search (default: True)
         
     Returns:
         Statistics about the optimization performance
@@ -139,12 +141,16 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
         # Prepare query triples for JSON
         query_triples = [[str(triple.s), str(triple.p), str(triple.o)] for triple in triple_objs]
         
-        # Run DP-based best plan search
-        # start timer
-        start_time = time.time()
-        best_adj, best_pred_cost = dp_leftdeep_best_plan(torch_data, model, device)
-        end_time = time.time()
-        print(f"Time taken for DP-based best plan search: {end_time - start_time:.2f} seconds")
+        # Run DP-based best plan search (only if enabled)
+        if use_dp:
+            # start timer
+            start_time = time.time()
+            best_adj, best_pred_cost = dp_leftdeep_best_plan(torch_data, model, device)
+            end_time = time.time()
+            print(f"Time taken for DP-based best plan search: {end_time - start_time:.2f} seconds")
+        else:
+            best_adj = None
+            best_pred_cost = float('inf')
         
         # Run exhaustive search for comparison (only if enabled)
         if use_exhaustive:
@@ -160,10 +166,11 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
         true_cost_best_pred = float('inf')
         try:
             triples_num = len(triple_objs)
-            best_pred_plan = adjacency_to_query_with_real_triples(
-                best_adj, triples_num, triple_objs)
-            if use_true_costs:
-                true_cost_best_pred = best_pred_plan.root.get_cost()
+            if use_dp and best_adj is not None:
+                best_pred_plan = adjacency_to_query_with_real_triples(
+                    best_adj, triples_num, triple_objs)
+                if use_true_costs:
+                    true_cost_best_pred = best_pred_plan.root.get_cost()
         except Exception as e:
             print(f"Warning: Failed to compute best predicted plan for query {i}: {e}")
             true_cost_best_pred = float('inf')
@@ -261,7 +268,6 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             # Convert adjacency to query plan (always create for saving plan structure)
             gradient_plan = None
             try:
-                raise Exception("Here it is")
                 gradient_plan = adjacency_to_query_with_real_triples(final_adjacency, triples_num, triple_objs)
                 # @Roman: replace this here like:
                 # gradient_plan = adjacency_to_query_with_new_algorithm(final_adjacency, triples_num, triple_objs)
@@ -363,22 +369,38 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
                 # Don't append here - we'll handle all appends at the end
                 random_cost = float('inf')
             else:
-                # Calculate the actual cost (only if enabled)
-                if use_true_costs:
-                    random_cost = random_plan.root.get_cost()
-                else:
-                    random_cost = float('inf')  # Skip true cost calculation
+                # Calculate the predicted cost using the cost model
+                try:
+                    random_cost = float('inf')
+
+                    # todo implement this
+                    # Convert the random plan to adjacency matrix format for model prediction
+                    #random_adj = query_to_adjacency_matrix(random_plan, len(triple_objs), triple_objs)
+                    
+
+                    # Get predicted cost from model
+                    #with torch.no_grad():
+                    #    random_pred_cost = model(torch_data.x, torch_data.edge_index, random_adj.unsqueeze(0)).item()
+                    
+                    # Use predicted cost instead of true cost
+                    #random_cost = random_pred_cost
+                    
+                except Exception as pred_error:
+                    print(f"Warning: Failed to get predicted cost for random plan: {pred_error}")
+                    # Fallback to true cost if model prediction fails and true costs are enabled
+                    if use_true_costs:
+                        random_cost = random_plan.root.get_cost()
+                    else:
+                        random_cost = float('inf')
+                
                 random_success = True
             
             if verbose:
-                if use_true_costs:
-                    print(f"Random plan created. Cost: {random_cost}")
-                    if random_success:
-                        # Visualize the plan if verbose
-                        random_plan.visualize(output_file=f"{visualization_dir}/random_plan_query_{i}")
-                        print(f"Saved random plan visualization to {visualization_dir}/random_plan_query_{i}.png")
-                else:
-                    print(f"Random plan created.")
+                print(f"Random plan created. Predicted cost: {random_cost}")
+                if random_success:
+                    # Visualize the plan if verbose
+                    random_plan.visualize(output_file=f"{visualization_dir}/random_plan_query_{i}")
+                    print(f"Saved random plan visualization to {visualization_dir}/random_plan_query_{i}.png")
                 
         except Exception as e:
             print(f"Error creating random plan for query {i}: {e}")
@@ -410,18 +432,26 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
                     "predicted_cost": float(grad_pred_cost),
                     "plan_string": plan_to_string(gradient_plan) if gradient_plan else None
                 },
-                "dp": {
-                    "predicted_cost": float(best_pred_cost),
-                    "plan_string": plan_to_string(best_pred_plan) if best_pred_plan else None
+                "random": {
+                    "real_cost": float(random_cost),
+                    "plan_string": plan_to_string(random_plan) if random_plan else None
                 }
             }
         }
+        
+        # Add DP results only if DP search was performed
+        if use_dp:
+            query_result["plans"]["dp"] = {
+                "predicted_cost": float(best_pred_cost),
+                "plan_string": plan_to_string(best_pred_plan) if best_pred_plan else None
+            }
         
         # Add true costs only if enabled
         if use_true_costs:
             query_result["plans"]["greedy"]["real_cost"] = float(greedy_cost)
             query_result["plans"]["gradient"]["real_cost"] = float(gradient_cost)
-            query_result["plans"]["dp"]["real_cost"] = float(true_cost_best_pred)
+            if use_dp:
+                query_result["plans"]["dp"]["real_cost"] = float(true_cost_best_pred)
         
         # Add exhaustive results only if exhaustive search was performed
         if use_exhaustive:
@@ -435,7 +465,6 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
                 query_result["gradient_equal_exhaustive"] = plans_are_equivalent(gradient_plan, exhaustive_plan)
         
         detailed_results.append(query_result)
-        
         # Print progress every query
         if (i + 1) % 1 == 0:
             print(f"\nProcessed {i+1}/{len(sparql_queries)} queries")
@@ -446,11 +475,10 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
             if random_costs:
                 print(f"Median random cost: {np.median(random_costs):.2f}")
     
-    # Save detailed results to JSON
-    detailed_results_file = os.path.join(save_directory, "detailed_results.json")
-    with open(detailed_results_file, 'w') as f:
-        json.dump(detailed_results, f, indent=2)
-    print(f"Saved detailed results to: {detailed_results_file}")
+        # Save detailed results to JSON
+        detailed_results_file = os.path.join(save_directory, "detailed_results.json")
+        with open(detailed_results_file, 'w') as f:
+            json.dump(detailed_results, f, indent=2)
     
     # Calculate statistics
     stats = {
@@ -500,12 +528,13 @@ if __name__ == "__main__":
 
     config_standard = {
         # General parameters
-        'queries_file': "/home/tim/query_optimization/datasets/optimization_stars_3_to_8/queries.pkl",
+        'queries_file': "/home/tim/query_optimization/lubm_star_query_9_to_14/queries.pkl",
         'model_path': "/home/tim/query_optimization/explicit_join_model/models/star_model.pt",
         'num_queries': 10000,
         'optimization_steps': 1000,
         'use_true_costs': False,
         'use_exhaustive': False,
+        'use_dp': True,
         'verbose': True,
         'save_path': "optimization_results",  # Base directory for saving results
         
@@ -550,14 +579,15 @@ if __name__ == "__main__":
 
 
 
-    config_top3 = {
+    config_good = {
         # General parameters
-        'queries_file': "/home/tim/query_optimization/datasets/optimization_stars_3_to_8/queries.pkl",
+        'queries_file': "/home/tim/query_optimization/datasets/optimization_stars_3_to_14/queries.pkl",
         'model_path': "/home/tim/query_optimization/explicit_join_model/models/star_model.pt",
-        'num_queries': 30,
-        'optimization_steps': 476,
-        'verbose': False,
+        'num_queries': 100,
+        'optimization_steps': 1000, # 475
+        'verbose': True,
         'use_exhaustive': False,
+        'use_dp': False,
         'use_true_costs': False,  # Set to False to skip expensive true cost calculations
         'save_path': "optimization_results",  # Base directory for saving results
         
@@ -573,10 +603,10 @@ if __name__ == "__main__":
             'lambda_acyclic': 4720.0,    # Weight for acyclicity penalty
             'lambda_triple_in': 1441.0,  # Weight for triple in-degree penalty
             'lambda_triple_out': 825.0, # Weight for triple out-degree penalty
-            'lambda_join_in': 818.0,     # Weight for join in-degree penalty
-            'lambda_join_out': 4136.0,   # Weight for join out-degree penalty
+            'lambda_join_in': 818.0,     # Weight for join in-degree penalty original 818
+            'lambda_join_out': 4136.0,   # Weight for join out-degree penalty original 4136
             'lambda_entropy': 0.0,      # Weight for entropy penalty
-            'lambda_total_penalty': 1, # Overall weight for the total penalty
+            'lambda_total_penalty': 10, # Overall weight for the total penalty
             'lambda_left_linear': 308.0, # Weight for left-linear penalty
             
             # Gumbel-Sigmoid specific parameters
@@ -595,19 +625,78 @@ if __name__ == "__main__":
 
             # Animation parameters
             'save_animation_data': False,    # Whether to save data for creating animations
-            'animation_save_interval': 10,   # Save animation data every N steps
+            'animation_save_interval': 10,   # Save animation data every N steps,
+            'lambda_ramp_exponent': 9.2,
+            'lr_warmup_steps': 0,
+            'gradient_clip_norm': 0.0,
+            'use_lr_scheduling': True,
+        }
+    }
+
+    config = {
+        # General parameters
+        'queries_file': "/home/tim/query_optimization/datasets/optimization_stars_3_to_14/queries.pkl",
+        'model_path': "/home/tim/query_optimization/explicit_join_model/models/star_model.pt", 
+        'num_queries': 1,
+        'optimization_steps': 2154,
+        'verbose': False,
+        'use_exhaustive': False,
+        'use_dp': False,
+        'use_true_costs': False,  # Set to False to skip expensive true cost calculations
+        'save_path': "optimization_results",  # Base directory for saving results
+        
+        # Query optimization hyperparameters
+        'optimization_params': {
+            # Optimization procedure selection
+            'optimization_procedure': 'gumbel',  # 'gumbel' or 'normal'
+            
+            # Optimizer parameters
+            'learning_rate': 3.19,
+            
+            # Penalty weights
+            'lambda_acyclic': 3747.74,    # Weight for acyclicity penalty
+            'lambda_triple_in': 4851.55,  # Weight for triple in-degree penalty
+            'lambda_triple_out': 3880.47, # Weight for triple out-degree penalty
+            'lambda_join_in': 264.72,     # Weight for join in-degree penalty
+            'lambda_join_out': 916.87,   # Weight for join out-degree penalty
+            'lambda_entropy': 0.0,      # Weight for entropy penalty
+            'lambda_total_penalty': 0.30, # Overall weight for the total penalty
+            'lambda_left_linear': 4769.24, # Weight for left-linear penalty
+            
+            # Gumbel-Sigmoid specific parameters
+            'init_tau': 8.62,            # Initial temperature for Gumbel-Sigmoid
+            'min_tau': 1.0,              # Minimum temperature for Gumbel-Sigmoid
+            'tau_decay': 0.977,          # Temperature decay rate
+            'use_temperature_annealing': True,  # Whether to use temperature annealing
+            
+            # Solution selection and penalty ramping
+            'return_best': True,         # Whether to return best feasible solution
+            'min_penalty_threshold': 1.40,  # Minimum penalty for accepting a solution
+            'use_lambda_ramping': True,  # Whether to ramp up lambda_total_penalty
+            
+            # Sampling method selection
+            'logit_sampling': 'dual-softmax',  # 'sigmoid', 'softmax' or 'dual-softmax',
+
+            # Animation parameters
+            'save_animation_data': False,    # Whether to save data for creating animations
+            'animation_save_interval': 10,   # Save animation data every N steps,
+            'lambda_ramp_exponent': 7.53,
+            'lr_warmup_steps': 103.53,
+            'gradient_clip_norm': 2.42,
+            'use_lr_scheduling': True,
         }
     }
 
 
-    config = {
+    config_top1 = {
         # General parameters
-        'queries_file': "/home/tim/query_optimization/datasets/optimization_stars_3_to_8/queries.pkl",
+        'queries_file': "/home/tim/query_optimization/datalubm_star_query_9_to_14/queries.pkl",
         'model_path': "/home/tim/query_optimization/explicit_join_model/models/star_model.pt",
-        'num_queries': 70,
+        'num_queries': 20,
         'optimization_steps': 1470,
         'verbose': False,
         'use_exhaustive': False,
+        'use_dp': False,
         'use_true_costs': False,  # Set to False to skip expensive true cost calculations
         'save_path': "optimization_results",  # Base directory for saving results
         
@@ -692,7 +781,8 @@ if __name__ == "__main__":
         optimization_function=optimization_function,
         save_directory=save_directory,
         use_exhaustive=config['use_exhaustive'],
-        use_true_costs=config.get('use_true_costs', True)  # Default to True for backward compatibility
+        use_true_costs=config.get('use_true_costs', True),  # Default to True for backward compatibility
+        use_dp=config.get('use_dp', True) # Default to True for backward compatibility
     )
     
     # Calculate final statistics
