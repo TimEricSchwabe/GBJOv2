@@ -312,3 +312,19 @@ explicit_join_model/
 │   └── optim_animation.py                     # Optimization animation
 └── utils/                       # Utility functions
 ```
+
+## Data structures
+### Torch dataset:
+[Source](./data.py#L368)
+```python
+Data(
+   # Node features (307-dimensional embeddings)
+   x = torch.tensor(self.embedding_matrix, dtype=torch.float), 
+
+   # Graph edges (adjacency matrix)
+   edge_index = torch.tensor(self.adjacency_matrix, dtype=torch.float).nonzero(as_tuple=False).t().contiguous(),
+
+   # Cost label (log-transformed cost of the join order)
+   y=torch.tensor([self.join_order.root.get_cost()], dtype=torch.float)
+)
+```
