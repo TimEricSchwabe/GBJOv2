@@ -311,7 +311,7 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
 
                 
         except Exception as e:
-            #raise e
+            raise e
             print(f"Error in gradient optimization for query {i}: {e}")
             # Skip this query
             gradient_failures += 1
@@ -579,13 +579,13 @@ if __name__ == "__main__":
 
 
 
-    config_good = {
+    config = {
         # General parameters
-        'queries_file': "/home/tim/query_optimization/datasets/optimization_stars_3_to_14/queries.pkl",
+        'queries_file': "/home/tim/query_optimization/datasets/star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
         'model_path': "/home/tim/query_optimization/explicit_join_model/models/star_model.pt",
-        'num_queries': 100,
-        'optimization_steps': 1000, # 475
-        'verbose': True,
+        'num_queries': 20,
+        'optimization_steps': 100, # 475
+        'verbose': False,
         'use_exhaustive': False,
         'use_dp': False,
         'use_true_costs': False,  # Set to False to skip expensive true cost calculations
@@ -633,15 +633,15 @@ if __name__ == "__main__":
         }
     }
 
-    config = {
+    config_path = {
         # General parameters
-        'queries_file': "/home/tim/query_optimization/datasets/optimization_stars_3_to_14/queries.pkl",
-        'model_path': "/home/tim/query_optimization/explicit_join_model/models/star_model.pt", 
-        'num_queries': 1,
-        'optimization_steps': 2154,
+        'queries_file': "/home/tim/query_optimization/datasets/path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl",
+        'model_path': "/home/tim/query_optimization/explicit_join_model/models/path_model.pt", 
+        'num_queries': 100,
+        'optimization_steps': 2500,
         'verbose': False,
         'use_exhaustive': False,
-        'use_dp': False,
+        'use_dp': True,
         'use_true_costs': False,  # Set to False to skip expensive true cost calculations
         'save_path': "optimization_results",  # Base directory for saving results
         
@@ -651,27 +651,27 @@ if __name__ == "__main__":
             'optimization_procedure': 'gumbel',  # 'gumbel' or 'normal'
             
             # Optimizer parameters
-            'learning_rate': 3.19,
+            'learning_rate': 68,
             
             # Penalty weights
-            'lambda_acyclic': 3747.74,    # Weight for acyclicity penalty
-            'lambda_triple_in': 4851.55,  # Weight for triple in-degree penalty
-            'lambda_triple_out': 3880.47, # Weight for triple out-degree penalty
-            'lambda_join_in': 264.72,     # Weight for join in-degree penalty
-            'lambda_join_out': 916.87,   # Weight for join out-degree penalty
+            'lambda_acyclic': 4765,    # Weight for acyclicity penalty
+            'lambda_triple_in': 893,  # Weight for triple in-degree penalty
+            'lambda_triple_out': 965, # Weight for triple out-degree penalty
+            'lambda_join_in': 4082,     # Weight for join in-degree penalty
+            'lambda_join_out': 2133,   # Weight for join out-degree penalty
             'lambda_entropy': 0.0,      # Weight for entropy penalty
-            'lambda_total_penalty': 0.30, # Overall weight for the total penalty
-            'lambda_left_linear': 4769.24, # Weight for left-linear penalty
+            'lambda_total_penalty': 0.8, # Overall weight for the total penalty
+            'lambda_left_linear': 3557, # Weight for left-linear penalty
             
             # Gumbel-Sigmoid specific parameters
-            'init_tau': 8.62,            # Initial temperature for Gumbel-Sigmoid
+            'init_tau': 16,            # Initial temperature for Gumbel-Sigmoid
             'min_tau': 1.0,              # Minimum temperature for Gumbel-Sigmoid
-            'tau_decay': 0.977,          # Temperature decay rate
+            'tau_decay': 0.95,          # Temperature decay rate
             'use_temperature_annealing': True,  # Whether to use temperature annealing
             
             # Solution selection and penalty ramping
             'return_best': True,         # Whether to return best feasible solution
-            'min_penalty_threshold': 1.40,  # Minimum penalty for accepting a solution
+            'min_penalty_threshold': 2.3,  # Minimum penalty for accepting a solution
             'use_lambda_ramping': True,  # Whether to ramp up lambda_total_penalty
             
             # Sampling method selection
@@ -680,23 +680,23 @@ if __name__ == "__main__":
             # Animation parameters
             'save_animation_data': False,    # Whether to save data for creating animations
             'animation_save_interval': 10,   # Save animation data every N steps,
-            'lambda_ramp_exponent': 7.53,
-            'lr_warmup_steps': 103.53,
-            'gradient_clip_norm': 2.42,
+            'lambda_ramp_exponent': 3.8,
+            'lr_warmup_steps': 16,
+            'gradient_clip_norm': 4.9,
             'use_lr_scheduling': True,
         }
     }
 
 
-    config_top1 = {
+    config_star = {
         # General parameters
-        'queries_file': "/home/tim/query_optimization/datalubm_star_query_9_to_14/queries.pkl",
-        'model_path': "/home/tim/query_optimization/explicit_join_model/models/star_model.pt",
-        'num_queries': 20,
-        'optimization_steps': 1470,
+        'queries_file': "/home/tim/query_optimization/datasets/path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl",
+        'model_path': "/home/tim/query_optimization/explicit_join_model/models/path_model_OLD.pt", 
+        'num_queries': 100,
+        'optimization_steps': 500,
         'verbose': False,
         'use_exhaustive': False,
-        'use_dp': False,
+        'use_dp': True,
         'use_true_costs': False,  # Set to False to skip expensive true cost calculations
         'save_path': "optimization_results",  # Base directory for saving results
         
@@ -726,11 +726,11 @@ if __name__ == "__main__":
             
             # Solution selection and penalty ramping
             'return_best': True,         # Whether to return best feasible solution
-            'min_penalty_threshold': 5.4,  # Minimum penalty for accepting a solution
+            'min_penalty_threshold': 1.5,  # Minimum penalty for accepting a solution
             'use_lambda_ramping': True,  # Whether to ramp up lambda_total_penalty
             
             # Sampling method selection
-            'logit_sampling': 'softmax',  # 'sigmoid', 'softmax' or 'dual-softmax',
+            'logit_sampling': 'dual-softmax',  # 'sigmoid', 'softmax' or 'dual-softmax',
 
             # Animation parameters
             'save_animation_data': False,    # Whether to save data for creating animations
