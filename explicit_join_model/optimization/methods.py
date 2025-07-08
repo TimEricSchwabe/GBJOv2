@@ -64,12 +64,16 @@ def optimize_query_gumbel(
     gradient_clip_norm: float = 5.0,
     use_lr_scheduling: bool = True,
     lr_warmup_steps: int = 200,
+    decoding_method: str = 'threshold', # 'threshold', 'beam', 'greedy', 'hungarian'
 ):
     """Gradient-based join-order search with **Straight-Through Gumbel-Sigmoid**.
 
     The signature and return values mirror `optimize_query()` so the rest of
     your code remains unchanged.
     """
+
+
+    print(f"Decoding method: {decoding_method}")
 
 
     
@@ -375,7 +379,7 @@ def optimize_query_gumbel(
     with torch.no_grad():
         if logit_sampling == 'dual-softmax':
 
-            if False:
+            if decoding_method == 'threshold':
                 chosen_logits1 = best_edge_logits if (return_best and best_cost < float('inf')) else edge_logits
                 chosen_logits2 = best_edge_logits_slot2 if (return_best and best_cost < float('inf')) else edge_logits_slot2
                 # Apply same masks
@@ -399,8 +403,7 @@ def optimize_query_gumbel(
                     final_edge_weights[global_idx2] = 1.0
 
 
-#TODO note here just testing for decoding
-            if True:
+            else:
                 # -------------------------------------------------------------
                 # Dual-slot: every join node picks *two* incoming edges
                 # -------------------------------------------------------------
@@ -431,47 +434,89 @@ def optimize_query_gumbel(
                 A = torch.zeros((N_NODES, N_NODES), device=device)
                 A[edge_index[0], edge_index[1]] = edge_weights
                 #final_A = project_to_leftdeep(A.cpu().numpy(), exact_threshold=8)
-                final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=6, use_product=True)
+
+                if decoding_method == 'beam':
+                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=6, use_product=True)
+                elif decoding_method == 'greedy':
+                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=6, use_product=True)
+                elif decoding_method == 'hungarian':
+                    final_A = project_to_leftdeep(A.cpu().numpy(), exact_threshold=8)
 
         elif logit_sampling == 'softmax':
-            # For softmax sampling, build final adjacency using hard one-hot selection
-            # Apply the same masking as during training
-            masked_chosen_logits = edge_logits.clone()
-            
-            # Triple nodes cannot connect to other triple nodes
-            triple_to_triple_mask = (edge_index[0] < triples_num) & (edge_index[1] < triples_num)
-            masked_chosen_logits[triple_to_triple_mask] = float('-inf')
-            
-            # Join nodes cannot connect to triple nodes
-            join_to_triple_mask = (edge_index[0] >= triples_num) & (edge_index[1] < triples_num)
-            masked_chosen_logits[join_to_triple_mask] = float('-inf')
-            
-            final_edge_weights = torch.zeros_like(edge_logits)
-            for v in torch.unique(edge_index[0]):
-                # Skip the root join (must not have outgoing edges)
-                if v == (N_NODES - 1):
-                    continue
-                m = (edge_index[0] == v)
-                idx = torch.argmax(masked_chosen_logits[m])
-                selected_global_idx = torch.where(m)[0][idx]
-                final_edge_weights[selected_global_idx] = 1.0
+
+            if decoding_method == 'threshold':
+        
+                masked_chosen_logits = edge_logits.clone()
+                
+                # Triple nodes cannot connect to other triple nodes
+                triple_to_triple_mask = (edge_index[0] < triples_num) & (edge_index[1] < triples_num)
+                masked_chosen_logits[triple_to_triple_mask] = float('-inf')
+                
+                # Join nodes cannot connect to triple nodes
+                join_to_triple_mask = (edge_index[0] >= triples_num) & (edge_index[1] < triples_num)
+                masked_chosen_logits[join_to_triple_mask] = float('-inf')
+                
+                final_edge_weights = torch.zeros_like(edge_logits)
+                for v in torch.unique(edge_index[0]):
+                    # Skip the root join (must not have outgoing edges)
+                    if v == (N_NODES - 1):
+                        continue
+                    m = (edge_index[0] == v)
+                    idx = torch.argmax(masked_chosen_logits[m])
+                    selected_global_idx = torch.where(m)[0][idx]
+                    final_edge_weights[selected_global_idx] = 1.0
+
+            else:
+                masked_logits = edge_logits.clone()
+                
+                # Triple nodes cannot connect to other triple nodes
+                triple_to_triple_mask = (edge_index[0] < triples_num) & (edge_index[1] < triples_num)
+                masked_logits[triple_to_triple_mask] = float('-inf')
+                
+                # Join nodes cannot connect to triple nodes
+                join_to_triple_mask = (edge_index[0] >= triples_num) & (edge_index[1] < triples_num)
+                masked_logits[join_to_triple_mask] = float('-inf')
+                
+                # Use grouped Gumbel-Softmax for exactly one outgoing edge per source node
+                edge_weights = sample_grouped_gumbel_softmax(masked_logits, edge_index[0], tau)
+                # Root (final join) should have *no* outgoing edge
+                edge_weights[edge_index[0] == (N_NODES - 1)] = 0.0
+                final_edge_weights = edge_weights
+                A = torch.zeros((N_NODES, N_NODES), device=device)
+                A[edge_index[0], edge_index[1]] = edge_weights
+                if decoding_method == 'beam':
+                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=6, use_product=True)
+                elif decoding_method == 'greedy':
+                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=6, use_product=True)
+                elif decoding_method == 'hungarian':
+                    final_A = project_to_leftdeep(A.cpu().numpy(), exact_threshold=8)
+
+
+
+
         else:
-            # For sigmoid sampling, use threshold-based hard assignment
+
+            if decoding_method == 'threshold':
+                final_edge_weights = (torch.sigmoid(edge_logits) >= 0.5).float()
 
 
-            # TODO just testing -remove later !
-            A_sigmoid = torch.sigmoid(edge_logits)
-            A = torch.zeros((N_NODES, N_NODES), device=device)
-            A[edge_index[0], edge_index[1]] = A_sigmoid
-            final_A = project_to_leftdeep(A.cpu().numpy(), exact_threshold=8)
-            final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=6, use_product=True)
+            else:
+                A_sigmoid = torch.sigmoid(edge_logits)
+                A = torch.zeros((N_NODES, N_NODES), device=device)
+                A[edge_index[0], edge_index[1]] = A_sigmoid
+                if decoding_method == 'beam':
+                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=6, use_product=True)
+                elif decoding_method == 'greedy':
+                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=6, use_product=True)
+                elif decoding_method == 'hungarian':
+                    final_A = project_to_leftdeep(A.cpu().numpy(), exact_threshold=8)
 
             # original sigmoid threshold
-            final_edge_weights = (torch.sigmoid(edge_logits) >= 0.5).float()
 
     # Write hard one-hot selection into adjacency matrix
-    #final_A = torch.zeros((N_NODES, N_NODES), device=device)
-    #final_A[edge_index[0], edge_index[1]] = final_edge_weights # TODO COMMENT BACK IN !!
+    if decoding_method == 'threshold':
+        final_A = torch.zeros((N_NODES, N_NODES), device=device)
+        final_A[edge_index[0], edge_index[1]] = final_edge_weights # TODO COMMENT BACK IN !!
 
     # Plot metrics if verbose
     if verbose:

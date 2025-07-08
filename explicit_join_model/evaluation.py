@@ -630,6 +630,7 @@ if __name__ == "__main__":
             'lr_warmup_steps': 0,
             'gradient_clip_norm': 0.0,
             'use_lr_scheduling': True,
+            'decoding_method': 'threshold', # 'threshold', 'beam', 'greedy', 'hungarian'
         }
     }
 
