@@ -42,8 +42,10 @@ class Entity:
 				raise ValueError("rdf2vec and counts must be provided for constant entities")
 			
 			# Get embedding and count
-			embedding = rdf2vec.get(entity_name, np.zeros(100))
+			#embedding = rdf2vec.get(entity_name, np.zeros(100)) #TODO
+			embedding = rdf2vec[entity_name]
 			count = counts.get(entity_name, 1)
+			#count = counts[entity_name]
 			
 			return np.concatenate([
 				[0],
@@ -365,11 +367,13 @@ class Datapoint:
 
 	join_order: Query
 
-	def get_torch_data(self) -> Data:
+	def get_torch_data(self, cost=None) -> Data:
+		if cost is None:
+			cost = self.join_order.root.get_cost()
 		return Data(
 			x=torch.tensor(self.embedding_matrix, dtype=torch.float),
 			edge_index=torch.tensor(self.adjacency_matrix, dtype=torch.float).nonzero(as_tuple=False).t().contiguous(),
-			y=torch.tensor([self.join_order.root.get_cost()], dtype=torch.float)
+			y=torch.tensor([cost], dtype=torch.float)
 		)
 
 
