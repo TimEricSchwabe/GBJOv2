@@ -105,7 +105,6 @@ class Triple:
 		"""
 		query = f"""
 			SELECT COUNT(*) AS ?count
-			FROM <http://lubm>
 			WHERE {{ 
 				{self.where_body()}	
 			}}
@@ -173,7 +172,6 @@ class Join:
 	def __str__(self) -> str:
 		return f"""
 			SELECT {', '.join(str(var) for var in self.variables)}
-			FROM <lubm>
 			WHERE {{
 				{self.where_body()}
 			}}
@@ -197,7 +195,6 @@ class Join:
 	def get_cost(self) -> int:
 		query = f"""
 			SELECT COUNT(*) AS ?count
-			FROM <http://lubm>
 			WHERE {{ 
 				{self.where_body()}	
 			}}
@@ -239,7 +236,6 @@ class Join:
 	def get_cardinality(self) -> int:
 		query = f"""
 			SELECT COUNT(*) AS ?count
-			FROM <http://lubm>
 			WHERE {{ 
 				{self.where_body()}	
 			}}
