@@ -42,8 +42,11 @@ class Entity:
 				raise ValueError("rdf2vec and counts must be provided for constant entities")
 			
 			# Get embedding and count
-			#embedding = rdf2vec.get(entity_name, np.zeros(100)) #TODO
-			embedding = rdf2vec[entity_name]
+			try:		
+				embedding = rdf2vec[entity_name]
+			except:
+				print(f"Entity {entity_name} not found in rdf2vec")
+				embedding = rdf2vec.get(entity_name, np.zeros(100)) #TODO
 			count = counts.get(entity_name, 1)
 			#count = counts[entity_name]
 			

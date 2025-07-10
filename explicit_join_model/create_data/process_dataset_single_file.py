@@ -38,6 +38,7 @@ class SPARQLQuery:
     join_plans: List[Query]
     costs: List[float]
     torch_data: List[Data]  # Store torch_data for each plan
+    triples_where: List[List[str]]  # Store triples_where for each plan
     
     def get_best_plan_index(self) -> int:
         """Return the index of the plan with the lowest cost"""
@@ -88,38 +89,40 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
     # Calculate cost for each plan and create torch_data
     costs = []
     torch_data_list = []
+    triples_where_list = []
     
-    # Create mapping from triple pattern to index
+    # Create mapping from triple pattern to index (create once and reuse)
     triple_objs = [Triple(*(Entity(name=name) for name in triple[:3])) for triple in triples]
     triple_to_index = {str(triple): i for i, triple in enumerate(triple_objs)}
-
-    card = join_plans[0].root.get_cardinality()
-    if card < MIN_CARDINALITY:
-        return None
-    else:
-        print(f"Query has cardinality {card}")
-
 
     for plan in join_plans:
         try:
             # Calculate cost
-            cost = plan.root.get_cost()
+            cost = plan.root.get_cost() 
+            #cost = -1
             costs.append(cost)
             
             # Create torch_data with consistent triple indices
             datapoint = join_order_to_adjacency_matrix_consistent(plan, triple_to_index, rdf2vec=rdf2vec_dict, counts=counts_dict)
-            data = datapoint.get_torch_data()
+            data = datapoint.get_torch_data(cost=cost)
             torch_data_list.append(data)
+            
+            # Extract triples_where for this plan
+            triples_where = [triple.where_body() for triple in datapoint.nodes_order if isinstance(triple, Triple)]
+            triples_where_list.append(triples_where)
         except Exception as e:
+            raise e
             print(f"Error calculating cost or creating torch_data: {e}")
             costs.append(float('inf'))
             torch_data_list.append(None)  # Add None for failed plans
+            triples_where_list.append([])  # Add empty list for failed plans
     
     return SPARQLQuery(
         triples=triples, 
         join_plans=join_plans, 
         costs=costs,
-        torch_data=torch_data_list
+        torch_data=torch_data_list,
+        triples_where=triples_where_list
     )
 
 def join_order_to_adjacency_matrix_consistent(join_order: Query, triple_to_index: dict, seed = None, rdf2vec=None, counts=None) -> Datapoint:
@@ -315,26 +318,30 @@ def visualize_and_save_plans(sparql_query: SPARQLQuery, query_idx: int, output_d
 
 if __name__ == "__main__":
     # Load the RDF2Vec embeddings
-    with open("/home/tim/query_optimization/datasets/queries/rdf2vec100dim.pkl", "rb") as f:
+    with open("/mnt/data/tim_triple_files/wikidata/rdf2vec100dim.pkl", "rb") as f:
         rdf2vec_dict = pickle.load(f)
-    
-    with open("/home/tim/query_optimization/datasets/queries/counts.pkl", "rb") as f:
+        print(len(rdf2vec_dict))
+
+
+
+
+    with open("/mnt/data/tim_triple_files/wikidata/counts.pkl", "rb") as f:
         counts_dict = pickle.load(f)
 
     
     # Set paths
-    input_file = "/home/tim/CQOS-dataset/lubm/star/Queries_9_to_14.json"
-    dataset_dir = "datasets/dataset_star_9_to_14"
-    sparql_queries_file = "sparql_queries_star_9_to_14/queries.pkl"
-    visualization_dir = "join_plan_visualizations_star"
+    input_file = "/mnt/data/tim_triple_files/wikidata/star/star_queries.json"
+    dataset_dir = "/mnt/data/tim_triple_files/wikidata/star/plans/"
+    #visualization_dir = "join_plan_visualizations_path_wikidata"
+    sparql_queries_file = "sparql_queries_path_wikidata/queries.pkl"
 
-    MAX_QUERIES = 10000000000000000
-    MIN_CARDINALITY = 4
-    N_TRIPLES = 4
-    SAVE_INTERVAL = 100
+    MAX_QUERIES = 200000000000000000
+    MIN_CARDINALITY = 1
+    #N_TRIPLES = 5
+    SAVE_INTERVAL = 1000
     
     # Create visualization directory
-    os.makedirs(visualization_dir, exist_ok=True)
+    #os.makedirs(visualization_dir, exist_ok=True)
     
     # Load the queries
     print(f"Loading queries from {input_file}...")
@@ -344,15 +351,15 @@ if __name__ == "__main__":
     # Filter queries with exactly 8 triple patterns
     #queries_8tp = [q for q in queries if len(q["triples"]) == N_TRIPLES]
     queries_8tp = queries
-    # Filter queries for min cardinality
+    # Filter queries for min cardinality and all-variable triple patterns
     queries_8tp = [q for q in queries_8tp if q["y"] >= MIN_CARDINALITY and not has_all_variable_triple_pattern(q)]
-    print(f"Found {len(queries_8tp)} queries with exactly {N_TRIPLES} triple patterns and min cardinality {MIN_CARDINALITY}")
+    print(f"Found {len(queries_8tp)} queries with min cardinality {MIN_CARDINALITY}")
     #Shuffle queries
     random.shuffle(queries_8tp)
     
     
     # Number of random plans to create per query
-    num_random_plans = 3
+    num_random_plans = 2
     
     # Process queries
     sparql_queries = []
@@ -375,32 +382,21 @@ if __name__ == "__main__":
             # Visualize and save all plans for this query
             #visualize_and_save_plans(sparql_query, i, visualization_dir)
             
-            # Add datapoints for each plan
+            # Add datapoints for each plan (using pre-created data from query_to_sparql_query)
             for j, plan in enumerate(sparql_query.join_plans):
                 if sparql_query.torch_data[j] is not None:
-                    try:
-                        datapoint = join_order_to_adjacency_matrix_consistent(
-                            plan, 
-                            {str(triple): i for i, triple in enumerate([Triple(*(Entity(name=name) for name in triple[:3])) for triple in query["triples"]])}, 
-                            rdf2vec=rdf2vec_dict, 
-                            counts=counts_dict
-                        )
-                        triples_where = [triple.where_body() for triple in datapoint.nodes_order if isinstance(triple, Triple)]
-                        all_triples.append(triples_where)
-                        all_torch_data.append(sparql_query.torch_data[j])
-                    except Exception as e:
-                        print(f"Error creating datapoint for plan {j}: {e}")
+                    all_triples.append(sparql_query.triples_where[j])
+                    all_torch_data.append(sparql_query.torch_data[j])
             
             # Print costs for debugging
             print(f"  Plans costs: {sparql_query.costs}")
-            print(f"  Best plan index: {sparql_query.get_best_plan_index()}")
 
             # Save every SAVE_INTERVAL queries
             if (n_queries % SAVE_INTERVAL) == 0:
                 print(f"\nSaving checkpoint at {n_queries} queries...")
                 
                 # Save SPARQLQuery objects checkpoint
-                save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
+                #save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
                 
                 # Save dataset checkpoint
                 save_dataset_single_file(all_triples, all_torch_data, dataset_dir)
@@ -413,7 +409,7 @@ if __name__ == "__main__":
     
     # Save final results
     print("\nSaving final results...")
-    save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
+    #save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
     save_dataset_single_file(all_triples, all_torch_data, dataset_dir)
     
     print("\nDataset conversion complete!")
