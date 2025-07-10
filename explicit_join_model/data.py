@@ -3,6 +3,7 @@ from typing import Union, Optional, Callable
 
 import re
 import requests
+from requests.exceptions import Timeout, RequestException
 import numpy as np
 import random
 import graphviz
@@ -109,13 +110,21 @@ class Triple:
 				{self.where_body()}	
 			}}
 		"""
-		res = requests.get(
-			"http://127.0.0.1:8890/sparql/",
-			params={
-				"query": query,
-				"format": "csv",
-			},
-		).text
+		try:
+			res = requests.get(
+				"http://127.0.0.1:8890/sparql/",
+				params={
+					"query": query,
+					"format": "csv",
+				},
+				timeout=30  # 30 second timeout
+			).text
+		except Timeout:
+			print(f"SPARQL request timed out for triple: {self.where_body()}")
+			raise RuntimeError("SPARQL timeout")
+		except RequestException as e:
+			print(f"SPARQL request failed for triple: {self.where_body()}, error: {e}")
+			raise RuntimeError(f"SPARQL error: {e}")
 		
 		m = re.match(r'"count"\n(\d+)\n', res)
 		
@@ -187,13 +196,21 @@ class Join:
 				{self.where_body()}	
 			}}
 		"""
-		res = requests.get(
-			"http://127.0.0.1:8890/sparql/",
-			params={
-				"query": query,
-				"format": "csv",
-			},
-		).text
+		try:
+			res = requests.get(
+				"http://127.0.0.1:8890/sparql/",
+				params={
+					"query": query,
+					"format": "csv",
+				},
+				timeout=30  # 30 second timeout
+			).text
+		except Timeout:
+			print(f"SPARQL request timed out for join: {self.where_body()}")
+			raise RuntimeError("SPARQL timeout")
+		except RequestException as e:
+			print(f"SPARQL request failed for join: {self.where_body()}, error: {e}")
+			raise RuntimeError(f"SPARQL error: {e}")
 		
 		m = re.match(r'"count"\n(\d+)\n', res)
 		
@@ -216,13 +233,21 @@ class Join:
 				{self.where_body()}	
 			}}
 		"""
-		res = requests.get(
-			"http://127.0.0.1:8890/sparql/",
-			params={
-				"query": query,
-				"format": "csv",
-			},
-		).text
+		try:
+			res = requests.get(
+				"http://127.0.0.1:8890/sparql/",
+				params={
+					"query": query,
+					"format": "csv",
+				},
+				timeout=30  # 30 second timeout
+			).text
+		except Timeout:
+			print(f"SPARQL request timed out for join: {self.where_body()}")
+			raise RuntimeError("SPARQL timeout")
+		except RequestException as e:
+			print(f"SPARQL request failed for join: {self.where_body()}, error: {e}")
+			raise RuntimeError(f"SPARQL error: {e}")
 		
 		m = re.match(r'"count"\n(\d+)\n', res)
 		
