@@ -404,7 +404,7 @@ if __name__ == "__main__":
                 print(f"Checkpoint saved at {n_queries} queries")
 
         except Exception as e:
-            raise
+            #raise
             print(f"Error processing query {i}: {e}")
     
     # Save final results
