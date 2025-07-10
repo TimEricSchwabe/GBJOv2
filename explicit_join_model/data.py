@@ -120,7 +120,7 @@ class Triple:
 		m = re.match(r'"count"\n(\d+)\n', res)
 		
 		if not m:
-			num_trials = 3
+			num_trials = 0
 			while not m and num_trials > 0:
 				res = requests.get(
 					"http://127.0.0.1:8890/sparql/",
@@ -210,7 +210,7 @@ class Join:
 		m = re.match(r'"count"\n(\d+)\n', res)
 		
 		if not m:
-			num_trials = 3
+			num_trials = 0
 			while not m and num_trials > 0:
 				res = requests.get(
 					"http://127.0.0.1:8890/sparql/",
@@ -251,7 +251,7 @@ class Join:
 		m = re.match(r'"count"\n(\d+)\n', res)
 		
 		if not m:
-			num_trials = 3
+			num_trials = 0
 			while not m and num_trials > 0:
 				res = requests.get(
 					"http://127.0.0.1:8890/sparql/",
