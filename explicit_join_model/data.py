@@ -121,6 +121,7 @@ class Triple:
 		
 		if not m:
 			print("Error in the following query:", query)
+			print(res)
 			raise RuntimeError("Query failed")
 
 		return int(m.group(1))
@@ -198,6 +199,7 @@ class Join:
 		
 		if not m:
 			print("Error in the following query:", query)
+			print(res)
 			raise RuntimeError("Query failed")
 
 		self_cardinality = int(m.group(1))
@@ -226,6 +228,7 @@ class Join:
 		
 		if not m:
 			print("Error in the following query:", query)
+			print(res)
 			raise RuntimeError("Query failed")
 
 		self_cardinality = int(m.group(1))
