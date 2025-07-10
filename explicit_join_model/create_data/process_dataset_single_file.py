@@ -95,11 +95,18 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
     triple_objs = [Triple(*(Entity(name=name) for name in triple[:3])) for triple in triples]
     triple_to_index = {str(triple): i for i, triple in enumerate(triple_objs)}
 
+
+    cost_error = False
+
     for plan in join_plans:
         try:
             # Calculate cost
-            cost = plan.root.get_cost() 
-            #cost = -1
+            try:
+                cost = plan.root.get_cost() 
+            except RuntimeError as e:
+                print(f"Error calculating cost: {e}")
+                cost_error = True
+                break
             costs.append(cost)
             
             # Create torch_data with consistent triple indices
@@ -116,6 +123,9 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
             costs.append(float('inf'))
             torch_data_list.append(None)  # Add None for failed plans
             triples_where_list.append([])  # Add empty list for failed plans
+    
+    if cost_error:
+        return None
     
     return SPARQLQuery(
         triples=triples, 
