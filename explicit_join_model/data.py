@@ -120,21 +120,8 @@ class Triple:
 		m = re.match(r'"count"\n(\d+)\n', res)
 		
 		if not m:
-			num_trials = 0
-			while not m and num_trials > 0:
-				res = requests.get(
-					"http://127.0.0.1:8890/sparql/",
-					params={
-						"query": query,
-						"format": "csv",
-					},
-				).text
-				m = re.match(r'"count"\n(\d+)\n', res)
-				num_trials -= 1
-
-			if not m:
-				print("Error in the following query:", query)
-				raise RuntimeError("Query failed")
+			print("Error in the following query:", query)
+			raise RuntimeError("Query failed")
 
 		return int(m.group(1))
 	
@@ -210,21 +197,8 @@ class Join:
 		m = re.match(r'"count"\n(\d+)\n', res)
 		
 		if not m:
-			num_trials = 0
-			while not m and num_trials > 0:
-				res = requests.get(
-					"http://127.0.0.1:8890/sparql/",
-					params={
-						"query": query,
-						"format": "csv",
-					},
-				).text
-				m = re.match(r'"count"\n(\d+)\n', res)
-				num_trials -= 1
-
-			if not m:
-				print("Error in the following query:", query)
-				raise RuntimeError("Query failed")
+			print("Error in the following query:", query)
+			raise RuntimeError("Query failed")
 
 		self_cardinality = int(m.group(1))
 
@@ -251,21 +225,8 @@ class Join:
 		m = re.match(r'"count"\n(\d+)\n', res)
 		
 		if not m:
-			num_trials = 0
-			while not m and num_trials > 0:
-				res = requests.get(
-					"http://127.0.0.1:8890/sparql/",
-					params={
-						"query": query,
-						"format": "csv",
-					},
-				).text
-				m = re.match(r'"count"\n(\d+)\n', res)
-				num_trials -= 1
-
-			if not m:
-				print("Error in the following query:", query)
-				raise RuntimeError("Query failed")
+			print("Error in the following query:", query)
+			raise RuntimeError("Query failed")
 
 		self_cardinality = int(m.group(1))
 
