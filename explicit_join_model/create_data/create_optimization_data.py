@@ -406,23 +406,23 @@ def has_all_variable_triple_pattern(query_data: dict) -> bool:
 
 if __name__ == "__main__":
     # Load the RDF2Vec embeddings
-    with open("/home/tim/query_optimization/datasets/queries/rdf2vec100dim.pkl", "rb") as f:
+    with open("/home/tim/CQOS-dataset/wikidata/rdf2vec100dim.pkl", "rb") as f:
         rdf2vec_dict = pickle.load(f)
     
-    with open("/home/tim/query_optimization/datasets/queries/counts.pkl", "rb") as f:
+    with open("/home/tim/CQOS-dataset/wikidata/counts.pkl", "rb") as f:
         counts_dict = pickle.load(f)
 
     
     # Set paths
-    input_file = "/home/tim/CQOS-dataset/lubm/star/star_queries.json"
-    sparql_queries_file = "NEW_DATASET/queries.pkl"
+    input_file = "/home/tim/CQOS-dataset/wikidata/star/star_queries.json"
+    sparql_queries_file = "wikidata_star/queries.pkl"
     visualization_dir = "None"
 
     # Number of random plans to create per query
     num_random_plans = 1
     # Min Cardinality
-    min_cardinality = 10
-    n_triple_sizes = [3,4,5,6,7,8,9,10,11,12,13,14]  # Multiple triple sizes to process
+    min_cardinality = 2
+    n_triple_sizes = [3,4,5,6,7,8,9,10,11,12,13,14,15]  # Multiple triple sizes to process
     n_queries = 20  # Number of queries to collect for each size
     include_subplans = False  # Set to True to generate and include subplans
     calculate_subplan_costs = False  # Set to True to calculate real costs for subplans using root.get_cost()

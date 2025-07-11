@@ -32,6 +32,8 @@ def generate_embeddings(graph_file, entities):
             f
         )
 
+    
+
 
 
 if __name__ == "__main__":
@@ -40,6 +42,8 @@ if __name__ == "__main__":
        queries = json.load(f)
     for query in queries:
        entities += query['x']
+       if 'instantiated_objects' in query:
+           entities += [obj.strip('<>') for obj in query['instantiated_objects']]
     #with open('/home/tim/Datasets/yago/star/Joined_Queries.json', 'r') as f:
     #    queries = json.load(f)
     #for query in queries:

@@ -1,5 +1,7 @@
 from .methods import (
     optimize_query_gumbel,
+    optimize_query_gumbel_efficient,
+    optimize_query_gumbel_efficient_reduced,
     greedy_optimize_query,
     random_join_plan,
     dp_leftdeep_best_plan,
@@ -17,6 +19,8 @@ from .gumbel_utils import (
 
 __all__ = [
     'optimize_query_gumbel',
+    'optimize_query_gumbel_efficient',
+    'optimize_query_gumbel_efficient_reduced',
     'greedy_optimize_query', 
     'random_join_plan',
     'dp_leftdeep_best_plan',

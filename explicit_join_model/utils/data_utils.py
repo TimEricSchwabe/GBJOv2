@@ -13,7 +13,7 @@ from data import Triple, Join, Query, Entity
 import sys
 import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '.', '..'))
-from create_data.process_dataset_single_file import SPARQLQuery
+from explicit_join_model.create_data.create_cost_mode_training_data import SPARQLQuery
 import random
 
 
@@ -263,12 +263,14 @@ def plans_are_equivalent(plan1, plan2):
         return False
 
 
-def load_sparql_queries(queries_file: str, num_queries):
+def load_sparql_queries(queries_file: str, num_queries, seed=42):
     """
     Load all the SPARQL query objects from the given file.
     
     Args:
         queries_file: Path to the file containing saved SPARQLQuery objects
+        num_queries: Number of queries to return (None for all)
+        seed: Random seed for shuffling (default: 42)
         
     Returns:
         List of SPARQLQuery objects
@@ -278,6 +280,7 @@ def load_sparql_queries(queries_file: str, num_queries):
     
     if num_queries is not None:
         print(f"Loaded {num_queries} SPARQL queries from {queries_file}")
+        random.seed(seed)  # Set seed for reproducible shuffling
         random.shuffle(sparql_queries)
         return sparql_queries[-num_queries:]
     print(f"Loaded {len(sparql_queries)} SPARQL queries from {queries_file}")

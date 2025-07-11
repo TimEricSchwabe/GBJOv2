@@ -25,13 +25,15 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(os.path.dirname(__file__))
 
 # Import the classes
-from create_data.process_dataset_with_subplans_individual import SPARQLQuery
+from explicit_join_model.create_data.create_optimization_data import SPARQLQuery
 from data import Triple, Join, Query, Entity
 from model import CostGNNv2
-from create_data.process_dataset_single_file import SPARQLQuery
+from explicit_join_model.create_data.create_cost_mode_training_data import SPARQLQuery
 
 from optimization import (
     optimize_query_gumbel,
+    optimize_query_gumbel_efficient,
+    optimize_query_gumbel_efficient_reduced,
     greedy_optimize_query,
     random_join_plan,
     dp_leftdeep_best_plan,
@@ -101,6 +103,8 @@ def evaluate_optimization(sparql_queries, model_path, num_queries=None, optimiza
     model = CostGNNv2(node_feature_dim=node_feature_dim, hidden_dim=hidden_dim).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
     
     # Limit number of queries if specified
     if num_queries is not None:
@@ -581,10 +585,11 @@ if __name__ == "__main__":
 
     config = {
         # General parameters
-        'queries_file': "/home/tim/query_optimization/datasets/star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
-        'model_path': "/home/tim/query_optimization/explicit_join_model/models/star_model.pt",
-        'num_queries': 20,
-        'optimization_steps': 100, # 475
+        'queries_file': "/home/tim/query_optimization/datasets/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
+        #'queries_file': "/home/tim/query_optimization/datasets/wikidata_star_plan_datasets_optimization/queries.pkl",
+        'model_path': "/home/tim/query_optimization/explicit_join_model/models/lubm/star_model.pt",
+        'num_queries': 10,
+        'optimization_steps': 500, # 475
         'verbose': False,
         'use_exhaustive': False,
         'use_dp': False,
@@ -629,7 +634,7 @@ if __name__ == "__main__":
             'lambda_ramp_exponent': 9.2,
             'lr_warmup_steps': 0,
             'gradient_clip_norm': 0.0,
-            'use_lr_scheduling': True,
+            'use_lr_scheduling': False,
             'decoding_method': 'threshold', # 'threshold', 'beam', 'greedy', 'hungarian'
         }
     }
