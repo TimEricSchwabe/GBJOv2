@@ -65,7 +65,7 @@ def optimize_query_gumbel(
     gradient_clip_norm: float = 5.0,
     use_lr_scheduling: bool = True,
     lr_warmup_steps: int = 200,
-    decoding_method: str = 'threshold', # 'threshold', 'beam', 'greedy', 'hungarian'
+    decoding_method: str = 'greedy', # 'threshold', 'beam', 'greedy', 'hungarian'
 ):
     """Gradient-based join-order search with **Straight-Through Gumbel-Sigmoid**.
 
@@ -518,6 +518,9 @@ def optimize_query_gumbel(
     if decoding_method == 'threshold':
         final_A = torch.zeros((N_NODES, N_NODES), device=device)
         final_A[edge_index[0], edge_index[1]] = final_edge_weights # TODO COMMENT BACK IN !!
+    else:
+        # Extract edge weights from the projected adjacency matrix
+        final_edge_weights = final_A[edge_index[0], edge_index[1]]
 
     # Plot metrics if verbose
     if verbose:
