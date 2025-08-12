@@ -1,1 +1,0 @@
-# Visualization package for query optimization evaluation 
