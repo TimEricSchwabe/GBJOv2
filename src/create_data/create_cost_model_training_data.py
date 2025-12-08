@@ -98,7 +98,7 @@ def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> Tupl
     n = len(triple_objs)
     
     if n == 1:
-        cost = triple_objs[0].get_cost()
+        cost = triple_objs[0].get_cardinality()
         return Query(root=triple_objs[0], triples_num=1), cost
     
     # Initialize beam with single triples
@@ -106,7 +106,7 @@ def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> Tupl
     beam = []
     for i in range(n):
         try:
-            cost = triple_objs[i].get_cost()
+            cost = triple_objs[i].get_cardinality()
             beam.append((cost, triple_objs[i], frozenset({i})))
         except Exception:
             continue
@@ -132,6 +132,7 @@ def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> Tupl
                     new_cost = new_plan.get_cost()
                     candidates.append((new_cost, new_plan, used | {idx}))
                 except Exception:
+                    raise
                     continue
         
         if not candidates:
@@ -162,7 +163,7 @@ def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> Tup
     n = len(triple_objs)
     
     if n == 1:
-        cost = triple_objs[0].get_cost()
+        cost = triple_objs[0].get_cardinality()
         return Query(root=triple_objs[0], triples_num=1), cost
     
     # Initialize beam with single triples
@@ -170,7 +171,7 @@ def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> Tup
     beam = []
     for i in range(n):
         try:
-            cost = triple_objs[i].get_cost()
+            cost = triple_objs[i].get_cardinality()
             beam.append((cost, triple_objs[i], frozenset({i})))
         except Exception:
             continue
@@ -587,6 +588,7 @@ if __name__ == "__main__":
     queries = [q for q in queries if q["y"] >= MIN_CARDINALITY and not has_all_variable_triple_pattern(q)]
     #Shuffle queries
     random.shuffle(queries)
+
     
     
     ############ Process queries ############

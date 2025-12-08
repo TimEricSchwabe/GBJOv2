@@ -111,14 +111,14 @@ class Triple:
 		This is useful when the triple pattern is considered as a standalone query.
 		"""
 		query = f"""
-			SELECT COUNT(*) AS ?count
+			SELECT (COUNT(*) AS ?count)
 			WHERE {{ 
 				{self.where_body()}	
 			}}
 		"""
 		try:
 			response = requests.get(
-				"http://127.0.0.1:8890/sparql/",
+				"http://127.0.0.1:7001",
 				params={
 					"query": query,
 					"format": "json", 
@@ -127,6 +127,9 @@ class Triple:
 			)
 			response.raise_for_status()
 			res_json = response.json()
+		except Exception as e:
+			print(f"SPARQL request failed for triple: {self.where_body()}, error: {e}")
+			raise e
 		except Timeout:
 			print(f"SPARQL request timed out for triple: {self.where_body()}")
 			raise RuntimeError("SPARQL timeout")
