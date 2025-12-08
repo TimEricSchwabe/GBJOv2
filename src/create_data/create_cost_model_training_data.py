@@ -12,6 +12,7 @@ from data import Triple, Join, Query, Entity, join_order_to_adjacency_matrix, ra
 from tqdm import tqdm
 import shutil
 from data_loader import QueryDataset
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def has_all_variable_triple_pattern(query_data: dict) -> bool:
@@ -579,12 +580,15 @@ if __name__ == "__main__":
     
     # Beam width for beam search (1 = greedy, higher = more exploration)
     # Complexity: O(n^2 * beam_width) per query
-    BEAM_WIDTH = 2
+    BEAM_WIDTH = 3
     
     # Number of random plans to create per query
     # When USE_DIVERSE_PLANS=True: total plans = 2 (beam search) + NUM_RANDOM_PLANS
     # When USE_DIVERSE_PLANS=False: total plans = NUM_RANDOM_PLANS
     NUM_RANDOM_PLANS = 3
+    
+    # Number of parallel workers for query processing
+    NUM_WORKERS = 4
     
     # Create visualization directory
     #os.makedirs(visualization_dir, exist_ok=True)
@@ -604,61 +608,72 @@ if __name__ == "__main__":
     
     
     ############ Process queries ############
-    sparql_queries = []
-    all_triples = []
-    all_torch_data = []
-
-    n_queries = 0
     
-    for i, query in enumerate(tqdm(queries[:MAX_QUERIES], desc="Processing queries")):
-
+    def process_single_query(query_data: dict) -> Optional[SPARQLQuery]:
+        """Worker function to process a single query in parallel."""
         try:
             sparql_query = query_to_sparql_query(
-                query, rdf2vec_dict, counts_dict, 
+                query_data, rdf2vec_dict, counts_dict, 
                 num_plans=NUM_RANDOM_PLANS,
                 use_diverse_plans=USE_DIVERSE_PLANS,
                 num_random_plans=NUM_RANDOM_PLANS,
                 beam_width=BEAM_WIDTH
             )
             if sparql_query is None:
-                continue
+                return None
 
-            # check if all costs are the same
+            # check if all costs are the same (no diversity in plans)
             if all(cost == sparql_query.costs[0] for cost in sparql_query.costs):
-                continue
+                return None
 
-            sparql_queries.append(sparql_query)
-            n_queries += 1
-            if n_queries > MAX_QUERIES:
-                break
-            
-            # Visualize and save all plans for this query
-            #visualize_and_save_plans(sparql_query, i, visualization_dir)
-            
-            # Add datapoints for each plan (using pre-created data from query_to_sparql_query)
-            for j, plan in enumerate(sparql_query.join_plans):
-                if sparql_query.torch_data[j] is not None:
-                    all_triples.append(sparql_query.triples_where[j])
-                    all_torch_data.append(sparql_query.torch_data[j])
-            
-            # Print costs for debugging
-            print(f"  Plans costs: {sparql_query.costs}")
-
-            # Save every SAVE_INTERVAL queries
-            if (n_queries % SAVE_INTERVAL) == 0:
-                print(f"\nSaving checkpoint at {n_queries} queries...")
-                
-                # Save SPARQLQuery objects checkpoint
-                #save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
-                
-                # Save dataset checkpoint
-                save_dataset_single_file(all_triples, all_torch_data, dataset_dir)
-                
-                print(f"Checkpoint saved at {n_queries} queries")
-
+            return sparql_query
         except Exception as e:
-            #raise
-            print(f"Error processing query {i}: {e}")
+            print(f"Error processing query: {e}")
+            return None
+    
+    sparql_queries = []
+    all_triples = []
+    all_torch_data = []
+    n_queries = 0
+    
+    # Process queries in parallel
+    queries_to_process = queries[:MAX_QUERIES]
+    
+    print(f"Processing {len(queries_to_process)} queries with {NUM_WORKERS} workers...")
+    
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        # Submit all queries
+        futures = {executor.submit(process_single_query, q): i for i, q in enumerate(queries_to_process)}
+        
+        # Process results as they complete
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing queries"):
+            query_idx = futures[future]
+            try:
+                sparql_query = future.result()
+                
+                if sparql_query is None:
+                    continue
+                
+                sparql_queries.append(sparql_query)
+                n_queries += 1
+                
+                # Add datapoints for each plan
+                for j, plan in enumerate(sparql_query.join_plans):
+                    if sparql_query.torch_data[j] is not None:
+                        all_triples.append(sparql_query.triples_where[j])
+                        all_torch_data.append(sparql_query.torch_data[j])
+                
+                # Print costs for debugging
+                print(f"  Query {query_idx} costs: {sparql_query.costs}")
+
+                # Save every SAVE_INTERVAL queries
+                if (n_queries % SAVE_INTERVAL) == 0:
+                    print(f"\nSaving checkpoint at {n_queries} queries...")
+                    save_dataset_single_file(all_triples, all_torch_data, dataset_dir)
+                    print(f"Checkpoint saved at {n_queries} queries")
+
+            except Exception as e:
+                print(f"Error processing query {query_idx}: {e}")
     
     # Save final results
     print("\nSaving final results...")
