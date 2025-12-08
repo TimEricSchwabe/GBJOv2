@@ -242,14 +242,14 @@ class Join:
 	
 	def get_cardinality(self) -> int:
 		query = f"""
-			SELECT COUNT(*) AS ?count
+			SELECT (COUNT(*) AS ?count)
 			WHERE {{ 
 				{self.where_body()}	
 			}}
 		"""
 		try:
 			response = requests.get(
-				"http://127.0.0.1:8890/sparql/",
+				"http://127.0.0.1:7001",
 				params={
 					"query": query,
 					"format": "json",

@@ -98,16 +98,17 @@ def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> Tupl
     n = len(triple_objs)
     
     if n == 1:
-        cost = triple_objs[0].get_cardinality()
-        return Query(root=triple_objs[0], triples_num=1), cost
+        # C_out cost for a single triple is 0 (leaves have no cost)
+        return Query(root=triple_objs[0], triples_num=1), 0
     
     # Initialize beam with single triples
-    # Each beam entry: (cost, plan, used_indices_frozenset)
+    # Each beam entry: (cardinality_for_sorting, plan, used_indices_frozenset)
+    # We use cardinality to select the best starting triple, but cost starts at 0
     beam = []
     for i in range(n):
         try:
-            cost = triple_objs[i].get_cardinality()
-            beam.append((cost, triple_objs[i], frozenset({i})))
+            cardinality = triple_objs[i].get_cardinality()
+            beam.append((cardinality, triple_objs[i], frozenset({i})))
         except Exception:
             continue
     
@@ -115,9 +116,12 @@ def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> Tupl
         # Fallback if all failed
         beam = [(float('inf'), triple_objs[0], frozenset({0}))]
     
-    # Sort by cost (ascending) and keep top beam_width
+    # Sort by cardinality (ascending) to pick best starting triples, keep top beam_width
     beam.sort(key=lambda x: x[0])
     beam = beam[:beam_width]
+    
+    # Reset cost to 0 for selected triples (C_out: leaves have cost 0)
+    beam = [(0, plan, used) for (_, plan, used) in beam]
     
     # Expand beam n-1 times (add one triple at each step)
     for _ in range(n - 1):
@@ -129,7 +133,9 @@ def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> Tupl
             for idx in remaining:
                 new_plan = Join(left=current_plan, right=triple_objs[idx])
                 try:
-                    new_cost = new_plan.get_cost()
+                    # Incremental cost: only query this join's cardinality, reuse current_cost
+                    new_cardinality = new_plan.get_cardinality()
+                    new_cost = new_cardinality + current_cost
                     candidates.append((new_cost, new_plan, used | {idx}))
                 except Exception:
                     raise
@@ -163,16 +169,17 @@ def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> Tup
     n = len(triple_objs)
     
     if n == 1:
-        cost = triple_objs[0].get_cardinality()
-        return Query(root=triple_objs[0], triples_num=1), cost
+        # C_out cost for a single triple is 0 (leaves have no cost)
+        return Query(root=triple_objs[0], triples_num=1), 0
     
     # Initialize beam with single triples
-    # Each beam entry: (cost, plan, used_indices_frozenset)
+    # Each beam entry: (cardinality_for_sorting, plan, used_indices_frozenset)
+    # We use cardinality to select the worst starting triple, but cost starts at 0
     beam = []
     for i in range(n):
         try:
-            cost = triple_objs[i].get_cardinality()
-            beam.append((cost, triple_objs[i], frozenset({i})))
+            cardinality = triple_objs[i].get_cardinality()
+            beam.append((cardinality, triple_objs[i], frozenset({i})))
         except Exception:
             continue
     
@@ -180,9 +187,12 @@ def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> Tup
         # Fallback if all failed
         beam = [(0, triple_objs[0], frozenset({0}))]
     
-    # Sort by cost (descending) and keep top beam_width
+    # Sort by cardinality (descending) to pick worst starting triples, keep top beam_width
     beam.sort(key=lambda x: x[0], reverse=True)
     beam = beam[:beam_width]
+    
+    # Reset cost to 0 for selected triples (C_out: leaves have cost 0)
+    beam = [(0, plan, used) for (_, plan, used) in beam]
     
     # Expand beam n-1 times (add one triple at each step)
     for _ in range(n - 1):
@@ -194,7 +204,9 @@ def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> Tup
             for idx in remaining:
                 new_plan = Join(left=current_plan, right=triple_objs[idx])
                 try:
-                    new_cost = new_plan.get_cost()
+                    # Incremental cost: only query this join's cardinality, reuse current_cost
+                    new_cardinality = new_plan.get_cardinality()
+                    new_cost = new_cardinality + current_cost
                     candidates.append((new_cost, new_plan, used | {idx}))
                 except Exception:
                     continue
