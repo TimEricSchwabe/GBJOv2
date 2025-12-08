@@ -3,7 +3,7 @@ import os
 import json
 import torch
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import numpy as np
 from torch_geometric.data import Data, DataLoader
 import sys
@@ -81,15 +81,214 @@ def create_random_join_orders(triples: List[List[str]], count: int, rdf2vec_dict
     
     return plans
 
-def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans: int = 10) -> SPARQLQuery:
-    """Convert a raw query to a SPARQLQuery with multiple random join plans and costs"""
+
+def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> Tuple[Query, float]:
+    """
+    Build a left-deep plan using beam search to find plans that minimize cost.
+    Keeps top beam_width partial plans at each step.
+    
+    Args:
+        triples: List of triple patterns (each is [subject, predicate, object])
+        beam_width: Number of top plans to keep at each step (1 = greedy)
+        
+    Returns:
+        Tuple of (Query object, final_cost) - the best plan and its cost
+    """
+    triple_objs = [Triple(*(Entity(name=name) for name in t[:3])) for t in triples]
+    n = len(triple_objs)
+    
+    if n == 1:
+        cost = triple_objs[0].get_cost()
+        return Query(root=triple_objs[0], triples_num=1), cost
+    
+    # Initialize beam with single triples
+    # Each beam entry: (cost, plan, used_indices_frozenset)
+    beam = []
+    for i in range(n):
+        try:
+            cost = triple_objs[i].get_cost()
+            beam.append((cost, triple_objs[i], frozenset({i})))
+        except Exception:
+            continue
+    
+    if not beam:
+        # Fallback if all failed
+        beam = [(float('inf'), triple_objs[0], frozenset({0}))]
+    
+    # Sort by cost (ascending) and keep top beam_width
+    beam.sort(key=lambda x: x[0])
+    beam = beam[:beam_width]
+    
+    # Expand beam n-1 times (add one triple at each step)
+    for _ in range(n - 1):
+        candidates = []
+        
+        for current_cost, current_plan, used in beam:
+            remaining = set(range(n)) - used
+            
+            for idx in remaining:
+                new_plan = Join(left=current_plan, right=triple_objs[idx])
+                try:
+                    new_cost = new_plan.get_cost()
+                    candidates.append((new_cost, new_plan, used | {idx}))
+                except Exception:
+                    continue
+        
+        if not candidates:
+            break
+            
+        # Sort by cost and keep top beam_width
+        candidates.sort(key=lambda x: x[0])
+        beam = candidates[:beam_width]
+    
+    # Return the best complete plan
+    best_cost, best_plan, _ = beam[0]
+    return Query(root=best_plan, triples_num=n), best_cost
+
+
+def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> Tuple[Query, float]:
+    """
+    Build a left-deep plan using beam search to find plans that MAXIMIZE cost.
+    Keeps top beam_width partial plans (by highest cost) at each step.
+    
+    Args:
+        triples: List of triple patterns (each is [subject, predicate, object])
+        beam_width: Number of top plans to keep at each step (1 = greedy)
+        
+    Returns:
+        Tuple of (Query object, final_cost) - the worst plan and its cost
+    """
+    triple_objs = [Triple(*(Entity(name=name) for name in t[:3])) for t in triples]
+    n = len(triple_objs)
+    
+    if n == 1:
+        cost = triple_objs[0].get_cost()
+        return Query(root=triple_objs[0], triples_num=1), cost
+    
+    # Initialize beam with single triples
+    # Each beam entry: (cost, plan, used_indices_frozenset)
+    beam = []
+    for i in range(n):
+        try:
+            cost = triple_objs[i].get_cost()
+            beam.append((cost, triple_objs[i], frozenset({i})))
+        except Exception:
+            continue
+    
+    if not beam:
+        # Fallback if all failed
+        beam = [(0, triple_objs[0], frozenset({0}))]
+    
+    # Sort by cost (descending) and keep top beam_width
+    beam.sort(key=lambda x: x[0], reverse=True)
+    beam = beam[:beam_width]
+    
+    # Expand beam n-1 times (add one triple at each step)
+    for _ in range(n - 1):
+        candidates = []
+        
+        for current_cost, current_plan, used in beam:
+            remaining = set(range(n)) - used
+            
+            for idx in remaining:
+                new_plan = Join(left=current_plan, right=triple_objs[idx])
+                try:
+                    new_cost = new_plan.get_cost()
+                    candidates.append((new_cost, new_plan, used | {idx}))
+                except Exception:
+                    continue
+        
+        if not candidates:
+            break
+            
+        # Sort by cost (descending) and keep top beam_width
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        beam = candidates[:beam_width]
+    
+    # Return the worst (highest cost) complete plan
+    worst_cost, worst_plan, _ = beam[0]
+    return Query(root=worst_plan, triples_num=n), worst_cost
+
+
+def create_diverse_join_orders(triples: List[List[str]], num_random: int = 3, 
+                                beam_width: int = 1) -> List[Tuple[Query, Optional[float]]]:
+    """
+    Create a diverse set of join orders including:
+    - 1 beam-search-best plan (minimizes real execution cost)
+    - 1 beam-search-worst plan (maximizes real execution cost)
+    - num_random random plans (for coverage of middle ground)
+    
+    Args:
+        triples: List of triple patterns
+        num_random: Number of random plans to generate
+        beam_width: Beam width for search (1 = greedy, higher = more exploration)
+        
+    Returns:
+        List of (Query, cost_or_None) tuples. Beam search plans include pre-computed costs,
+        random plans have None (cost calculated later).
+    """
+    plans = []
+    
+    # 1. Beam search best plan (comes with pre-computed cost)
+    try:
+        best_plan, best_cost = beam_search_best_plan(triples, beam_width=beam_width)
+        plans.append((best_plan, best_cost))
+    except Exception as e:
+        print(f"Error creating beam-search-best plan: {e}")
+    
+    # 2. Beam search worst plan (comes with pre-computed cost)
+    try:
+        worst_plan, worst_cost = beam_search_worst_plan(triples, beam_width=beam_width)
+        plans.append((worst_plan, worst_cost))
+    except Exception as e:
+        print(f"Error creating beam-search-worst plan: {e}")
+    
+    # 3. Random plans (cost will be calculated later)
+    for i in range(num_random):
+        try:
+            plan = random_join_order(triples, seed=i + 42)
+            plans.append((plan, None))
+        except Exception as e:
+            print(f"Error creating random plan {i}: {e}")
+    
+    return plans
+
+def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans: int = 10, 
+                          use_diverse_plans: bool = False, num_random_plans: int = 3,
+                          beam_width: int = 1) -> SPARQLQuery:
+    """
+    Convert a raw query to a SPARQLQuery with multiple join plans and costs.
+    
+    Args:
+        query_data: Dictionary containing query data with "triples" key
+        rdf2vec_dict: Dictionary of RDF2Vec embeddings
+        counts_dict: Dictionary of entity counts
+        num_plans: Number of random plans (used when use_diverse_plans=False)
+        use_diverse_plans: If True, use beam-search-best, beam-search-worst, and random plans
+        num_random_plans: Number of random plans when using diverse mode
+        beam_width: Beam width for search (1 = greedy, higher = more exploration)
+        
+    Returns:
+        SPARQLQuery object with multiple join plans
+    """
     triples = query_data["triples"]
-    join_plans = create_random_join_orders(triples, num_plans, rdf2vec_dict, counts_dict)
+    
+    if use_diverse_plans:
+        # Use diverse plan generation: beam-search-best, beam-search-worst, and random plans
+        # Returns List[Tuple[Query, Optional[float]]] - plans with pre-computed costs where available
+        plans_with_costs = create_diverse_join_orders(triples, num_random=num_random_plans, 
+                                                       beam_width=beam_width)
+    else:
+        # Use purely random plans (original behavior)
+        # Wrap in tuples with None cost for uniform handling
+        raw_plans = create_random_join_orders(triples, num_plans, rdf2vec_dict, counts_dict)
+        plans_with_costs = [(plan, None) for plan in raw_plans]
     
     # Calculate cost for each plan and create torch_data
     costs = []
     torch_data_list = []
     triples_where_list = []
+    final_join_plans = []  # Store just the Query objects for SPARQLQuery
     
     # Create mapping from triple pattern to index (create once and reuse)
     triple_objs = [Triple(*(Entity(name=name) for name in triple[:3])) for triple in triples]
@@ -98,16 +297,21 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
 
     cost_error = False
 
-    for plan in join_plans:
+    for plan, precomputed_cost in plans_with_costs:
         try:
-            # Calculate cost
-            try:
-                cost = plan.root.get_cost() 
-            except RuntimeError as e:
-                print(f"Error calculating cost: {e}")
-                cost_error = True
-                break
+            # Use pre-computed cost if available, otherwise calculate
+            if precomputed_cost is not None:
+                cost = precomputed_cost
+            else:
+                try:
+                    cost = plan.root.get_cost() 
+                except RuntimeError as e:
+                    print(f"Error calculating cost: {e}")
+                    cost_error = True
+                    break
+            
             costs.append(cost)
+            final_join_plans.append(plan)
             
             # Create torch_data with consistent triple indices
             datapoint = join_order_to_adjacency_matrix_consistent(plan, triple_to_index, rdf2vec=rdf2vec_dict, counts=counts_dict)
@@ -129,7 +333,7 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
     
     return SPARQLQuery(
         triples=triples, 
-        join_plans=join_plans, 
+        join_plans=final_join_plans, 
         costs=costs,
         torch_data=torch_data_list,
         triples_where=triples_where_list
@@ -328,36 +532,46 @@ def visualize_and_save_plans(sparql_query: SPARQLQuery, query_idx: int, output_d
 
 if __name__ == "__main__":
     # Load the RDF2Vec embeddings
-    with open("datasets/graphs/wikidata/rdf2vec100dim.pkl", "rb") as f:
+    with open("datasets/graphs/lubm/rdf2vec100dim.pkl", "rb") as f:
         rdf2vec_dict = pickle.load(f)
         print(len(rdf2vec_dict))
 
 
     # Load the counts
-    with open("datasets/graphs/wikidata/counts.pkl", "rb") as f:
+    with open("datasets/graphs/lubm/counts.pkl", "rb") as f:
         counts_dict = pickle.load(f)
 
     
     # Queries to generate random plans for
-    input_file = "datasets/queries/wikidata/star/star_queries.json"
+    input_file = "datasets/queries/lubm/stars/star_queries.json"
 
     # Directory to save the plans
-    dataset_dir = "datasets/plans/wikidata/star/plans/new_dataset"
+    dataset_dir = "datasets/plans/lubm/star/plans/new_dataset"
 
     #visualization_dir = "join_plan_visualizations_path_wikidata"
-    sparql_queries_file = "sparql_queries_path_wikidata/queries.pkl"
+    sparql_queries_file = "sparql_queries_star_lubm/queries.pkl"
 
 
     # How many queries to process
-    MAX_QUERIES = 200000000000000000
+    MAX_QUERIES = 20
 
     # The minimum cardinality of the queries to process
     MIN_CARDINALITY = 1
     #N_TRIPLES = 5
     SAVE_INTERVAL = 1000
 
+    # Plan generation configuration
+    USE_DIVERSE_PLANS = True  # If True: generate beam-search-best, beam-search-worst, and random plans
+                               # If False: generate only random plans (original behavior)
+    
+    # Beam width for beam search (1 = greedy, higher = more exploration)
+    # Complexity: O(n^2 * beam_width) per query
+    BEAM_WIDTH = 2
+    
     # Number of random plans to create per query
-    NUM_RANDOM_PLANS = 2
+    # When USE_DIVERSE_PLANS=True: total plans = 2 (beam search) + NUM_RANDOM_PLANS
+    # When USE_DIVERSE_PLANS=False: total plans = NUM_RANDOM_PLANS
+    NUM_RANDOM_PLANS = 3
     
     # Create visualization directory
     #os.makedirs(visualization_dir, exist_ok=True)
@@ -385,9 +599,20 @@ if __name__ == "__main__":
     for i, query in enumerate(tqdm(queries[:MAX_QUERIES], desc="Processing queries")):
 
         try:
-            sparql_query = query_to_sparql_query(query, rdf2vec_dict, counts_dict, num_plans=NUM_RANDOM_PLANS)
+            sparql_query = query_to_sparql_query(
+                query, rdf2vec_dict, counts_dict, 
+                num_plans=NUM_RANDOM_PLANS,
+                use_diverse_plans=USE_DIVERSE_PLANS,
+                num_random_plans=NUM_RANDOM_PLANS,
+                beam_width=BEAM_WIDTH
+            )
             if sparql_query is None:
                 continue
+
+            # check if all costs are the same
+            if all(cost == sparql_query.costs[0] for cost in sparql_query.costs):
+                continue
+
             sparql_queries.append(sparql_query)
             n_queries += 1
             if n_queries > MAX_QUERIES:
@@ -424,5 +649,6 @@ if __name__ == "__main__":
     # Save final results
     print("\nSaving final results...")
     save_dataset_single_file(all_triples, all_torch_data, dataset_dir)
-    
+    #save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
+
     print("\nDataset creation complete!")

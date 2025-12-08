@@ -78,6 +78,8 @@ def optimize_query_gumbel(
         optimiser = optim.AdamW([edge_logits, edge_logits_slot2], lr=learning_rate)
     else:
         optimiser = optim.AdamW([edge_logits], lr=learning_rate)
+        # SGD with momentum
+        #optimiser = optim.SGD([edge_logits], lr=learning_rate, momentum=0.9)
     
 
     # Optional Learning rate scheduler for warmup and decay
@@ -1046,3 +1048,327 @@ def optimize_query_gumbel_efficient_reduced(
         predicted_cost_exp = float(np.exp(final_log_cost))
 
     return final_A, triples_num, predicted_cost_exp
+
+
+def optimize_query_neuralsort(
+    query_data,
+    model,
+    device: str = "cpu",
+    *,
+    optimization_steps: int = 500,
+    learning_rate: float = 0.1,
+    init_tau: float = 1.0,
+    tau_decay: float = 0.99,
+    min_tau: float = 0.05,
+    save_animation_data: bool = False,
+    return_best: bool = True,
+    **kwargs
+):
+    """
+    Optimizes the join order by learning a permutation matrix (Sinkhorn) 
+    and mapping it to a fixed Left-Deep topology.
+    This avoids invalid plan penalties entirely.
+    """
+    model.eval()
+    data = query_data.to(device)
+    N_NODES = data.x.size(0)
+    triples_num = (N_NODES + 1) // 2
+    
+    # We only permute the triples
+    # log_alpha[i, j] = Log-Prob that Triple j is at Position i
+    log_alpha = torch.zeros((triples_num, triples_num), device=device, requires_grad=True)
+    # Initialize near uniform
+    torch.nn.init.uniform_(log_alpha, -0.1, 0.1)
+    
+    optimizer = optim.Adam([log_alpha], lr=learning_rate)
+    
+    # Pre-compute fixed structure for Left-Deep Tree
+    # Nodes in the "Virtual" tree:
+    # 0..triples_num-1 : Leaf Positions
+    # triples_num..N_NODES-1 : Join Nodes
+    
+    # We construct the edge_index for the Fixed Left-Deep Tree once
+    # (Child -> Parent)
+    src_list = []
+    dst_list = []
+    
+    # Join 0 (idx=triples_num) connects Pos 0 and Pos 1
+    if triples_num > 1:
+        src_list.extend([0, 1])
+        dst_list.extend([triples_num, triples_num])
+        
+        # Subsequent joins
+        for k in range(1, triples_num - 1):
+            join_idx = triples_num + k
+            prev_join_idx = triples_num + k - 1
+            leaf_pos = k + 1
+            
+            # Edges: PrevJoin -> Join, Leaf -> Join
+            src_list.extend([prev_join_idx, leaf_pos])
+            dst_list.extend([join_idx, join_idx])
+            
+    fixed_edge_index = torch.tensor([src_list, dst_list], dtype=torch.long, device=device)
+    
+    # Join features (constant)
+    join_features = data.x[triples_num:].clone()
+    
+    best_cost = float('inf')
+    best_perm = None
+    
+    for step in range(optimization_steps):
+        optimizer.zero_grad()
+        
+        # Temperature annealing
+        tau = max(min_tau, init_tau * (tau_decay ** step))
+        
+        # Gumbel-Sinkhorn
+        noise = -torch.log(-torch.log(torch.rand_like(log_alpha) + 1e-10) + 1e-10)
+        noisy_logits = (log_alpha + noise) / tau
+        
+        # Sinkhorn Iterations
+        log_P = noisy_logits
+        for _ in range(10):
+            log_P = log_P - torch.logsumexp(log_P, dim=-1, keepdim=True)
+            log_P = log_P - torch.logsumexp(log_P, dim=-2, keepdim=True)
+        P = torch.exp(log_P)
+        
+        # Permute Triple Features
+        # P[i, j] is prob that Position i gets Triple j
+        # Feature_at_Pos_i = sum_j P[i, j] * Feature_Triple_j
+        # Shape: (triples_num, F)
+        permuted_triples = torch.matmul(P, data.x[:triples_num])
+        
+        # Construct full node features
+        node_feats = torch.cat([permuted_triples, join_features], dim=0)
+        
+        # Predict Cost
+        cost_pred = model(node_feats, fixed_edge_index)
+        
+        # Loss
+        loss = cost_pred
+        loss.backward()
+        optimizer.step()
+        
+        # Track Best (Hard Evaluation)
+        if return_best:
+            with torch.no_grad():
+                # Check current prediction quality
+                if cost_pred.item() < best_cost:
+                    best_cost = cost_pred.item()
+                    best_perm = log_alpha.detach().clone()
+
+    # Final Decoding
+    final_log_alpha = best_perm if best_perm is not None else log_alpha
+    
+    # Convert to Hard Permutation (Greedy Argmax or Hungarian)
+    try:
+        from scipy.optimize import linear_sum_assignment
+        row_ind, col_ind = linear_sum_assignment(final_log_alpha.cpu().numpy(), maximize=True)
+        # col_ind[i] is the triple index assigned to position i
+        # sort by row_ind to get proper array
+        # row_ind is usually 0..N-1 sorted, but good to be safe
+        # We want: position 0 has triple X, pos 1 has triple Y...
+        # linear_sum_assignment returns (row_ind, col_ind) such that cost is maximized.
+        # we want to maximize prob (log_alpha).
+        # result: row_ind[k] -> col_ind[k]
+        # if row_ind is [0, 1, 2...], then col_ind is [triple_for_pos_0, triple_for_pos_1...]
+        
+        # We sort by row_ind to ensure order 0..N-1
+        zipped = sorted(zip(row_ind, col_ind))
+        perm_indices = torch.tensor([c for r, c in zipped], device=device)
+        
+    except ImportError:
+        # Fallback: simple argmax
+        _, perm_indices = torch.topk(final_log_alpha, k=1, dim=1)
+        perm_indices = perm_indices.squeeze()
+
+    # Reconstruct Adjacency Matrix from Permutation
+    final_src = []
+    final_dst = []
+    
+    fixed_src = fixed_edge_index[0].cpu().numpy()
+    fixed_dst = fixed_edge_index[1].cpu().numpy()
+    perm_map = perm_indices.cpu().numpy()
+    
+    for s, d in zip(fixed_src, fixed_dst):
+        # Map Source
+        if s < triples_num: # Leaf
+            if triples_num == 1: # Edge case
+                 real_s = 0
+            else:
+                 real_s = perm_map[s]
+        else: # Join
+            real_s = s
+            
+        # Map Dest
+        if d < triples_num: # Leaf
+             # Should not happen for Dst in Left-Deep
+             real_d = perm_map[d]
+        else: # Join
+            real_d = d
+            
+        final_src.append(real_s)
+        final_dst.append(real_d)
+        
+    final_A = torch.zeros((N_NODES, N_NODES), device=device)
+    final_A[final_src, final_dst] = 1.0
+    
+    # Final Cost
+    with torch.no_grad():
+        final_edge_idx = torch.tensor([final_src, final_dst], device=device)
+        final_log_cost = model(data.x, final_edge_idx).item()
+        final_cost = float(np.exp(final_log_cost))
+
+    if save_animation_data:
+        return final_A, triples_num, final_cost, None
+    else:
+        return final_A, triples_num, final_cost
+
+
+def optimize_query_neuralsort_v2(
+    query_data,
+    model,
+    device: str = "cpu",
+    *,
+    optimization_steps: int = 500,
+    learning_rate: float = 0.1,
+    init_tau: float = 1.0,
+    tau_decay: float = 0.99,
+    min_tau: float = 0.1,
+    save_animation_data: bool = False,
+    return_best: bool = True,
+    **kwargs
+):
+    """
+    Pure NeuralSort implementation (Grover et al., ICLR 2019).
+    
+    Instead of learning an n×n matrix, we learn a 1D score vector.
+    The permutation matrix is computed deterministically via the NeuralSort formula.
+    """
+    model.eval()
+    data = query_data.to(device)
+    N_NODES = data.x.size(0)
+    triples_num = (N_NODES + 1) // 2
+    
+
+    scores = torch.zeros(triples_num, device=device, requires_grad=True)
+    torch.nn.init.uniform_(scores, -0.1, 0.1)
+    
+    optimizer = optim.Adam([scores], lr=learning_rate)
+    
+    # Pre-compute fixed Left-Deep topology (same as before)
+    src_list = []
+    dst_list = []
+    
+    if triples_num > 1:
+        src_list.extend([0, 1])
+        dst_list.extend([triples_num, triples_num])
+        
+        for k in range(1, triples_num - 1):
+            join_idx = triples_num + k
+            prev_join_idx = triples_num + k - 1
+            leaf_pos = k + 1
+            src_list.extend([prev_join_idx, leaf_pos])
+            dst_list.extend([join_idx, join_idx])
+            
+    fixed_edge_index = torch.tensor([src_list, dst_list], dtype=torch.long, device=device)
+    join_features = data.x[triples_num:].clone()
+    
+    best_cost = float('inf')
+    best_scores = None
+    
+    # Pre-compute position weights: (n+1-2i) for i in 1..n
+    # In 0-indexed: (n-1-2i) for i in 0..n-1, but paper uses 1-indexed
+    # So for position i (0-indexed): weight = (n + 1 - 2*(i+1)) = (n - 1 - 2i)
+    n = triples_num
+    position_weights = torch.tensor(
+        [n - 1 - 2 * i for i in range(n)], 
+        device=device, 
+        dtype=torch.float32
+    )  # Shape: (n,)
+    
+    for step in range(optimization_steps):
+        optimizer.zero_grad()
+        
+        # Temperature annealing
+        tau = max(min_tau, init_tau * (tau_decay ** step))
+        
+        # ========================================
+        # NeuralSort Formula (Equation 6)
+        # ========================================
+        # P[i, j] = softmax((n+1-2*(i+1)) * s / tau)[j]
+        # 
+        # For each row i, we compute:
+        #   logits[i, :] = position_weights[i] * scores / tau
+        #   P[i, :] = softmax(logits[i, :])
+        
+        # Outer product: (n,) × (n,) -> (n, n)
+        # logits[i, j] = position_weights[i] * scores[j] / tau
+        logits = torch.outer(position_weights, scores) / tau  # Shape: (n, n)
+        
+        # Softmax over columns (which table goes to each position)
+        P = torch.softmax(logits, dim=1)  # Shape: (n, n)
+        # P[i, j] = probability that position i gets table j
+        
+        # Permute Triple Features
+        permuted_triples = torch.matmul(P, data.x[:triples_num])
+        
+        # Construct full node features
+        node_feats = torch.cat([permuted_triples, join_features], dim=0)
+        
+        # Predict Cost
+        cost_pred = model(node_feats, fixed_edge_index)
+        
+        # Loss = just the cost (no penalties needed!)
+        loss = cost_pred
+        loss.backward()
+        optimizer.step()
+        
+        # Track Best
+        if return_best and cost_pred.item() < best_cost:
+            best_cost = cost_pred.item()
+            best_scores = scores.detach().clone()
+    
+    # ========================================
+    # Final Decoding: Simple argsort
+    # ========================================
+    final_scores = best_scores if best_scores is not None else scores.detach()
+    
+    # Higher score = earlier position (descending sort)
+    perm_indices = torch.argsort(final_scores, descending=True)
+    
+    # Reconstruct Adjacency Matrix from Permutation
+    final_src = []
+    final_dst = []
+    
+    fixed_src = fixed_edge_index[0].cpu().numpy()
+    fixed_dst = fixed_edge_index[1].cpu().numpy()
+    perm_map = perm_indices.cpu().numpy()
+    
+    for s, d in zip(fixed_src, fixed_dst):
+        if s < triples_num:
+            real_s = perm_map[s]
+        else:
+            real_s = s
+            
+        if d < triples_num:
+            real_d = perm_map[d]
+        else:
+            real_d = d
+            
+        final_src.append(real_s)
+        final_dst.append(real_d)
+        
+    final_A = torch.zeros((N_NODES, N_NODES), device=device)
+    final_A[final_src, final_dst] = 1.0
+    
+    # Final Cost
+    with torch.no_grad():
+        final_edge_idx = torch.tensor([final_src, final_dst], device=device)
+        final_log_cost = model(data.x, final_edge_idx).item()
+        final_cost = float(np.exp(final_log_cost))
+
+    if save_animation_data:
+        return final_A, triples_num, final_cost, None
+    else:
+        return final_A, triples_num, final_cost

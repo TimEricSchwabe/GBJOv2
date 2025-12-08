@@ -33,11 +33,12 @@ from model import CostGNNv2
 
 from optimization import (
     optimize_query_gumbel,
-    optimize_query_gumbel_efficient_reduced,
+    optimize_query_neuralsort,
     greedy_optimize_query,
     random_join_plan,
     dp_leftdeep_best_plan,
-    exhaustive_leftdeep_best_plan
+    exhaustive_leftdeep_best_plan,
+    optimize_query_neuralsort_v2
 )
 
 from utils.data_utils import (
@@ -49,6 +50,9 @@ from utils.data_utils import (
     plans_are_equivalent,
     load_sparql_queries,
 )
+
+# Import plotting functions
+from visualization.plot_optimization_results import extract_costs_and_metrics, plot_statistics
 
 # Add module compatibility for old pickle files
 import sys
@@ -64,13 +68,13 @@ def process_single_query(args):
     
     Args:
         args: Tuple containing (query_index, query, model_path, device_str, optimization_params, 
-              optimization_function_name, use_exhaustive, use_true_costs, use_dp, optimization_steps)
+              optimization_function_name, use_exhaustive, use_true_costs, use_dp, optimization_steps, dp_limit)
     
     Returns:
         Dictionary with detailed results for this query
     """
     (query_index, query, model_path, device_str, optimization_params, 
-     optimization_function_name, use_exhaustive, use_true_costs, use_dp, optimization_steps) = args
+     optimization_function_name, use_exhaustive, use_true_costs, use_dp, optimization_steps, dp_limit) = args
     
     # Set device
     device = torch.device(device_str)
@@ -87,6 +91,12 @@ def process_single_query(args):
     # Get optimization function
     if optimization_function_name == 'optimize_query_gumbel':
         optimization_function = optimize_query_gumbel
+    elif optimization_function_name == 'optimize_query_gumbel_lbfgs':
+        optimization_function = optimize_query_gumbel_lbfgs
+    elif optimization_function_name == 'optimize_query_neuralsort':
+        optimization_function = optimize_query_neuralsort
+    elif optimization_function_name == 'optimize_query_neuralsort_v2':
+        optimization_function = optimize_query_neuralsort_v2
     else:
         raise ValueError(f"Unknown optimization function: {optimization_function_name}")
     
@@ -117,7 +127,8 @@ def process_single_query(args):
         best_pred_plan = None
         true_cost_best_pred = float('inf')
         
-        if use_dp and len(query_triples) <= 9:
+        # Only run DP if enabled AND query size is within the limit
+        if use_dp and len(query_triples) <= dp_limit:
             try:
                 best_adj, best_pred_cost = dp_leftdeep_best_plan(torch_data, model, device)
                 triples_num = len(triple_objs)
@@ -287,7 +298,7 @@ def process_single_query(args):
 
 def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None, optimization_steps=500, 
                                  optimization_params=None, optimization_function=None, save_directory=".", 
-                                 use_exhaustive=True, use_true_costs=True, use_dp=True, num_workers=None):
+                                 use_exhaustive=True, use_true_costs=True, use_dp=True, num_workers=None, dp_limit=9):
     """
     Evaluate the optimization algorithm on the given SPARQL queries in parallel.
     
@@ -303,6 +314,7 @@ def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None,
         use_true_costs: Whether to calculate true costs for plans (default: True)
         use_dp: Whether to perform dynamic programming search (default: True)
         num_workers: Number of parallel workers (default: number of CPU cores)
+        dp_limit: Maximum number of triples for DP execution (default: 9)
         
     Returns:
         List of detailed results for each query
@@ -332,7 +344,7 @@ def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None,
     args_list = []
     for i, query in enumerate(sparql_queries):
         args = (i, query, model_path, device_str, optimization_params, 
-                optimization_function_name, use_exhaustive, use_true_costs, use_dp, optimization_steps)
+                optimization_function_name, use_exhaustive, use_true_costs, use_dp, optimization_steps, dp_limit)
         args_list.append(args)
     
     # Process queries in parallel
@@ -456,18 +468,20 @@ if __name__ == "__main__":
     }
 
     config_lubm_star = {
-        "queries_file": "/home/tim/query_optimization/datasets/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
-        "model_path": "/home/tim/query_optimization/explicit_join_model/models/lubm/star_model.pt",
-        "num_queries": 100,
-        "optimization_steps": 500,
+        "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
+        "model_path": "/home/tim/query_optimization/datasets/models/lubm/star_model.pt",
+        "num_queries": 20,
+        "max_query_size": None,  # Filter queries larger than this (None for no filter)
+        "optimization_steps": 1000,
         "use_exhaustive": False,
-        "use_dp": False,
-        "use_true_costs": False,
+        "use_dp": True,
+        "dp_limit": 9,  # Set the limit here (e.g., 15 for star queries)
+        "use_true_costs": True,
         "save_path": "optimization_results",
         "num_workers": 6,  # Use all available cores
         "optimization_params": {
             "optimization_procedure": "gumbel",
-            "k": 1,  # Number of gradient optimization runs
+            "k": 5,  # Number of gradient optimization runs
             "learning_rate": 1.7,
             "lambda_acyclic": 3081.0,
             "lambda_triple_in": 3714.0,
@@ -484,7 +498,7 @@ if __name__ == "__main__":
             "return_best": True,
             "min_penalty_threshold": 5,
             "use_lambda_ramping": True,
-            "logit_sampling": "dual-softmax",
+            "logit_sampling": "sigmoid",
             "save_animation_data": False,
             "animation_save_interval": 10,
             "lambda_ramp_exponent": 6.5,
@@ -498,28 +512,28 @@ if __name__ == "__main__":
     config_lubm_path = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl",
         "model_path": "/home/tim/query_optimization/datasets/models/lubm/path_model.pt",
-        "num_queries": 2000000000000,
+        "num_queries": 20,
         "optimization_steps": 1000,
         "use_exhaustive": False,
         "use_dp": True,
-        "use_true_costs": False,
+        "use_true_costs": True,
         "save_path": "optimization_results",
         "num_workers": None,  # Use all available cores
         "optimization_params": {
             "optimization_procedure": "gumbel",
-            "k": 1,  # Number of gradient optimization runs
-            "learning_rate": 1.8,
+            "k": 5,  # Number of gradient optimization runs - 5
+            "learning_rate": 1.8, # 1.8
             "lambda_acyclic": 4415.0,
             "lambda_triple_in": 3027.0,
             "lambda_triple_out": 790.0,
             "lambda_join_in": 2197.0,
             "lambda_join_out": 2204.0,
-            "lambda_entropy": 0.0,
+            "lambda_entropy": 0, # 0
             "lambda_total_penalty": 4.2 ,#4.2
-            "lambda_left_linear": 1910.0,
-            "init_tau": 3.7,
+            "lambda_left_linear": 1910, # 1910
+            "init_tau": 3.7, #3.7
             "min_tau": 1.0,
-            "tau_decay": 0.963,
+            "tau_decay": 0.963, # 0.963
             "use_temperature_annealing": True,
             "return_best": True,
             "min_penalty_threshold": 8.6,
@@ -527,7 +541,47 @@ if __name__ == "__main__":
             "logit_sampling": "dual-softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
-            "lambda_ramp_exponent": 6.8,
+            "lambda_ramp_exponent": 6.8, # 6.8
+            "lr_warmup_steps": 200,
+            "gradient_clip_norm": 1.9,
+            "use_lr_scheduling": True,
+            "decoding_method": "greedy"
+        }
+    }
+
+    config_lubm_path_gumbel_sinkhorn = {
+        "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
+        "model_path": "/home/tim/query_optimization/datasets/models/lubm/star_model.pt",
+        "num_queries": 20,
+        "optimization_steps": 1000,
+        "use_exhaustive": False,
+        "use_dp": True,
+        "use_true_costs": True,
+        "save_path": "optimization_results",
+        "num_workers": None,  # Use all available cores
+        "optimization_params": {
+            "optimization_procedure": "neuralsort_v2",
+            "k":3,  # Number of gradient optimization runs - 5
+            "learning_rate": 1, # 1.8
+            "lambda_acyclic": 4415.0,
+            "lambda_triple_in": 3027.0,
+            "lambda_triple_out": 790.0,
+            "lambda_join_in": 2197.0,
+            "lambda_join_out": 2204.0,
+            "lambda_entropy": 0.0,
+            "lambda_total_penalty": 4.2 ,#4.2
+            "lambda_left_linear": 1910, # 1910
+            "init_tau": 3.0, #3.7
+            "min_tau": 0.1,
+            "tau_decay": 0.985, # 0.963
+            "use_temperature_annealing": True,
+            "return_best": True,
+            "min_penalty_threshold": 8.6,
+            "use_lambda_ramping": True,
+            "logit_sampling": "softmax",
+            "save_animation_data": False,
+            "animation_save_interval": 10,
+            "lambda_ramp_exponent": 6.8, # 6.8
             "lr_warmup_steps": 200,
             "gradient_clip_norm": 1.9,
             "use_lr_scheduling": True,
@@ -563,10 +617,25 @@ if __name__ == "__main__":
     # Load queries
     sparql_queries = load_sparql_queries(config['queries_file'], config['num_queries'])
     
+    # Filter queries by size if max_query_size is set
+    if config.get('max_query_size') is not None:
+        max_size = config['max_query_size']
+        print(f"Filtering queries with size > {max_size}")
+        original_len = len(sparql_queries)
+        sparql_queries = [q for q in sparql_queries if len(q.triples) <= max_size]
+        print(f"Retained {len(sparql_queries)}/{original_len} queries")
+        
+        # Update num_queries in config for accurate logging
+        config['num_queries'] = len(sparql_queries)
+    
     # Select optimization function based on config
     optimization_procedure = config['optimization_params'].pop('optimization_procedure')
     if optimization_procedure == 'gumbel':
-        optimization_function = optimize_query_gumbel
+        optimization_function = optimize_query_gumbel 
+    elif optimization_procedure == 'neuralsort':
+        optimization_function = optimize_query_neuralsort
+    elif optimization_procedure == 'neuralsort_v2':
+        optimization_function = optimize_query_neuralsort_v2
     else:  # 'normal'
         raise ValueError(f"Invalid optimization procedure: {optimization_procedure}")
     
@@ -585,7 +654,8 @@ if __name__ == "__main__":
         use_exhaustive=config['use_exhaustive'],
         use_true_costs=config.get('use_true_costs', True),
         use_dp=config.get('use_dp', True),
-        num_workers=config.get('num_workers', None)
+        num_workers=config.get('num_workers', None),
+        dp_limit=config.get('dp_limit', 9)  # Pass dp_limit from config or default to 9
     )
     
     end_time = time.time()
@@ -606,6 +676,16 @@ if __name__ == "__main__":
     # Save summary statistics
     with open(os.path.join(save_directory, "summary_stats.json"), 'w') as f:
         json.dump(summary_stats, f, indent=2)
+    
+    # Generate plots automatically
+    try:
+        print("\nGenerating plots...")
+        stats = extract_costs_and_metrics(detailed_results)
+        plots_dir = os.path.join(save_directory, 'plots')
+        plot_statistics(stats, show_plots=False, save_directory=plots_dir)
+        print(f"Plots saved to: {plots_dir}")
+    except Exception as e:
+        print(f"Error generating plots: {e}")
     
     print(f"\n" + "="*50)
     print("PARALLEL EVALUATION COMPLETE")

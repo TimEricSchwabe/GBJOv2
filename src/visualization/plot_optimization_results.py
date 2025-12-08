@@ -20,18 +20,20 @@ plt.style.use('science')
 
 import argparse
 
-parser = argparse.ArgumentParser(
-    description="Plot optimization results from saved JSON data."
-)
-parser.add_argument(
-    "results_dir",
-    type=str,
-    nargs='?',
-    default="optimization_results/run_20250806_123347",
-    help="Directory containing detailed_results.json from an optimization run.",
-)
-args = parser.parse_args()
-RESULTS_DIR = args.results_dir
+RESULTS_DIR = None
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Plot optimization results from saved JSON data."
+    )
+    parser.add_argument(
+        "results_dir",
+        type=str,
+        nargs='?',
+        default="optimization_results/lubm_path_good_1",
+        help="Directory containing detailed_results.json from an optimization run.",
+    )
+    return parser.parse_args()
 
 OUTPUT_DIR = None 
 
@@ -42,7 +44,7 @@ SKIP_SCATTER = True
 SKIP_RATIOS = False
 SKIP_SIZE_ANALYSIS = False
 SKIP_SUMMARY = False
-EXCLUDE_TRUE_COSTS = True  # New flag to exclude true costs from plots
+EXCLUDE_TRUE_COSTS = False  # New flag to exclude true costs from plots
 
 # Data inclusion flags
 INCLUDE_PREDICTED = True  # Include predicted costs in boxplot
@@ -104,20 +106,20 @@ def check_data_availability(data: List[Dict]) -> Dict[str, bool]:
     if not data:
         return availability
     
-    # Check the first query result to see what methods are available
-    first_query = data[0]
-    if 'plans' in first_query:
-        for method in ['exhaustive', 'greedy', 'gradient', 'dp', 'random']:
-            if method in first_query['plans']:
-                availability[method] = True
-                # Check if real and predicted costs are available
-                plan_data = first_query['plans'][method]
-                if 'real_cost' in plan_data and plan_data['real_cost'] is not None:
-                    availability[f'{method}_real'] = True
-                if 'predicted_cost' in plan_data and plan_data['predicted_cost'] is not None:
-                    availability[f'{method}_pred'] = True
+    # Check ALL queries to see what methods are available
+    # (some methods might be missing for some queries, e.g. DP for large queries)
+    for query_result in data:
+        if 'plans' in query_result:
+            for method in ['exhaustive', 'greedy', 'gradient', 'dp', 'random']:
+                if method in query_result['plans']:
+                    availability[method] = True
+                    # Check if real and predicted costs are available
+                    plan_data = query_result['plans'][method]
+                    if 'real_cost' in plan_data and plan_data['real_cost'] is not None:
+                        availability[f'{method}_real'] = True
+                    if 'predicted_cost' in plan_data and plan_data['predicted_cost'] is not None:
+                        availability[f'{method}_pred'] = True
 
-    
     print("Data availability:")
     for method in ['exhaustive', 'greedy', 'gradient', 'dp', 'random']:
         if availability[method]:
@@ -195,7 +197,8 @@ def extract_costs_and_metrics(data: List[Dict]) -> Dict[str, List[float]]:
             if real_cost == float('inf'):
                 infinite_costs.append('gradient')
         
-        if availability['random_real'] and 'random' in query_result['plans']:
+        # Only check random costs if we're actually using random in the plots
+        if availability['random_real'] and 'random' in query_result['plans'] and USE_RANDOM:
             real_cost = query_result['plans']['random'].get('real_cost')
             if real_cost == float('inf'):
                 infinite_costs.append('random')
@@ -205,79 +208,152 @@ def extract_costs_and_metrics(data: List[Dict]) -> Dict[str, List[float]]:
             continue
         
         # Extract costs for available methods
-        if availability['gradient'] and 'gradient' in query_result['plans']:
-            plan_data = query_result['plans']['gradient']
-            
-            if availability['gradient_real'] and 'real_cost' in plan_data:
-                real_cost = plan_data['real_cost']
-                if real_cost is not None and real_cost != float('inf'):
-                    stats['gradient_costs'].append(real_cost)
-                    stats['gradient_real'].append(real_cost)
-            
-            if availability['gradient_pred'] and 'predicted_cost' in plan_data:
-                pred_cost = plan_data['predicted_cost']
-                if pred_cost is not None and pred_cost != float('inf'):
-                    stats['gradient_pred'].append(pred_cost)
-                    stats['predicted_gradient_costs'].append(pred_cost)
+        # Gradient
+        if availability['gradient']:
+            if 'gradient' in query_result['plans']:
+                plan_data = query_result['plans']['gradient']
+                
+                if availability['gradient_real']:
+                    real_cost = plan_data.get('real_cost') if 'real_cost' in plan_data else None
+                    if real_cost is not None and real_cost != float('inf'):
+                        stats['gradient_costs'].append(real_cost)
+                        stats['gradient_real'].append(real_cost)
+                    else:
+                        stats['gradient_costs'].append(np.nan)
+                        stats['gradient_real'].append(np.nan)
+                
+                if availability['gradient_pred']:
+                    pred_cost = plan_data.get('predicted_cost') if 'predicted_cost' in plan_data else None
+                    if pred_cost is not None and pred_cost != float('inf'):
+                        stats['gradient_pred'].append(pred_cost)
+                        stats['predicted_gradient_costs'].append(pred_cost)
+                    else:
+                        stats['gradient_pred'].append(np.nan)
+                        stats['predicted_gradient_costs'].append(np.nan)
+            else:
+                if availability['gradient_real']:
+                    stats['gradient_costs'].append(np.nan)
+                    stats['gradient_real'].append(np.nan)
+                if availability['gradient_pred']:
+                    stats['gradient_pred'].append(np.nan)
+                    stats['predicted_gradient_costs'].append(np.nan)
         
-        if availability['greedy'] and 'greedy' in query_result['plans']:
-            plan_data = query_result['plans']['greedy']
-            
-            if availability['greedy_real'] and 'real_cost' in plan_data:
-                real_cost = plan_data['real_cost']
-                if real_cost is not None and real_cost != float('inf'):
-                    stats['greedy_costs'].append(real_cost)
-                    stats['greedy_real'].append(real_cost)
-            
-            if availability['greedy_pred'] and 'predicted_cost' in plan_data:
-                pred_cost = plan_data['predicted_cost']
-                if pred_cost is not None and pred_cost != float('inf'):
-                    stats['greedy_pred'].append(pred_cost)
-                    stats['predicted_greedy_costs'].append(pred_cost)
+        # Greedy
+        if availability['greedy']:
+            if 'greedy' in query_result['plans']:
+                plan_data = query_result['plans']['greedy']
+                
+                if availability['greedy_real']:
+                    real_cost = plan_data.get('real_cost') if 'real_cost' in plan_data else None
+                    if real_cost is not None and real_cost != float('inf'):
+                        stats['greedy_costs'].append(real_cost)
+                        stats['greedy_real'].append(real_cost)
+                    else:
+                        stats['greedy_costs'].append(np.nan)
+                        stats['greedy_real'].append(np.nan)
+                
+                if availability['greedy_pred']:
+                    pred_cost = plan_data.get('predicted_cost') if 'predicted_cost' in plan_data else None
+                    if pred_cost is not None and pred_cost != float('inf'):
+                        stats['greedy_pred'].append(pred_cost)
+                        stats['predicted_greedy_costs'].append(pred_cost)
+                    else:
+                        stats['greedy_pred'].append(np.nan)
+                        stats['predicted_greedy_costs'].append(np.nan)
+            else:
+                if availability['greedy_real']:
+                    stats['greedy_costs'].append(np.nan)
+                    stats['greedy_real'].append(np.nan)
+                if availability['greedy_pred']:
+                    stats['greedy_pred'].append(np.nan)
+                    stats['predicted_greedy_costs'].append(np.nan)
         
-        if availability['dp'] and 'dp' in query_result['plans']:
-            plan_data = query_result['plans']['dp']
-            
-            if availability['dp_real'] and 'real_cost' in plan_data:
-                real_cost = plan_data['real_cost']
-                if real_cost is not None and real_cost != float('inf'):
-                    stats['random_costs'].append(real_cost)  # Use DP as "random"
-                    stats['true_best_predicted_costs'].append(real_cost)
-                    stats['dp_real'].append(real_cost)
-            
-            if availability['dp_pred'] and 'predicted_cost' in plan_data:
-                pred_cost = plan_data['predicted_cost']
-                if pred_cost is not None and pred_cost != float('inf'):
-                    stats['predicted_best_costs'].append(pred_cost)
-                    stats['dp_pred'].append(pred_cost)
+        # DP
+        if availability['dp']:
+            if 'dp' in query_result['plans']:
+                plan_data = query_result['plans']['dp']
+                
+                if availability['dp_real']:
+                    real_cost = plan_data.get('real_cost') if 'real_cost' in plan_data else None
+                    if real_cost is not None and real_cost != float('inf'):
+                        stats['random_costs'].append(real_cost)  # Use DP as "random" for legacy reasons
+                        stats['true_best_predicted_costs'].append(real_cost)
+                        stats['dp_real'].append(real_cost)
+                    else:
+                        stats['random_costs'].append(np.nan)
+                        stats['true_best_predicted_costs'].append(np.nan)
+                        stats['dp_real'].append(np.nan)
+                
+                if availability['dp_pred']:
+                    pred_cost = plan_data.get('predicted_cost') if 'predicted_cost' in plan_data else None
+                    if pred_cost is not None and pred_cost != float('inf'):
+                        stats['predicted_best_costs'].append(pred_cost)
+                        stats['dp_pred'].append(pred_cost)
+                    else:
+                        stats['predicted_best_costs'].append(np.nan)
+                        stats['dp_pred'].append(np.nan)
+            else:
+                if availability['dp_real']:
+                    stats['random_costs'].append(np.nan)
+                    stats['true_best_predicted_costs'].append(np.nan)
+                    stats['dp_real'].append(np.nan)
+                if availability['dp_pred']:
+                    stats['predicted_best_costs'].append(np.nan)
+                    stats['dp_pred'].append(np.nan)
         
-        if availability['random'] and 'random' in query_result['plans']:
-            plan_data = query_result['plans']['random']
-            
-            if availability['random_real'] and 'real_cost' in plan_data:
-                real_cost = plan_data['real_cost']
-                if real_cost is not None and real_cost != float('inf'):
-                    stats['random_real'].append(real_cost)
-            
-            if availability['random_pred'] and 'predicted_cost' in plan_data:
-                pred_cost = plan_data['predicted_cost']
-                if pred_cost is not None and pred_cost != float('inf'):
-                    stats['random_pred'].append(pred_cost)
-                    stats['predicted_random_costs'].append(pred_cost)
+        # Random
+        if availability['random']:
+            if 'random' in query_result['plans']:
+                plan_data = query_result['plans']['random']
+                
+                if availability['random_real']:
+                    real_cost = plan_data.get('real_cost') if 'real_cost' in plan_data else None
+                    if real_cost is not None and real_cost != float('inf'):
+                        stats['random_real'].append(real_cost)
+                    else:
+                        stats['random_real'].append(np.nan)
+                
+                if availability['random_pred']:
+                    pred_cost = plan_data.get('predicted_cost') if 'predicted_cost' in plan_data else None
+                    if pred_cost is not None and pred_cost != float('inf'):
+                        stats['random_pred'].append(pred_cost)
+                        stats['predicted_random_costs'].append(pred_cost)
+                    else:
+                        stats['random_pred'].append(np.nan)
+                        stats['predicted_random_costs'].append(np.nan)
+            else:
+                if availability['random_real']:
+                    stats['random_real'].append(np.nan)
+                if availability['random_pred']:
+                    stats['random_pred'].append(np.nan)
+                    stats['predicted_random_costs'].append(np.nan)
         
-        if availability['exhaustive'] and 'exhaustive' in query_result['plans']:
-            plan_data = query_result['plans']['exhaustive']
-            
-            if availability['exhaustive_real'] and 'real_cost' in plan_data:
-                real_cost = plan_data['real_cost']
-                if real_cost is not None and real_cost != float('inf'):
-                    stats['exhaustive_real'].append(real_cost)
-            
-            if availability['exhaustive_pred'] and 'predicted_cost' in plan_data:
-                pred_cost = plan_data['predicted_cost']
-                if pred_cost is not None and pred_cost != float('inf'):
-                    stats['predicted_exhaustive_costs'].append(pred_cost)
-                    stats['exhaustive_pred'].append(pred_cost)
+        # Exhaustive
+        if availability['exhaustive']:
+            if 'exhaustive' in query_result['plans']:
+                plan_data = query_result['plans']['exhaustive']
+                
+                if availability['exhaustive_real']:
+                    real_cost = plan_data.get('real_cost') if 'real_cost' in plan_data else None
+                    if real_cost is not None and real_cost != float('inf'):
+                        stats['exhaustive_real'].append(real_cost)
+                    else:
+                        stats['exhaustive_real'].append(np.nan)
+                
+                if availability['exhaustive_pred']:
+                    pred_cost = plan_data.get('predicted_cost') if 'predicted_cost' in plan_data else None
+                    if pred_cost is not None and pred_cost != float('inf'):
+                        stats['predicted_exhaustive_costs'].append(pred_cost)
+                        stats['exhaustive_pred'].append(pred_cost)
+                    else:
+                        stats['predicted_exhaustive_costs'].append(np.nan)
+                        stats['exhaustive_pred'].append(np.nan)
+            else:
+                if availability['exhaustive_real']:
+                    stats['exhaustive_real'].append(np.nan)
+                if availability['exhaustive_pred']:
+                    stats['predicted_exhaustive_costs'].append(np.nan)
+                    stats['exhaustive_pred'].append(np.nan)
         
         if availability['exhaustive']:
             if 'greedy_equal_exhaustive' in query_result:
@@ -303,23 +379,22 @@ def extract_costs_and_metrics(data: List[Dict]) -> Dict[str, List[float]]:
     print(f"Real costs available for: {[method for method in ['exhaustive', 'greedy', 'gradient', 'dp', 'random'] if availability[f'{method}_real']]}")
     print(f"Predicted costs available for: {[method for method in ['exhaustive', 'greedy', 'gradient', 'dp', 'random'] if availability[f'{method}_pred']]}")
     
-    # Create filtered arrays for scatter plots (only include data where DP is available, i.e., query size <= 9)
+    # Create filtered arrays for scatter plots (only include data where DP is available)
     if len(stats['query_sizes']) > 0:
         for i, query_size in enumerate(stats['query_sizes']):
-            if query_size <= 9:  # DP cost estimates are only available up to query size 9
-                # Add DP predicted costs if available at this index
-                if i < len(stats['predicted_best_costs']):
-                    stats['predicted_best_costs_filtered'].append(stats['predicted_best_costs'][i])
-                    
-                    # Only add other method costs if DP cost is available at this index
-                    if i < len(stats['predicted_gradient_costs']):
-                        stats['predicted_gradient_costs_filtered'].append(stats['predicted_gradient_costs'][i])
-                    if i < len(stats['predicted_greedy_costs']):
-                        stats['predicted_greedy_costs_filtered'].append(stats['predicted_greedy_costs'][i])
-                    if i < len(stats['predicted_exhaustive_costs']):
-                        stats['predicted_exhaustive_costs_filtered'].append(stats['predicted_exhaustive_costs'][i])
+            # Check if DP predicted cost is available (not NaN)
+            if i < len(stats['predicted_best_costs']) and stats['predicted_best_costs'][i] is not None and not np.isnan(stats['predicted_best_costs'][i]):
+                stats['predicted_best_costs_filtered'].append(stats['predicted_best_costs'][i])
+                
+                # Only add other method costs if DP cost is available at this index
+                if i < len(stats['predicted_gradient_costs']):
+                    stats['predicted_gradient_costs_filtered'].append(stats['predicted_gradient_costs'][i])
+                if i < len(stats['predicted_greedy_costs']):
+                    stats['predicted_greedy_costs_filtered'].append(stats['predicted_greedy_costs'][i])
+                if i < len(stats['predicted_exhaustive_costs']):
+                    stats['predicted_exhaustive_costs_filtered'].append(stats['predicted_exhaustive_costs'][i])
     
-    print(f"Filtered arrays for scatter plots (query size <= 9): {len(stats['predicted_best_costs_filtered'])} queries")
+    print(f"Filtered arrays for scatter plots (DP available): {len(stats['predicted_best_costs_filtered'])} queries")
     
     # Store availability info in stats for use in plotting
     stats['_availability'] = availability
@@ -364,11 +439,11 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
     # Calculate mean costs for different strategies (only if real costs are available)
     if not EXCLUDE_TRUE_COSTS and has_any_real_costs:
         if has_gradient_real and len(stats['gradient_costs']) > 0:
-            mean_gradient = np.mean(stats['gradient_costs'])
+            mean_gradient = np.nanmean(stats['gradient_costs'])
             if has_greedy_real and len(stats['greedy_costs']) > 0:
-                mean_greedy = np.mean(stats['greedy_costs'])
+                mean_greedy = np.nanmean(stats['greedy_costs'])
             if has_dp_real and len(stats['random_costs']) > 0:
-                mean_random = np.mean(stats['random_costs'])
+                mean_random = np.nanmean(stats['random_costs'])
     
     has_predicted = 'predicted_best_costs' in stats and len(stats['predicted_best_costs']) > 0
     has_pred_grad = 'predicted_gradient_costs' in stats and len(stats['predicted_gradient_costs']) > 0
@@ -378,17 +453,17 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
     has_exhaustive_pred_data = has_exhaustive_pred and 'predicted_exhaustive_costs' in stats and len(stats['predicted_exhaustive_costs']) > 0
     
     if has_predicted:
-        mean_predicted = np.mean(stats['predicted_best_costs'])
+        mean_predicted = np.nanmean(stats['predicted_best_costs'])
     if has_pred_grad:
-        mean_pred_grad = np.mean(stats['predicted_gradient_costs'])
+        mean_pred_grad = np.nanmean(stats['predicted_gradient_costs'])
     if has_pred_greedy:
-        mean_pred_greedy = np.mean(stats['predicted_greedy_costs'])
+        mean_pred_greedy = np.nanmean(stats['predicted_greedy_costs'])
     if has_pred_random and USE_RANDOM:
-        mean_pred_random = np.mean(stats['predicted_random_costs'])
+        mean_pred_random = np.nanmean(stats['predicted_random_costs'])
     if has_true_best and not EXCLUDE_TRUE_COSTS and has_any_real_costs:
-        mean_true_best = np.mean(stats['true_best_predicted_costs'])
+        mean_true_best = np.nanmean(stats['true_best_predicted_costs'])
     if has_exhaustive_pred_data:
-        mean_exhaustive = np.mean(stats['predicted_exhaustive_costs'])
+        mean_exhaustive = np.nanmean(stats['predicted_exhaustive_costs'])
     
     # Plot mean costs comparison
     plt.figure(figsize=(12, 6))
@@ -456,34 +531,52 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
     # Only include real costs if they're available and not excluded
     if not EXCLUDE_TRUE_COSTS and has_any_real_costs:
         if has_gradient_real and len(stats['gradient_costs']) > 0:
-            data.append(stats['gradient_costs'])
-            labels_box.append('Gradient')
+            costs = [c for c in stats['gradient_costs'] if c is not None and not np.isnan(c)]
+            if costs:
+                data.append(costs)
+                labels_box.append('Gradient')
         if has_greedy_real and len(stats['greedy_costs']) > 0:
-            data.append(stats['greedy_costs'])
-            labels_box.append('Greedy')
+            costs = [c for c in stats['greedy_costs'] if c is not None and not np.isnan(c)]
+            if costs:
+                data.append(costs)
+                labels_box.append('Greedy')
         if has_dp_real and len(stats['random_costs']) > 0:
-            data.append(stats['random_costs'])
-            labels_box.append('DP')
+            costs = [c for c in stats['random_costs'] if c is not None and not np.isnan(c)]
+            if costs:
+                data.append(costs)
+                labels_box.append('DP')
     
     # Always include predicted costs if available
     if has_predicted:
-        data.append(stats['predicted_best_costs'])
-        labels_box.append('DP-Best')
+        costs = [c for c in stats['predicted_best_costs'] if c is not None and not np.isnan(c)]
+        if costs:
+            data.append(costs)
+            labels_box.append('DP-Best')
     if has_exhaustive_pred_data:
-        data.append(stats['predicted_exhaustive_costs'])
-        labels_box.append('Exhaustive')
+        costs = [c for c in stats['predicted_exhaustive_costs'] if c is not None and not np.isnan(c)]
+        if costs:
+            data.append(costs)
+            labels_box.append('Exhaustive')
     if has_pred_grad:
-        data.append(stats['predicted_gradient_costs'])
-        labels_box.append('GradPred')
+        costs = [c for c in stats['predicted_gradient_costs'] if c is not None and not np.isnan(c)]
+        if costs:
+            data.append(costs)
+            labels_box.append('GradPred')
     if has_pred_greedy:
-        data.append(stats['predicted_greedy_costs'])
-        labels_box.append('GreedyPred')
+        costs = [c for c in stats['predicted_greedy_costs'] if c is not None and not np.isnan(c)]
+        if costs:
+            data.append(costs)
+            labels_box.append('GreedyPred')
     if has_pred_random and USE_RANDOM:
-        data.append(stats['predicted_random_costs'])
-        labels_box.append('RandomPred')
+        costs = [c for c in stats['predicted_random_costs'] if c is not None and not np.isnan(c)]
+        if costs:
+            data.append(costs)
+            labels_box.append('RandomPred')
     if has_true_best and not EXCLUDE_TRUE_COSTS and has_any_real_costs:
-        data.append(stats['true_best_predicted_costs'])
-        labels_box.append('TrueBestPred')
+        costs = [c for c in stats['true_best_predicted_costs'] if c is not None and not np.isnan(c)]
+        if costs:
+            data.append(costs)
+            labels_box.append('TrueBestPred')
     
     if data:
         plt.boxplot(data, labels=labels_box)
@@ -503,26 +596,48 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
     # Calculate and print ratio comparisons if not excluding true costs and real costs are available
     if not EXCLUDE_TRUE_COSTS and has_dp_real:
         if has_gradient_real and len(stats['gradient_costs']) > 0 and len(stats['random_costs']) > 0:
-            gradient_to_random_ratio = np.mean(np.array(stats['gradient_costs']) / np.array(stats['random_costs']))
-            print(f"Mean ratio of gradient optimizer cost to DP cost: {gradient_to_random_ratio:.2f}x")
+            # Create masked arrays to handle NaNs
+            grad_costs = np.array(stats['gradient_costs'])
+            dp_costs = np.array(stats['random_costs'])
             
-            # Calculate how often gradient beats DP
-            gradient_costs = np.array(stats['gradient_costs'])
-            random_costs = np.array(stats['random_costs'])
-            gradient_wins = np.sum(gradient_costs < random_costs)
-            gradient_win_pct = gradient_wins / len(gradient_costs) * 100
-            print(f"Gradient optimizer beats DP in {gradient_win_pct:.1f}% of queries")
+            # Filter where both are valid
+            valid_mask = ~(np.isnan(grad_costs) | np.isnan(dp_costs))
+            
+            if np.sum(valid_mask) > 0:
+                valid_grad = grad_costs[valid_mask]
+                valid_dp = dp_costs[valid_mask]
+                
+                gradient_to_random_ratio = np.mean(valid_grad / valid_dp)
+                print(f"Mean ratio of gradient optimizer cost to DP cost: {gradient_to_random_ratio:.2f}x")
+                
+                # Calculate how often gradient beats DP
+                gradient_wins = np.sum(valid_grad < valid_dp)
+                gradient_win_pct = gradient_wins / len(valid_grad) * 100
+                print(f"Gradient optimizer beats DP in {gradient_win_pct:.1f}% of queries ({gradient_wins}/{len(valid_grad)})")
+            else:
+                gradient_win_pct = 0
         
         if has_greedy_real and len(stats['greedy_costs']) > 0 and len(stats['random_costs']) > 0:
-            greedy_to_random_ratio = np.mean(np.array(stats['greedy_costs']) / np.array(stats['random_costs']))
-            print(f"Mean ratio of greedy heuristic cost to DP cost: {greedy_to_random_ratio:.2f}x")
+            # Create masked arrays to handle NaNs
+            greedy_costs_arr = np.array(stats['greedy_costs'])
+            dp_costs = np.array(stats['random_costs'])
             
-            # Calculate how often greedy beats DP
-            greedy_costs = np.array(stats['greedy_costs'])
-            random_costs = np.array(stats['random_costs'])
-            greedy_wins = np.sum(greedy_costs < random_costs)
-            greedy_win_pct = greedy_wins / len(greedy_costs) * 100
-            print(f"Greedy heuristic beats DP in {greedy_win_pct:.1f}% of queries")
+            # Filter where both are valid
+            valid_mask = ~(np.isnan(greedy_costs_arr) | np.isnan(dp_costs))
+            
+            if np.sum(valid_mask) > 0:
+                valid_greedy = greedy_costs_arr[valid_mask]
+                valid_dp = dp_costs[valid_mask]
+                
+                greedy_to_random_ratio = np.mean(valid_greedy / valid_dp)
+                print(f"Mean ratio of greedy heuristic cost to DP cost: {greedy_to_random_ratio:.2f}x")
+                
+                # Calculate how often greedy beats DP
+                greedy_wins = np.sum(valid_greedy < valid_dp)
+                greedy_win_pct = greedy_wins / len(valid_greedy) * 100
+                print(f"Greedy heuristic beats DP in {greedy_win_pct:.1f}% of queries ({greedy_wins}/{len(valid_greedy)})")
+            else:
+                greedy_win_pct = 0
         
         # Plot win percentage (only if we have both methods with real costs)
         if (has_gradient_real and len(stats['gradient_costs']) > 0 and 
@@ -569,8 +684,8 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
             plt.figure(figsize=(10, 8))
             plt.scatter(gradient_costs, greedy_costs, alpha=0.7, s=70, c='blue', edgecolors='black')
             
-            max_val = max(np.max(gradient_costs), np.max(greedy_costs))
-            min_val = min(np.min(gradient_costs), np.min(greedy_costs))
+            max_val = max(np.nanmax(gradient_costs), np.nanmax(greedy_costs))
+            min_val = min(np.nanmin(gradient_costs), np.nanmin(greedy_costs))
             line_min = min_val * 0.9
             line_max = max_val * 1.1
             plt.plot([line_min, line_max], [line_min, line_max], 'k--', alpha=0.7)
@@ -598,8 +713,8 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
             plt.figure(figsize=(10, 8))
             plt.scatter(gradient_costs, random_costs, alpha=0.7, s=70, c='orange', edgecolors='black')
             
-            max_val = max(np.max(gradient_costs), np.max(random_costs))
-            min_val = min(np.min(gradient_costs), np.min(random_costs))
+            max_val = max(np.nanmax(gradient_costs), np.nanmax(random_costs))
+            min_val = min(np.nanmin(gradient_costs), np.nanmin(random_costs))
             line_min = min_val * 0.9
             line_max = max_val * 1.1
             plt.plot([line_min, line_max], [line_min, line_max], 'k--', alpha=0.7)
@@ -627,8 +742,8 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
             plt.figure(figsize=(10, 8))
             plt.scatter(greedy_costs, random_costs, alpha=0.7, s=70, c='orange', edgecolors='black')
             
-            max_val = max(np.max(greedy_costs), np.max(random_costs))
-            min_val = min(np.min(greedy_costs), np.min(random_costs))
+            max_val = max(np.nanmax(greedy_costs), np.nanmax(random_costs))
+            min_val = min(np.nanmin(greedy_costs), np.nanmin(random_costs))
             line_min = min_val * 0.9
             line_max = max_val * 1.1
             plt.plot([line_min, line_max], [line_min, line_max], 'k--', alpha=0.7)
@@ -660,8 +775,8 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
         all_pred_costs = np.concatenate([stats['predicted_gradient_costs'], 
                                        stats['predicted_greedy_costs'], 
                                        stats['predicted_exhaustive_costs']])
-        min_val = np.min(all_pred_costs) * 0.9
-        max_val = np.max(all_pred_costs) * 1.1
+        min_val = np.nanmin(all_pred_costs) * 0.9
+        max_val = np.nanmax(all_pred_costs) * 1.1
         
         plt.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.7)
         plt.xscale('log')
@@ -684,8 +799,8 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
             plt.figure(figsize=(10, 8))
             plt.scatter(stats['predicted_gradient_costs_filtered'], stats['predicted_best_costs_filtered'], alpha=0.7, s=70, c='purple', edgecolors='black')
             if len(stats['predicted_gradient_costs_filtered']) > 0 and len(stats['predicted_best_costs_filtered']) > 0:
-                min_val = min(min(stats['predicted_gradient_costs_filtered']), min(stats['predicted_best_costs_filtered'])) * 0.9
-                max_val = max(max(stats['predicted_gradient_costs_filtered']), max(stats['predicted_best_costs_filtered'])) * 1.1
+                min_val = min(np.nanmin(stats['predicted_gradient_costs_filtered']), np.nanmin(stats['predicted_best_costs_filtered'])) * 0.9
+                max_val = max(np.nanmax(stats['predicted_gradient_costs_filtered']), np.nanmax(stats['predicted_best_costs_filtered'])) * 1.1
                 plt.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.7)
             plt.xscale('log'); plt.yscale('log')
             plt.xlabel('Predicted Gradient Cost')
@@ -704,8 +819,8 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
             plt.figure(figsize=(10, 8))
             plt.scatter(stats['predicted_greedy_costs_filtered'], stats['predicted_best_costs_filtered'], alpha=0.7, s=70, c='purple', edgecolors='black')
             if len(stats['predicted_greedy_costs_filtered']) > 0 and len(stats['predicted_best_costs_filtered']) > 0:
-                min_val = min(min(stats['predicted_greedy_costs_filtered']), min(stats['predicted_best_costs_filtered'])) * 0.9
-                max_val = max(max(stats['predicted_greedy_costs_filtered']), max(stats['predicted_best_costs_filtered'])) * 1.1
+                min_val = min(np.nanmin(stats['predicted_greedy_costs_filtered']), np.nanmin(stats['predicted_best_costs_filtered'])) * 0.9
+                max_val = max(np.nanmax(stats['predicted_greedy_costs_filtered']), np.nanmax(stats['predicted_best_costs_filtered'])) * 1.1
                 plt.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.7)
             plt.xscale('log'); plt.yscale('log')
             plt.xlabel('Predicted Greedy Cost')
@@ -722,8 +837,8 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
     if has_pred_grad and has_pred_greedy:
         plt.figure(figsize=(10, 8))
         plt.scatter(stats['predicted_gradient_costs'], stats['predicted_greedy_costs'], alpha=0.7, s=70, c='brown', edgecolors='black')
-        mn = min(min(stats['predicted_gradient_costs']), min(stats['predicted_greedy_costs'])) * 0.9
-        mx = max(max(stats['predicted_gradient_costs']), max(stats['predicted_greedy_costs'])) * 1.1
+        mn = min(np.nanmin(stats['predicted_gradient_costs']), np.nanmin(stats['predicted_greedy_costs'])) * 0.9
+        mx = max(np.nanmax(stats['predicted_gradient_costs']), np.nanmax(stats['predicted_greedy_costs'])) * 1.1
         plt.plot([mn, mx], [mn, mx], 'k--', alpha=0.7)
         plt.xscale('log'); plt.yscale('log')
         plt.xlabel('Predicted Gradient Cost')
@@ -741,8 +856,8 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
         plt.figure(figsize=(10, 8))
         plt.scatter(stats['predicted_gradient_costs_filtered'], stats['predicted_best_costs_filtered'], alpha=0.7, s=70, c='darkgreen', edgecolors='black')
         if len(stats['predicted_gradient_costs_filtered']) > 0 and len(stats['predicted_best_costs_filtered']) > 0:
-            mn = min(min(stats['predicted_gradient_costs_filtered']), min(stats['predicted_best_costs_filtered'])) * 0.9
-            mx = max(max(stats['predicted_gradient_costs_filtered']), max(stats['predicted_best_costs_filtered'])) * 1.1
+            mn = min(np.nanmin(stats['predicted_gradient_costs_filtered']), np.nanmin(stats['predicted_best_costs_filtered'])) * 0.9
+            mx = max(np.nanmax(stats['predicted_gradient_costs_filtered']), np.nanmax(stats['predicted_best_costs_filtered'])) * 1.1
             plt.plot([mn, mx], [mn, mx], 'k--', alpha=0.7)
         plt.xscale('log'); plt.yscale('log')
         plt.xlabel('Predicted Gradient Cost')
@@ -760,8 +875,8 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
         plt.figure(figsize=(10, 8))
         plt.scatter(stats['predicted_greedy_costs_filtered'], stats['predicted_best_costs_filtered'], alpha=0.7, s=70, c='darkorange', edgecolors='black')
         if len(stats['predicted_greedy_costs_filtered']) > 0 and len(stats['predicted_best_costs_filtered']) > 0:
-            mn = min(min(stats['predicted_greedy_costs_filtered']), min(stats['predicted_best_costs_filtered'])) * 0.9
-            mx = max(max(stats['predicted_greedy_costs_filtered']), max(stats['predicted_best_costs_filtered'])) * 1.1
+            mn = min(np.nanmin(stats['predicted_greedy_costs_filtered']), np.nanmin(stats['predicted_best_costs_filtered'])) * 0.9
+            mx = max(np.nanmax(stats['predicted_greedy_costs_filtered']), np.nanmax(stats['predicted_best_costs_filtered'])) * 1.1
             plt.plot([mn, mx], [mn, mx], 'k--', alpha=0.7)
         plt.xscale('log'); plt.yscale('log')
         plt.xlabel('Predicted Greedy Cost')
@@ -779,8 +894,8 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
         plt.figure(figsize=(10, 8))
         plt.scatter(stats['predicted_best_costs_filtered'], stats['predicted_exhaustive_costs_filtered'], alpha=0.7, s=70, c='purple', edgecolors='black')
         if len(stats['predicted_best_costs_filtered']) > 0 and len(stats['predicted_exhaustive_costs_filtered']) > 0:
-            mn = min(min(stats['predicted_best_costs_filtered']), min(stats['predicted_exhaustive_costs_filtered'])) * 0.9
-            mx = max(max(stats['predicted_best_costs_filtered']), max(stats['predicted_exhaustive_costs_filtered'])) * 1.1
+            mn = min(np.nanmin(stats['predicted_best_costs_filtered']), np.nanmin(stats['predicted_exhaustive_costs_filtered'])) * 0.9
+            mx = max(np.nanmax(stats['predicted_best_costs_filtered']), np.nanmax(stats['predicted_exhaustive_costs_filtered'])) * 1.1
             plt.plot([mn, mx], [mn, mx], 'k--', alpha=0.7)
         plt.xscale('log'); plt.yscale('log')
         plt.xlabel('DP Best Predicted Cost')
@@ -858,10 +973,12 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
                     random_mean_by_size.append(np.nan)
                 
                 # Calculate mean for DP predicted costs for reference (only if DP data is available)
-                # DP cost estimates are only available up to query size 9
-                if has_dp_pred and len(stats['predicted_best_costs']) > 0 and size <= 9:
+                if has_dp_pred and len(stats['predicted_best_costs']) > 0:
                     dp_pred_costs_size = [stats['predicted_best_costs'][i] for i in size_indices 
                                         if i < len(stats['predicted_best_costs'])]
+                    # Filter out NaNs
+                    dp_pred_costs_size = [c for c in dp_pred_costs_size if c is not None and not np.isnan(c)]
+                    
                     if dp_pred_costs_size:
                         dp_mean_by_size.append(np.median(dp_pred_costs_size))
                     else:
@@ -1047,6 +1164,222 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
             else:
                 print("Note: No query sizes have sufficient data for mean predicted costs analysis")
         
+        # New: Mean Real Costs Line Plot
+        if not EXCLUDE_TRUE_COSTS and has_any_real_costs and len(valid_sizes_mean) >= 1:
+            # Calculate mean real costs for each query size
+            gradient_real_mean_by_size = []
+            greedy_real_mean_by_size = []
+            dp_real_mean_by_size = []
+            
+            for size in valid_sizes_mean:
+                # Get indices for this query size
+                size_indices = [i for i, s in enumerate(stats['query_sizes']) if s == size]
+                
+                # Calculate mean for gradient real if available
+                if has_gradient_real and len(stats['gradient_real']) > 0:
+                    # Note: gradient_real list might be shorter than query_sizes if some queries failed
+                    # We need to map back correctly. stats['gradient_real'] is populated in order of successful queries
+                    # But here we need to match by query index.
+                    # The current extract_costs_and_metrics logic appends to lists sequentially.
+                    # If we assume stats arrays are aligned (which they should be if we filtered consistent failures),
+                    # we can use the same indices.
+                    
+                    # Safer approach: Re-extract based on availability
+                    # But simpler here: if len(stats['gradient_real']) == len(stats['query_sizes']), we are good.
+                    # Let's assume arrays are aligned as per extract_costs_and_metrics logic
+                    
+                    if len(stats['gradient_real']) > max(size_indices):
+                        costs = [stats['gradient_real'][i] for i in size_indices if i < len(stats['gradient_real'])]
+                        if costs:
+                            gradient_real_mean_by_size.append(np.median(costs))
+                        else:
+                            gradient_real_mean_by_size.append(np.nan)
+                    else:
+                        gradient_real_mean_by_size.append(np.nan)
+                else:
+                    gradient_real_mean_by_size.append(np.nan)
+
+                # Calculate mean for greedy real if available
+                if has_greedy_real and len(stats['greedy_real']) > 0:
+                    if len(stats['greedy_real']) > max(size_indices):
+                        costs = [stats['greedy_real'][i] for i in size_indices if i < len(stats['greedy_real'])]
+                        if costs:
+                            greedy_real_mean_by_size.append(np.median(costs))
+                        else:
+                            greedy_real_mean_by_size.append(np.nan)
+                    else:
+                        greedy_real_mean_by_size.append(np.nan)
+                else:
+                    greedy_real_mean_by_size.append(np.nan)
+
+                # Calculate mean for DP real if available
+                if has_dp_real and len(stats['dp_real']) > 0:
+                    if len(stats['dp_real']) > max(size_indices):
+                        costs = [stats['dp_real'][i] for i in size_indices if i < len(stats['dp_real'])]
+                        # Filter out NaNs
+                        costs = [c for c in costs if c is not None and not np.isnan(c)]
+                        
+                        if costs:
+                            dp_real_mean_by_size.append(np.median(costs))
+                        else:
+                            dp_real_mean_by_size.append(np.nan)
+                    else:
+                        dp_real_mean_by_size.append(np.nan)
+                else:
+                    dp_real_mean_by_size.append(np.nan)
+
+            plt.figure()
+            
+            # Plot lines for available methods
+            if has_gradient_real and not all(np.isnan(gradient_real_mean_by_size)):
+                gradient_sizes = [valid_sizes_mean[i] for i, mean in enumerate(gradient_real_mean_by_size) if not np.isnan(mean)]
+                gradient_costs = [mean for mean in gradient_real_mean_by_size if not np.isnan(mean)]
+                plt.plot(gradient_sizes, gradient_costs, 'o-', 
+                        label='Gradient', markeredgecolor='white', markersize=5)
+            
+            if has_greedy_real and not all(np.isnan(greedy_real_mean_by_size)):
+                greedy_sizes = [valid_sizes_mean[i] for i, mean in enumerate(greedy_real_mean_by_size) if not np.isnan(mean)]
+                greedy_costs = [mean for mean in greedy_real_mean_by_size if not np.isnan(mean)]
+                plt.plot(greedy_sizes, greedy_costs, 's-', 
+                        label='Greedy', markeredgecolor='white', markersize=5)
+            
+            if has_dp_real and not EXCLUDE_DP and not all(np.isnan(dp_real_mean_by_size)):
+                dp_sizes = [valid_sizes_mean[i] for i, mean in enumerate(dp_real_mean_by_size) if not np.isnan(mean)]
+                dp_costs = [mean for mean in dp_real_mean_by_size if not np.isnan(mean)]
+                plt.plot(dp_sizes, dp_costs, 'd-', 
+                        label='Dynamic Programming', markeredgecolor='white')
+            
+            plt.xlabel('Query Size')
+            plt.ylabel('Median Real Cost')
+            plt.yscale('log')
+            plt.legend(frameon=True, loc='best', framealpha=0.)
+            plt.margins(x=0.05, y=0.05)
+            plt.tight_layout()
+            
+            plt.savefig(os.path.join(save_directory, f'mean_real_costs_lineplot{suffix}.png'), 
+                       dpi=300, bbox_inches='tight')
+            plt.savefig(os.path.join(save_directory, f'mean_real_costs_lineplot{suffix}.pdf'), 
+                       bbox_inches='tight')
+            if show_plots:
+                plt.show()
+            else:
+                plt.close()
+            
+            print(f"\nMean Real Costs Analysis by Query Size:")
+            if has_gradient_real:
+                print(f"Mean Real Gradient Costs by size: {[f'{mean:.2e}' if not np.isnan(mean) else 'N/A' for mean in gradient_real_mean_by_size]}")
+            if has_greedy_real:
+                print(f"Mean Real Greedy Costs by size: {[f'{mean:.2e}' if not np.isnan(mean) else 'N/A' for mean in greedy_real_mean_by_size]}")
+            if has_dp_real:
+                print(f"Mean Real DP Costs by size: {[f'{mean:.2e}' if not np.isnan(mean) else 'N/A' for mean in dp_real_mean_by_size]}")
+
+            # New: Grouped Boxplot for Real Costs by Query Size
+            plt.figure(figsize=(14, 8))
+            
+            # Collect data for boxplot
+            bp_data = []
+            bp_positions = []
+            bp_colors = []
+            bp_labels = []
+            
+            width = 0.2
+            offsets = []
+            
+            # Determine offsets based on available methods
+            methods_to_plot = []
+            if has_gradient_real: methods_to_plot.append(('Gradient', 'blue'))
+            if has_greedy_real: methods_to_plot.append(('Greedy', 'green'))
+            if has_dp_real and not EXCLUDE_DP: methods_to_plot.append(('Dynamic Programming', 'purple'))
+            
+            num_methods = len(methods_to_plot)
+            if num_methods > 0:
+                # Calculate offsets to center the group around the integer tick
+                # e.g. for 2 methods: -0.1, +0.1
+                # e.g. for 3 methods: -0.2, 0, +0.2
+                start_offset = - (num_methods - 1) * width / 2
+                for i in range(num_methods):
+                    offsets.append(start_offset + i * width)
+                
+                valid_sizes_sorted = sorted(list(set(valid_sizes_mean)))
+                
+                for size_idx, size in enumerate(valid_sizes_sorted):
+                    # Get indices for this query size
+                    size_indices = [i for i, s in enumerate(stats['query_sizes']) if s == size]
+                    
+                    for method_idx, (method_name, color) in enumerate(methods_to_plot):
+                        method_costs = []
+                        
+                        if method_name == 'Gradient':
+                            if len(stats['gradient_real']) > max(size_indices):
+                                method_costs = [stats['gradient_real'][i] for i in size_indices if i < len(stats['gradient_real'])]
+                        elif method_name == 'Greedy':
+                            if len(stats['greedy_real']) > max(size_indices):
+                                method_costs = [stats['greedy_real'][i] for i in size_indices if i < len(stats['greedy_real'])]
+                        elif method_name == 'Dynamic Programming':
+                            if len(stats['dp_real']) > max(size_indices):
+                                method_costs = [stats['dp_real'][i] for i in size_indices if i < len(stats['dp_real'])]
+                        
+                        # Filter NaNs
+                        method_costs = [c for c in method_costs if c is not None and not np.isnan(c)]
+                        
+                        if method_costs:
+                            bp_data.append(method_costs)
+                            bp_positions.append(size + offsets[method_idx])
+                            bp_colors.append(color)
+                            # We only add labels once for the legend
+                            if size_idx == 0:
+                                bp_labels.append(method_name)
+                            else:
+                                bp_labels.append(None)
+                        else:
+                            # Add empty data to keep alignment or skip? 
+                            # Better to skip position, but then coloring logic needs to be robust.
+                            # For simplicity, let's just skip adding to data/positions if empty.
+                            pass
+
+                if bp_data:
+                    bplot = plt.boxplot(bp_data, positions=bp_positions, widths=width * 0.8, 
+                                      patch_artist=True, showfliers=False) # outliers can clutter
+                    
+                    # Color the boxes
+                    # The boxes are created in the order of bp_data.
+                    # We need to match colors. Since we iterated size then method, 
+                    # the colors list should match exactly.
+                    for patch, color in zip(bplot['boxes'], bp_colors):
+                        patch.set_facecolor(color)
+                        patch.set_alpha(0.6)
+                    
+                    # Set median line color to black or distinct
+                    for median in bplot['medians']:
+                        median.set_color('black')
+                        median.set_linewidth(1.5)
+
+                    plt.xlabel('Query Size')
+                    plt.ylabel('Real Cost')
+                    plt.yscale('log')
+                    plt.title('Real Cost Distribution by Query Size')
+                    
+                    # Custom legend
+                    from matplotlib.lines import Line2D
+                    legend_elements = [Line2D([0], [0], color=m[1], lw=4, label=m[0], alpha=0.6) for m in methods_to_plot]
+                    plt.legend(handles=legend_elements, loc='best', frameon=True, framealpha=0.9)
+                    
+                    # Ensure ticks are at integers
+                    plt.xticks(valid_sizes_sorted, valid_sizes_sorted)
+                    plt.grid(axis='y', alpha=0.3, which='both')
+                    
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(save_directory, f'real_costs_boxplot_by_size{suffix}.png'), 
+                               dpi=300, bbox_inches='tight')
+                    plt.savefig(os.path.join(save_directory, f'real_costs_boxplot_by_size{suffix}.pdf'), 
+                               bbox_inches='tight')
+                    
+                    if show_plots:
+                        plt.show()
+                    else:
+                        plt.close()
+
+
         # Check if we have gradient or greedy predicted data to compare with DP predicted (only do MSE analysis if DP is available)
         if (has_dp_pred and len(stats['predicted_best_costs']) > 0 and 
             ((has_gradient_pred and len(stats['predicted_gradient_costs']) > 0) or 
@@ -1070,21 +1403,20 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
                     print(f"Skipping query size {size}: insufficient data ({len(size_indices)} queries, need at least 2)")
                     continue
                 
-                # DP cost estimates are only available up to query size 9
-                if size > 9:
-                    print(f"Skipping query size {size}: DP cost estimates only available up to size 9")
-                    continue
-                
-                # Extract DP predicted costs for this size
+                # DP cost estimates check
+                # We check if we have enough valid DP costs
                 dp_pred_costs_size = [stats['predicted_best_costs'][i] for i in size_indices 
                                     if i < len(stats['predicted_best_costs'])]
                 
-                if len(dp_pred_costs_size) < 2:
-                    print(f"Skipping query size {size}: insufficient DP predicted costs ({len(dp_pred_costs_size)} costs, need at least 2)")
+                # Filter out NaNs/Nones and check count
+                valid_dp_costs = [c for c in dp_pred_costs_size if c is not None and not np.isnan(c)]
+                
+                if len(valid_dp_costs) < 2:
+                    print(f"Skipping query size {size}: insufficient valid DP predicted costs ({len(valid_dp_costs)} costs, need at least 2)")
                     continue
                 
                 valid_sizes.append(size)
-                dp_pred_costs_array = np.array(dp_pred_costs_size)
+                dp_pred_costs_array = np.array(dp_pred_costs_size) # Keep NaNs for alignment with other arrays
                 
                 # Calculate MSE for gradient predicted if available
                 if has_gradient_pred and len(stats['predicted_gradient_costs']) > 0:
@@ -1092,7 +1424,7 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
                                               if i < len(stats['predicted_gradient_costs'])]
                     if len(gradient_pred_costs_size) == len(dp_pred_costs_size):
                         gradient_pred_costs_array = np.array(gradient_pred_costs_size)
-                        mse_gradient = np.mean((gradient_pred_costs_array - dp_pred_costs_array) ** 2)
+                        mse_gradient = np.nanmean((gradient_pred_costs_array - dp_pred_costs_array) ** 2)
                         gradient_mse_by_size.append(mse_gradient)
                     else:
                         gradient_mse_by_size.append(np.nan)
@@ -1105,7 +1437,7 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
                                             if i < len(stats['predicted_greedy_costs'])]
                     if len(greedy_pred_costs_size) == len(dp_pred_costs_size):
                         greedy_pred_costs_array = np.array(greedy_pred_costs_size)
-                        mse_greedy = np.mean((greedy_pred_costs_array - dp_pred_costs_array) ** 2)
+                        mse_greedy = np.nanmean((greedy_pred_costs_array - dp_pred_costs_array) ** 2)
                         greedy_mse_by_size.append(mse_greedy)
                     else:
                         greedy_mse_by_size.append(np.nan)
@@ -1118,7 +1450,7 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
                                             if i < len(stats['predicted_random_costs'])]
                     if len(random_pred_costs_size) == len(dp_pred_costs_size):
                         random_pred_costs_array = np.array(random_pred_costs_size)
-                        mse_random = np.mean((random_pred_costs_array - dp_pred_costs_array) ** 2)
+                        mse_random = np.nanmean((random_pred_costs_array - dp_pred_costs_array) ** 2)
                         random_mse_by_size.append(mse_random)
                     else:
                         random_mse_by_size.append(np.nan)
@@ -1214,40 +1546,149 @@ def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):
                     print(f"Predicted Random MSE by size: {[f'{mse:.2e}' if not np.isnan(mse) else 'N/A' for mse in random_mse_by_size]}")
             else:
                 print("Note: No query sizes have sufficient data for predicted MSE analysis (need at least 2 queries per size)")
+        
+        # NEW: Calculate MAE (Mean Absolute Error) for each query size against DP costs
+        if (has_dp_pred and len(stats['predicted_best_costs']) > 0 and 
+            ((has_gradient_pred and len(stats['predicted_gradient_costs']) > 0) or 
+             (has_greedy_pred and len(stats['predicted_greedy_costs']) > 0) or
+             (has_pred_random and USE_RANDOM and len(stats['predicted_random_costs']) > 0))):
+            
+            # Reuse unique_sizes calculated above
+            gradient_mae_by_size = []
+            greedy_mae_by_size = []
+            random_mae_by_size = []
+            mae_valid_sizes = []
+            
+            for size in unique_sizes:
+                size_indices = [i for i, s in enumerate(stats['query_sizes']) if s == size]
+                
+                # Need at least 1 query for MAE if we just want mean difference
+                if len(size_indices) < 1:
+                    continue
+                
+                dp_pred_costs_size = [stats['predicted_best_costs'][i] for i in size_indices if i < len(stats['predicted_best_costs'])]
+                
+                # Check for valid DP costs
+                valid_dp_costs = [c for c in dp_pred_costs_size if c is not None and not np.isnan(c)]
+                
+                if len(valid_dp_costs) < 1:
+                    continue
+                
+                mae_valid_sizes.append(size)
+                dp_pred_costs_array = np.array(dp_pred_costs_size)
+                
+                # Calculate MAE for gradient
+                if has_gradient_pred and len(stats['predicted_gradient_costs']) > 0:
+                    gradient_pred_costs_size = [stats['predicted_gradient_costs'][i] for i in size_indices if i < len(stats['predicted_gradient_costs'])]
+                    if len(gradient_pred_costs_size) == len(dp_pred_costs_size):
+                        mae_gradient = np.nanmean(np.abs(np.array(gradient_pred_costs_size) - dp_pred_costs_array))
+                        gradient_mae_by_size.append(mae_gradient)
+                    else:
+                        gradient_mae_by_size.append(np.nan)
+                else:
+                    gradient_mae_by_size.append(np.nan)
+                
+                # Calculate MAE for greedy
+                if has_greedy_pred and len(stats['predicted_greedy_costs']) > 0:
+                    greedy_pred_costs_size = [stats['predicted_greedy_costs'][i] for i in size_indices if i < len(stats['predicted_greedy_costs'])]
+                    if len(greedy_pred_costs_size) == len(dp_pred_costs_size):
+                        mae_greedy = np.nanmean(np.abs(np.array(greedy_pred_costs_size) - dp_pred_costs_array))
+                        greedy_mae_by_size.append(mae_greedy)
+                    else:
+                        greedy_mae_by_size.append(np.nan)
+                else:
+                    greedy_mae_by_size.append(np.nan)
+                
+                # Calculate MAE for random
+                if has_pred_random and USE_RANDOM and len(stats['predicted_random_costs']) > 0:
+                    random_pred_costs_size = [stats['predicted_random_costs'][i] for i in size_indices if i < len(stats['predicted_random_costs'])]
+                    if len(random_pred_costs_size) == len(dp_pred_costs_size):
+                        mae_random = np.nanmean(np.abs(np.array(random_pred_costs_size) - dp_pred_costs_array))
+                        random_mae_by_size.append(mae_random)
+                    else:
+                        random_mae_by_size.append(np.nan)
+                else:
+                    random_mae_by_size.append(np.nan)
+            
+            # Create the MAE line plot
+            if mae_valid_sizes and len(mae_valid_sizes) >= 1:
+                plt.figure()
+                
+                if has_gradient_pred and not all(np.isnan(gradient_mae_by_size)):
+                    gradient_mae_clean = [mae if not np.isnan(mae) else None for mae in gradient_mae_by_size]
+                    grad_sizes = [mae_valid_sizes[i] for i, mae in enumerate(gradient_mae_clean) if mae is not None]
+                    grad_maes = [mae for mae in gradient_mae_clean if mae is not None]
+                    plt.plot(grad_sizes, grad_maes, 'o-', label='Gradient MAE', markeredgecolor='white', markersize=5)
+                
+                if has_greedy_pred and not all(np.isnan(greedy_mae_by_size)):
+                    greedy_mae_clean = [mae if not np.isnan(mae) else None for mae in greedy_mae_by_size]
+                    greedy_sizes = [mae_valid_sizes[i] for i, mae in enumerate(greedy_mae_clean) if mae is not None]
+                    greedy_maes = [mae for mae in greedy_mae_clean if mae is not None]
+                    plt.plot(greedy_sizes, greedy_maes, 's-', label='Greedy MAE', markeredgecolor='white', markersize=5)
+                
+                if has_pred_random and USE_RANDOM and not all(np.isnan(random_mae_by_size)):
+                    random_mae_clean = [mae if not np.isnan(mae) else None for mae in random_mae_by_size]
+                    rand_sizes = [mae_valid_sizes[i] for i, mae in enumerate(random_mae_clean) if mae is not None]
+                    rand_maes = [mae for mae in random_mae_clean if mae is not None]
+                    plt.plot(rand_sizes, rand_maes, '^-', label='Random MAE', markeredgecolor='white')
+                
+                plt.xlabel('Query Size')
+                plt.ylabel('Mean Absolute Error (vs DP)')
+                plt.yscale('log')
+                plt.legend(frameon=True, loc='best', framealpha=0.)
+                plt.margins(x=0.05, y=0.05)
+                plt.tight_layout()
+                
+                plt.savefig(os.path.join(save_directory, f'predicted_mae_lineplot{suffix}.png'), 
+                           dpi=300, bbox_inches='tight')
+                plt.savefig(os.path.join(save_directory, f'predicted_mae_lineplot{suffix}.pdf'), 
+                           bbox_inches='tight')
+                
+                if show_plots:
+                    plt.show()
+                else:
+                    plt.close()
+                
+                print(f"\nPredicted MAE Analysis by Query Size:")
+                if has_gradient_pred:
+                    print(f"Gradient MAE: {[f'{mae:.2e}' if not np.isnan(mae) else 'N/A' for mae in gradient_mae_by_size]}")
+                if has_greedy_pred:
+                    print(f"Greedy MAE: {[f'{mae:.2e}' if not np.isnan(mae) else 'N/A' for mae in greedy_mae_by_size]}")
+
     
     elif not has_dp_pred:
         print("Note: Predicted DP costs not available - predicted MSE analysis by query size cannot be performed")
     elif not (has_gradient_pred or has_greedy_pred or (has_pred_random and USE_RANDOM)):
         print("Note: No predicted gradient, greedy, or random costs available - predicted MSE analysis by query size cannot be performed")
 
-def main():
+def main(results_dir=None):
+    # Use provided directory or fall back to global
+    target_dir = results_dir if results_dir else RESULTS_DIR
+    
     # Validate input directory
-    if not os.path.exists(RESULTS_DIR):
-        print(f"Error: Results directory does not exist: {RESULTS_DIR}")
+    if not target_dir or not os.path.exists(target_dir):
+        print(f"Error: Results directory does not exist: {target_dir}")
         sys.exit(1)
     
     # Set output directory
     if OUTPUT_DIR is None:
-        output_dir = os.path.join(RESULTS_DIR, 'plots')
+        output_dir = os.path.join(target_dir, 'plots')
     else:
         output_dir = OUTPUT_DIR
     
     os.makedirs(output_dir, exist_ok=True)
     print(f"Saving plots to: {output_dir}")
 
-    data = load_optimization_results(RESULTS_DIR)
+    data = load_optimization_results(target_dir)
     stats = extract_costs_and_metrics(data)
-
     
-    # Generate plots using the exact same function from optimization_evaluation.py
+    # Generate plots
     print("\nGenerating plots...")
-    
-    # Use the exact plot_statistics function from optimization_evaluation.py
     plot_statistics(stats, show_plots=False, save_directory=output_dir)
-    
-
     
     print(f"\nAll plots saved to: {output_dir}")
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    RESULTS_DIR = args.results_dir
+    main(RESULTS_DIR)

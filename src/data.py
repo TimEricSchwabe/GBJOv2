@@ -117,29 +117,30 @@ class Triple:
 			}}
 		"""
 		try:
-			res = requests.get(
+			response = requests.get(
 				"http://127.0.0.1:8890/sparql/",
 				params={
 					"query": query,
-					"format": "csv",
+					"format": "json", 
 				},
 				timeout=30  # 30 second timeout
-			).text
+			)
+			response.raise_for_status()
+			res_json = response.json()
 		except Timeout:
 			print(f"SPARQL request timed out for triple: {self.where_body()}")
 			raise RuntimeError("SPARQL timeout")
-		except RequestException as e:
+		except (RequestException, ValueError) as e:
 			print(f"SPARQL request failed for triple: {self.where_body()}, error: {e}")
 			raise RuntimeError(f"SPARQL error: {e}")
 		
-		m = re.match(r'"count"\n(\d+)\n', res)
-		
-		if not m:
+		try:
+			count_val = res_json["results"]["bindings"][0]["count"]["value"]
+			return int(count_val)
+		except (KeyError, IndexError):
 			print("Error in the following query:", query)
-			print(res)
+			print(res_json)
 			raise RuntimeError("Query failed")
-
-		return int(m.group(1))
 	
 	def get_cost(self) -> int:
 		"""
@@ -199,35 +200,37 @@ class Join:
 		Returns the c_out cost of this join
 		"""
 		query = f"""
-			SELECT COUNT(*) AS ?count
+			SELECT (COUNT(*) AS ?count)
 			WHERE {{ 
 				{self.where_body()}	
 			}}
 		"""
+
 		try:
-			res = requests.get(
-				"http://127.0.0.1:8890/sparql/",
+			response = requests.get(
+				"http://127.0.0.1:7001",
 				params={
 					"query": query,
-					"format": "csv",
+					"format": "json",
 				},
 				timeout=30  # 30 second timeout
-			).text
+			)
+			response.raise_for_status()
+			res_json = response.json()
 		except Timeout:
 			print(f"SPARQL request timed out for join: {self.where_body()}")
 			raise RuntimeError("SPARQL timeout")
-		except RequestException as e:
+		except (RequestException, ValueError) as e:
 			print(f"SPARQL request failed for join: {self.where_body()}, error: {e}")
 			raise RuntimeError(f"SPARQL error: {e}")
 		
-		m = re.match(r'"count"\n(\d+)\n', res)
-		
-		if not m:
+		try:
+			count_val = res_json["results"]["bindings"][0]["count"]["value"]
+			self_cardinality = int(count_val)
+		except (KeyError, IndexError):
 			print("Error in the following query:", query)
-			print(res)
+			print(res_json)
 			raise RuntimeError("Query failed")
-
-		self_cardinality = int(m.group(1))
 
 		left_cost = self.left.get_cost()
 		right_cost = self.right.get_cost()
@@ -242,29 +245,30 @@ class Join:
 			}}
 		"""
 		try:
-			res = requests.get(
+			response = requests.get(
 				"http://127.0.0.1:8890/sparql/",
 				params={
 					"query": query,
-					"format": "csv",
+					"format": "json",
 				},
 				timeout=30  # 30 second timeout
-			).text
+			)
+			response.raise_for_status()
+			res_json = response.json()
 		except Timeout:
 			print(f"SPARQL request timed out for join: {self.where_body()}")
 			raise RuntimeError("SPARQL timeout")
-		except RequestException as e:
+		except (RequestException, ValueError) as e:
 			print(f"SPARQL request failed for join: {self.where_body()}, error: {e}")
 			raise RuntimeError(f"SPARQL error: {e}")
 		
-		m = re.match(r'"count"\n(\d+)\n', res)
-		
-		if not m:
+		try:
+			count_val = res_json["results"]["bindings"][0]["count"]["value"]
+			self_cardinality = int(count_val)
+		except (KeyError, IndexError):
 			print("Error in the following query:", query)
-			print(res)
+			print(res_json)
 			raise RuntimeError("Query failed")
-
-		self_cardinality = int(m.group(1))
 
 
 		return self_cardinality

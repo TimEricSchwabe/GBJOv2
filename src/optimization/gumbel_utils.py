@@ -75,6 +75,8 @@ def sample_grouped_gumbel_softmax(edge_logits: torch.Tensor,
         logits_group = edge_logits[mask]
         g = sample_gumbel(logits_group.shape, device=device)
         edge_weights[mask] = torch.softmax((logits_group + g) / temperature, dim=0)
+        #edge_weights[mask] = torch.softmax((logits_group) / temperature, dim=0)
+
 
 
     return edge_weights 
