@@ -12,8 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
-from model import CostGNN, CostGNNv2
-from data_loader import QueryDataset, SingleFileQueryDataset
+from model import CostGNN, CostGNNv2, CostGNNv3
+from data_loader import QueryDataset, SingleFileQueryDataset, AddRandomGaussianFingerprints
 
 import scienceplots
 plt.style.use('science')
@@ -72,7 +72,7 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
             out = model(data.x, data.edge_index, batch=data.batch)
             
             # Calculate loss based on loss_type
-            if loss_type == "mse":
+            if loss_type != "qerror":
                 loss = criterion(out, torch.log(data.y))
             elif loss_type == "qerror":
                 pred_y = torch.exp(out)
@@ -82,6 +82,7 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
                 raise ValueError(f"Unsupported loss type: {loss_type}")
                 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             total_loss += loss.item()
             
@@ -107,18 +108,24 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
                 
                 ax1.plot(epochs, val_losses)
                 ax1.set_title('Validation Loss')
+                # Log scale for loss
+                ax1.set_yscale('log')
                 ax1.set_xlabel('Epoch')
                 ax1.set_ylabel('Loss')
                 ax1.grid(True)
                 
                 ax2.plot(epochs, val_mses)
                 ax2.set_title('Validation MSE')
+                # Log scale for mse
+                ax2.set_yscale('log')
                 ax2.set_xlabel('Epoch')
                 ax2.set_ylabel('MSE')
                 ax2.grid(True)
                 
                 ax3.plot(epochs, val_qerrors)
                 ax3.set_title('Validation Q-Error')
+                # Log scale for q-error
+                ax3.set_yscale('log')
                 ax3.set_xlabel('Epoch')
                 ax3.set_ylabel('Q-Error')
                 ax3.grid(True)
@@ -170,7 +177,7 @@ def validate_model(model, criterion, val_loader, device='cpu', loss_type="mse"):
             out = model(data.x, data.edge_index, batch=data.batch)
             
             # Calculate the primary loss based on loss_type
-            if loss_type == "mse":
+            if loss_type != "qerror":
                 loss = criterion(out, torch.log(data.y))
             elif loss_type == "qerror":
                 pred_y = torch.exp(out)
@@ -426,15 +433,15 @@ if __name__ == "__main__":
     # Hyperparameters and configuration
     config = {
         # Model parameters
-        'model_type': 'CostGNNv2',  # Options: 'CostGNN', 'CostGNNv2'
+        'model_type': 'CostGNNv3',  # Options: 'CostGNN', 'CostGNNv2'
         'node_feature_dim': 307,    # Input feature dimension
-        'hidden_dim': 512,          # Hidden layer dimension
+        'hidden_dim': 16,          # Hidden layer dimension
         
         # Training parameters
         'learning_rate': 0.0001,
         'batch_size': 128,
-        'num_epochs': 1,
-        'loss_type': 'mse',         # Options: 'mse', 'qerror'
+        'num_epochs': 800,
+        'loss_type': 'huber',         # Options: 'mse', 'qerror'
         
         # Dataset parameters
         'use_single_file': True,
@@ -442,10 +449,10 @@ if __name__ == "__main__":
         
         # Paths
         'root_dir': '',
-        'dataset_dir': 'datasets/..',
+        'dataset_dir': 'datasets/new-lubm',
         
         # Other settings
-        'enable_training': False,    # Set to False to skip training
+        'enable_training': True,    # Set to False to skip training
     }
     
     # Set device (GPU if available, else CPU)
@@ -455,11 +462,13 @@ if __name__ == "__main__":
     # Setup result directory
     result_dir = setup_result_dir(config)
     model_save_path = result_dir / "model.pt"
+
+    fingerprint_transform = AddRandomGaussianFingerprints(fingerprint_dim=64)
     
     # Load dataset
     if config['use_single_file']:
         dataset_path = os.path.join(config['root_dir'], config['dataset_dir'])
-        dataset = SingleFileQueryDataset(root=dataset_path)
+        dataset = SingleFileQueryDataset(root=dataset_path, transform=fingerprint_transform)
         print(f"Using single-file dataset from {dataset_path}")
     else:
         dataset_path = os.path.join(config['root_dir'], config['dataset_dir'])
@@ -496,12 +505,23 @@ if __name__ == "__main__":
     elif config['model_type'] == 'CostGNNv2':
         model = CostGNNv2(node_feature_dim=config['node_feature_dim'], 
                          hidden_dim=config['hidden_dim']).to(device)
+    elif config['model_type'] == 'CostGNNv3':
+        model = CostGNNv3(node_feature_dim=config['node_feature_dim'], 
+                         hidden_dim=config['hidden_dim']).to(device)
     else:
         raise ValueError(f"Unknown model type: {config['model_type']}")
     
     # Training setup
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
-    criterion = nn.MSELoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'])
+
+    print(model)
+
+    if config['loss_type'] == 'mse':
+        criterion = nn.MSELoss()
+    elif config['loss_type'] == 'huber':
+        criterion = nn.HuberLoss()
+    else:
+        raise ValueError(f"Unknown loss type: {config['loss_type']}")
     
     # Train model if enabled
     if config['enable_training']:

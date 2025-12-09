@@ -2,11 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.utils import scatter, spmm
-from typing import Callable, Union
+from typing import Callable, Union, List
 
 from torch import Tensor
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.inits import reset
+from torch_geometric.nn.models import JumpingKnowledge
 from torch_geometric.typing import (
     Adj,
     OptPairTensor,
@@ -249,3 +250,201 @@ class CostGNNv2(nn.Module):
 
 		return torch.squeeze(cost)
 	
+
+class CostGNNv3(nn.Module):
+    """
+    Improved CostGNN with smoother gradient flow for optimization.
+    
+    Features:
+    - Dynamic number of GIN layers (n_layers parameter)
+    - Optional Jumping Knowledge (JK) aggregation using PyG's JumpingKnowledge module
+    - GELU activation instead of ReLU (smooth gradients)
+    - Configurable residual connections and layer normalization
+    
+    Args:
+        node_feature_dim: Input feature dimension
+        hidden_dim: Hidden layer dimension
+        n_layers: Number of GIN message-passing layers (default: 3)
+        use_jk: Whether to use Jumping Knowledge (default: False)
+        jk_mode: JK aggregation mode - 'cat', 'max', or 'lstm' (default: 'cat')
+        use_residual: Whether to use residual connections (default: False)
+        use_layer_norm: Whether to use layer normalization (default: False)
+        dropout: Dropout probability (default: 0.1)
+    
+    Reference:
+        Jumping Knowledge: https://pytorch-geometric.readthedocs.io/en/2.5.2/generated/torch_geometric.nn.models.JumpingKnowledge.html
+    """
+    def __init__(
+        self, 
+        node_feature_dim, 
+        hidden_dim, 
+        n_layers=6,
+        use_jk=False,
+        jk_mode='cat',
+        use_residual=False,
+        use_layer_norm=False,
+        dropout=0.0001
+    ):
+        super(CostGNNv3, self).__init__()
+        
+        self.n_layers = n_layers
+        self.use_jk = use_jk
+        self.jk_mode = jk_mode
+        self.use_residual = use_residual
+        self.use_layer_norm = use_layer_norm
+        self.hidden_dim = hidden_dim
+        
+        self.projection = nn.Linear(node_feature_dim, hidden_dim)
+        
+        self.convs = nn.ModuleList()
+        self.layer_norms = nn.ModuleList() if use_layer_norm else None
+        
+        for i in range(n_layers):
+            mlp = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim)
+            )
+            self.convs.append(GINConv(mlp))
+            
+            if use_layer_norm:
+                self.layer_norms.append(nn.LayerNorm(hidden_dim))
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+        
+        # Jumping Knowledge module from PyG
+        # Aggregates representations from all layers
+        if use_jk:
+            # For LSTM mode, we need to pass channels and num_layers
+            if jk_mode == 'lstm':
+                self.jk = JumpingKnowledge(mode=jk_mode, channels=hidden_dim, num_layers=n_layers)
+            else:
+                self.jk = JumpingKnowledge(mode=jk_mode)
+        else:
+            self.jk = None
+        
+        if use_jk and jk_mode == 'cat':
+            # Concatenate all layer outputs
+            jk_output_dim = hidden_dim * n_layers
+        else:
+            jk_output_dim = hidden_dim
+        
+        # Output layers
+        self.fc1 = nn.Linear(jk_output_dim, jk_output_dim // 2)
+        self.fc2 = nn.Linear(jk_output_dim // 2, 1)
+
+    def forward(self, x, edge_index, edge_weight=None, batch=None):
+        # Project input
+        x = self.projection(x)
+        
+        # Store layer outputs for Jumping Knowledge
+        layer_outputs: List[Tensor] = []
+        
+        # Message passing layers
+        for i, conv in enumerate(self.convs):
+            residual = x if self.use_residual else None
+
+
+			# Layer normalization
+            if self.use_layer_norm:
+                x = self.layer_norms[i](x)
+            
+            # Graph convolution
+            if edge_weight is not None:
+                x = conv(x, edge_index, edge_weight=edge_weight)
+            else:
+                x = conv(x, edge_index)
+    
+            
+            # Activation
+            x = F.gelu(x)
+
+			# Residual connection
+            if self.use_residual:
+                x = x + residual
+            
+            # Dropout (skip on last layer if not using JK)
+            if i < self.n_layers - 1:
+                pass
+                #x = self.dropout(x)
+            
+            # Store for JK
+            layer_outputs.append(x)
+        
+        # Jumping Knowledge aggregation using PyG module
+        if self.jk is not None:
+            x = self.jk(layer_outputs)
+
+        # Global pooling
+        if batch is not None:
+            x = scatter(x, batch, dim=0, reduce='add')
+        else:
+            x = torch.sum(x, dim=0)
+        
+        # Output MLP
+        x = self.fc1(x)
+        x = F.gelu(x)
+        cost = self.fc2(x)
+
+        return torch.squeeze(cost)
+
+
+class AddLearnableFingerprints(torch.nn.Module):
+    """
+    Learnable fingerprint embeddings for join nodes.
+    Handles batched graphs correctly - assigns fingerprints per-graph.
+    """
+    def __init__(self, num_fingerprints=15, fingerprint_dim=32):
+        super().__init__()
+        self.num_fingerprints = num_fingerprints
+        self.fingerprint_dim = fingerprint_dim
+        
+        # Learnable embedding table
+        self.fingerprint_embeddings = torch.nn.Parameter(
+            torch.randn(num_fingerprints, fingerprint_dim) * 0.1
+        )
+    
+    def forward(self, x, batch):
+        """
+        Add fingerprints to join nodes with random assignment PER GRAPH.
+        
+        Args:
+            x: Node features [total_nodes, feature_dim]
+            batch: Graph membership [total_nodes] - which graph each node belongs to
+        
+        Returns:
+            Modified x with fingerprints added to join nodes
+        """
+        x = x.clone()
+        device = x.device
+        
+        # Identify join nodes (last dim == 1)
+        is_join = (x[:, -1] == 1.0)
+        
+        if not is_join.any():
+            return x
+        
+        # Get number of graphs in batch
+        num_graphs = batch.max().item() + 1
+        
+        # Process each graph separately
+        for graph_idx in range(num_graphs):
+            # Mask for nodes in this graph that are join nodes
+            graph_mask = (batch == graph_idx)
+            graph_join_mask = graph_mask & is_join
+            
+            join_indices = torch.where(graph_join_mask)[0]
+            n_joins = len(join_indices)
+            
+            if n_joins == 0:
+                continue
+            
+            # Random assignment for THIS graph
+            perm = torch.randperm(self.num_fingerprints, device=device)[:n_joins]
+            fingerprints = self.fingerprint_embeddings[perm]  # [n_joins, fingerprint_dim]
+            
+            # Insert fingerprints
+            x[join_indices, :self.fingerprint_dim] = fingerprints
+        
+        return x

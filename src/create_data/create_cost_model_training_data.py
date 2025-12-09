@@ -249,6 +249,7 @@ def create_diverse_join_orders(triples: List[List[str]], num_random: int = 3,
         plans.append((best_plan, best_cost))
     except Exception as e:
         print(f"Error creating beam-search-best plan: {e}")
+        return None
     
     # 2. Beam search worst plan (comes with pre-computed cost)
     try:
@@ -256,6 +257,7 @@ def create_diverse_join_orders(triples: List[List[str]], num_random: int = 3,
         plans.append((worst_plan, worst_cost))
     except Exception as e:
         print(f"Error creating beam-search-worst plan: {e}")
+        return None
     
     # 3. Random plans (cost will be calculated later)
     for i in range(num_random):
@@ -289,9 +291,10 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
     
     if use_diverse_plans:
         # Use diverse plan generation: beam-search-best, beam-search-worst, and random plans
-        # Returns List[Tuple[Query, Optional[float]]] - plans with pre-computed costs where available
         plans_with_costs = create_diverse_join_orders(triples, num_random=num_random_plans, 
                                                        beam_width=beam_width)
+        if plans_with_costs is None:
+            return None
     else:
         # Use purely random plans (original behavior)
         # Wrap in tuples with None cost for uniform handling
@@ -489,6 +492,81 @@ def save_sparql_queries_single_file(sparql_queries, output_file):
     
     print(f"Saved {len(sparql_queries)} SPARQLQuery objects to {output_file}")
 
+
+def save_sparql_queries_human_readable(sparql_queries, output_file, use_diverse_plans=True):
+    """
+    Save SPARQLQuery objects to a human-readable JSON file.
+    
+    Each query is saved with:
+    - triples: Original triple patterns
+    - plans: List of join plan structures with their costs
+    - best_plan_index: Index of the plan with lowest cost (actual best)
+    
+    When use_diverse_plans=True, plans are labeled as:
+    - Index 0: beam_search_best (greedy optimizer's best plan)
+    - Index 1: beam_search_worst (greedy optimizer's worst plan)
+    - Index 2+: random plans
+    
+    Args:
+        sparql_queries: List of SPARQLQuery objects
+        output_file: Path to save the JSON file
+        use_diverse_plans: If True, label plans with beam search info
+    """
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    
+    def get_plan_type(plan_idx, num_plans):
+        """Get the type label for a plan based on its index."""
+        if not use_diverse_plans:
+            return "random"
+        if plan_idx == 0:
+            return "beam_search_best"
+        elif plan_idx == 1:
+            return "beam_search_worst"
+        else:
+            return "random"
+    
+    def to_python_type(val):
+        """Convert numpy types to native Python types for JSON serialization."""
+        if isinstance(val, (np.integer, np.int64, np.int32)):
+            return int(val)
+        elif isinstance(val, (np.floating, np.float64, np.float32)):
+            return float(val)
+        elif isinstance(val, np.ndarray):
+            return val.tolist()
+        return val
+    
+    queries_data = []
+    for i, sq in enumerate(sparql_queries):
+        actual_best_idx = int(sq.get_best_plan_index())
+        
+        query_data = {
+            "query_index": i,
+            "triples": sq.triples,  # Original triple patterns
+            "num_plans": len(sq.join_plans),
+            "actual_best_plan_index": actual_best_idx,
+            "actual_best_cost": to_python_type(sq.get_best_cost()),
+            "plans": []
+        }
+        
+        for j, (plan, cost) in enumerate(zip(sq.join_plans, sq.costs)):
+            plan_type = get_plan_type(j, len(sq.join_plans))
+            plan_data = {
+                "plan_index": j,
+                "plan_type": plan_type,
+                "cost": to_python_type(cost),
+                "is_actual_best": j == actual_best_idx,
+                "join_tree": plan.root.json(),  # Nested structure showing join order
+                "where_clause": plan.root.where_body()  # Full WHERE body
+            }
+            query_data["plans"].append(plan_data)
+        
+        queries_data.append(query_data)
+    
+    with open(output_file, 'w') as f:
+        json.dump(queries_data, f, indent=2)
+    
+    print(f"Saved {len(sparql_queries)} queries in human-readable format to {output_file}")
+
 def save_dataset_single_file(triples, torch_dataset, output_dir):
     """
     Save dataset to a single file for batch loading
@@ -557,17 +635,17 @@ if __name__ == "__main__":
 
     
     # Queries to generate random plans for
-    input_file = "datasets/queries/lubm/stars/star_queries.json"
+    input_file = "datasets/queries/lubm/paths/path_queries.json"
 
     # Directory to save the plans
-    dataset_dir = "datasets/plans/lubm/star/plans/new_dataset"
+    dataset_dir = "datasets/plans/lubm/path/plans/new_dataset"
 
     #visualization_dir = "join_plan_visualizations_path_wikidata"
-    sparql_queries_file = "sparql_queries_star_lubm/queries.pkl"
+    sparql_queries_file = "sparql_queries_path_lubm/queries.pkl"
 
 
     # How many queries to process
-    MAX_QUERIES = 20
+    MAX_QUERIES = 1000
 
     # The minimum cardinality of the queries to process
     MIN_CARDINALITY = 1
@@ -678,6 +756,10 @@ if __name__ == "__main__":
     # Save final results
     print("\nSaving final results...")
     save_dataset_single_file(all_triples, all_torch_data, dataset_dir)
-    #save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
+    save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
+    
+    # Save human-readable version
+    human_readable_file = sparql_queries_file.replace('.pkl', '_readable.json')
+    save_sparql_queries_human_readable(sparql_queries, human_readable_file, use_diverse_plans=USE_DIVERSE_PLANS)
 
     print("\nDataset creation complete!")

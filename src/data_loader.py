@@ -141,3 +141,84 @@ def load_single_file_dataset_metadata(dataset_dir):
             'triples': data_dict['triples']
         }
     return None 
+
+# Add this to data_loader.py (or a new transforms.py file)
+
+import torch
+import numpy as np
+
+class AddJoinFingerprints:
+    """
+    Transform that adds orthonormal fingerprint vectors to join nodes.
+    Fingerprints are randomly assigned each time a graph is loaded,
+    but stay fixed during a single optimization run.
+    """
+    def __init__(self, fingerprint_dim=14, max_joins=14):
+        """
+        Args:
+            fingerprint_dim: Dimension of fingerprint vectors (default 14 for orthonormal)
+            max_joins: Maximum number of join nodes to support (n-1 for n triples)
+        """
+        self.fingerprint_dim = fingerprint_dim
+        self.max_joins = max_joins
+        # Pre-compute orthonormal basis (identity matrix rows)
+        self.fingerprint_basis = torch.eye(max_joins, fingerprint_dim)
+    
+    def __call__(self, data):
+        """
+        Modify node features to include fingerprints for join nodes.
+        
+        Join nodes are identified by: feature[306] == 1
+        Triple nodes have: feature[306] == 0
+        """
+        x = data.x.clone()
+        n_nodes = x.size(0)
+        
+        # Identify join nodes (last feature dim == 1)
+        is_join = (x[:, -1] == 1.0)
+        join_indices = torch.where(is_join)[0]
+        n_joins = len(join_indices)
+        
+        if n_joins == 0:
+            return data
+        
+        # Randomly permute fingerprint assignment for this graph
+        perm = torch.randperm(self.max_joins)[:n_joins]
+        fingerprints = self.fingerprint_basis[perm]  # [n_joins, fingerprint_dim]
+        
+        # Insert fingerprints into the first `fingerprint_dim` positions of join nodes
+        # (these are currently zeros)
+        for i, join_idx in enumerate(join_indices):
+            x[join_idx, :self.fingerprint_dim] = fingerprints[i]
+        
+        data.x = x
+        return data
+
+
+class AddRandomGaussianFingerprints:
+    """
+    Alternative: Fresh random Gaussian fingerprints each time.
+    Normalized to unit length for stability.
+    """
+    def __init__(self, fingerprint_dim=32):
+        self.fingerprint_dim = fingerprint_dim
+    
+    def __call__(self, data):
+        x = data.x.clone()
+        
+        is_join = (x[:, -1] == 1.0)
+        join_indices = torch.where(is_join)[0]
+        n_joins = len(join_indices)
+        
+        if n_joins == 0:
+            return data
+        
+        # Fresh random fingerprints, normalized
+        fingerprints = torch.randn(n_joins, self.fingerprint_dim)
+        fingerprints = fingerprints / fingerprints.norm(dim=1, keepdim=True)
+        
+        for i, join_idx in enumerate(join_indices):
+            x[join_idx, :self.fingerprint_dim] = fingerprints[i]
+        
+        data.x = x
+        return data

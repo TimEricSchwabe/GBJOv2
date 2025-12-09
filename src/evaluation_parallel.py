@@ -29,7 +29,7 @@ sys.path.append(os.path.dirname(__file__))
 # Import the classes
 from src.create_data.create_optimization_data import SPARQLQuery
 from data import Triple, Join, Query, Entity
-from model import CostGNNv2
+from model import CostGNNv2, CostGNNv3
 
 from optimization import (
     optimize_query_gumbel,
@@ -61,6 +61,32 @@ sys.modules['explicit_join_model.data'] = data_module
 sys.modules['explicit_join_model'] = sys.modules['src']
 
 
+def add_fingerprints_to_query_data(query_data, fingerprint_dim=14, max_joins=14):
+    """
+    Add orthonormal fingerprints to join nodes in query data.
+    Call this ONCE before starting gradient optimization.
+    """
+    x = query_data.x.clone()
+    
+    is_join = (x[:, -1] == 1.0)
+    join_indices = torch.where(is_join)[0]
+    n_joins = len(join_indices)
+    
+    if n_joins == 0:
+        return query_data
+    
+    # Orthonormal basis
+    fingerprint_basis = torch.eye(max_joins, fingerprint_dim, device=x.device)
+    perm = torch.randperm(max_joins)[:n_joins]
+    fingerprints = fingerprint_basis[perm]
+    
+    for i, join_idx in enumerate(join_indices):
+        x[join_idx, :fingerprint_dim] = fingerprints[i]
+    
+    query_data.x = x
+    return query_data
+
+
 
 def process_single_query(args):
     """
@@ -81,7 +107,7 @@ def process_single_query(args):
     
     # Load model
     node_feature_dim = 307
-    hidden_dim = 512
+    hidden_dim = 128
     model = CostGNNv2(node_feature_dim=node_feature_dim, hidden_dim=hidden_dim).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
@@ -104,6 +130,13 @@ def process_single_query(args):
         # Get the torch data from one of the plans
         plan_idx = 0  # Just use the first plan
         torch_data = query.torch_data[plan_idx]
+
+
+        # Todo decide whether to add this or not !
+        raise ValueError("Decide whether to add this or not !")
+        torch_data = add_fingerprints_to_query_data(torch_data, fingerprint_dim=14)
+
+
         triple_objs = [Triple(*(Entity(name=name) for name in triple[:3])) for triple in query.triples]
         
         if torch_data is None:
@@ -469,7 +502,7 @@ if __name__ == "__main__":
 
     config_lubm_star = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
-        "model_path": "/home/tim/query_optimization/datasets/models/lubm/star_model.pt",
+        "model_path": "/home/tim/query_optimization/training_results/lubm-star-new-v2/model.pt",
         "num_queries": 20,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "optimization_steps": 1000,
@@ -498,7 +531,7 @@ if __name__ == "__main__":
             "return_best": True,
             "min_penalty_threshold": 5,
             "use_lambda_ramping": True,
-            "logit_sampling": "sigmoid",
+            "logit_sampling": "dual-softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
             "lambda_ramp_exponent": 6.5,
@@ -589,7 +622,7 @@ if __name__ == "__main__":
         }
     }
 
-    config = config_lubm_path
+    config = config_lubm_star
     
     # Create unique save directory based on datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
