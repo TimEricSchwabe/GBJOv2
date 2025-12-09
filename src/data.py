@@ -3,7 +3,9 @@ from typing import Union, Optional, Callable
 
 import re
 import requests
-from requests.exceptions import Timeout, RequestException
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from requests.exceptions import Timeout, RequestException, ConnectionError
 import numpy as np
 import random
 import graphviz
@@ -14,6 +16,69 @@ import torch
 import asyncio
 from tqdm import tqdm
 import pickle
+
+# ============== SPARQL Query Execution Setup ==============
+# Shared session with retry logic and connection pooling.
+# requests.Session is thread-safe, so one session works for all workers.
+
+QLEVER_ENDPOINT = "http://127.0.0.1:7001/"
+
+_session = requests.Session()
+_retry = Retry(
+    total=3,
+    connect=3,
+    read=3,
+    backoff_factor=0.2,
+    status_forcelist=[500, 502, 503, 504],
+    allowed_methods=["GET"],
+    raise_on_status=False,
+)
+_adapter = HTTPAdapter(max_retries=_retry, pool_connections=10, pool_maxsize=10)
+_session.mount("http://", _adapter)
+_session.mount("https://", _adapter)
+
+
+def run_count_query(where_body: str,
+                    connect_timeout: float = 5.0,
+                    read_timeout: float = 60.0) -> int:
+    """
+    Run SELECT (COUNT(*) AS ?count) WHERE { ... } on QLever and return the integer count.
+    
+    Args:
+        where_body: The WHERE clause body (without the WHERE { } wrapper)
+        connect_timeout: Timeout for establishing connection
+        read_timeout: Timeout for reading response
+        
+    Returns:
+        Integer count result
+        
+    Raises:
+        RuntimeError("SPARQL timeout") on timeout
+        RuntimeError("SPARQL error: ...") on persistent HTTP/JSON errors
+    """
+    query = f"""
+        SELECT (COUNT(*) AS ?count)
+        WHERE {{
+            {where_body}
+        }}
+    """
+    try:
+        resp = _session.get(
+            QLEVER_ENDPOINT,
+            params={"query": query, "format": "json"},
+            timeout=(connect_timeout, read_timeout),
+            headers={
+                "Accept": "application/sparql-results+json",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        count_str = data["results"]["bindings"][0]["count"]["value"]
+        return int(count_str)
+    except Timeout:
+        raise RuntimeError("SPARQL timeout")
+    except (RequestException, ValueError, KeyError, IndexError) as e:
+        raise RuntimeError(f"SPARQL error: {e}")
 
 @dataclass
 class Entity:
@@ -110,40 +175,7 @@ class Triple:
 		Returns the cardinality (number of matching triples) for this triple pattern.
 		This is useful when the triple pattern is considered as a standalone query.
 		"""
-		query = f"""
-			SELECT (COUNT(*) AS ?count)
-			WHERE {{ 
-				{self.where_body()}	
-			}}
-		"""
-		try:
-			response = requests.get(
-				"http://127.0.0.1:7001",
-				params={
-					"query": query,
-					"format": "json", 
-				},
-				timeout=30  # 30 second timeout
-			)
-			response.raise_for_status()
-			res_json = response.json()
-		except Exception as e:
-			print(f"SPARQL request failed for triple: {self.where_body()}, error: {e}")
-			raise e
-		except Timeout:
-			print(f"SPARQL request timed out for triple: {self.where_body()}")
-			raise RuntimeError("SPARQL timeout")
-		except (RequestException, ValueError) as e:
-			print(f"SPARQL request failed for triple: {self.where_body()}, error: {e}")
-			raise RuntimeError(f"SPARQL error: {e}")
-		
-		try:
-			count_val = res_json["results"]["bindings"][0]["count"]["value"]
-			return int(count_val)
-		except (KeyError, IndexError):
-			print("Error in the following query:", query)
-			print(res_json)
-			raise RuntimeError("Query failed")
+		return run_count_query(self.where_body())
 	
 	def get_cost(self) -> int:
 		"""
@@ -202,79 +234,14 @@ class Join:
 		"""
 		Returns the c_out cost of this join
 		"""
-		query = f"""
-			SELECT (COUNT(*) AS ?count)
-			WHERE {{ 
-				{self.where_body()}	
-			}}
-		"""
-
-		try:
-			response = requests.get(
-				"http://127.0.0.1:7001",
-				params={
-					"query": query,
-					"format": "json",
-				},
-				timeout=30  # 30 second timeout
-			)
-			response.raise_for_status()
-			res_json = response.json()
-		except Timeout:
-			print(f"SPARQL request timed out for join: {self.where_body()}")
-			raise RuntimeError("SPARQL timeout")
-		except (RequestException, ValueError) as e:
-			print(f"SPARQL request failed for join: {self.where_body()}, error: {e}")
-			raise RuntimeError(f"SPARQL error: {e}")
-		
-		try:
-			count_val = res_json["results"]["bindings"][0]["count"]["value"]
-			self_cardinality = int(count_val)
-		except (KeyError, IndexError):
-			print("Error in the following query:", query)
-			print(res_json)
-			raise RuntimeError("Query failed")
-
+		self_cardinality = run_count_query(self.where_body())
 		left_cost = self.left.get_cost()
 		right_cost = self.right.get_cost()
 
 		return self_cardinality + left_cost + right_cost
 	
 	def get_cardinality(self) -> int:
-		query = f"""
-			SELECT (COUNT(*) AS ?count)
-			WHERE {{ 
-				{self.where_body()}	
-			}}
-		"""
-		try:
-			response = requests.get(
-				"http://127.0.0.1:7001",
-				params={
-					"query": query,
-					"format": "json",
-				},
-				timeout=30  # 30 second timeout
-			)
-			response.raise_for_status()
-			res_json = response.json()
-		except Timeout:
-			print(f"SPARQL request timed out for join: {self.where_body()}")
-			raise RuntimeError("SPARQL timeout")
-		except (RequestException, ValueError) as e:
-			print(f"SPARQL request failed for join: {self.where_body()}, error: {e}")
-			raise RuntimeError(f"SPARQL error: {e}")
-		
-		try:
-			count_val = res_json["results"]["bindings"][0]["count"]["value"]
-			self_cardinality = int(count_val)
-		except (KeyError, IndexError):
-			print("Error in the following query:", query)
-			print(res_json)
-			raise RuntimeError("Query failed")
-
-
-		return self_cardinality
+		return run_count_query(self.where_body())
 	
 
 	def add_to_graph(self, graph, node_id):
