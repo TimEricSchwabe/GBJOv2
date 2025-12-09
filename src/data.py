@@ -25,7 +25,7 @@ QLEVER_ENDPOINT = "http://127.0.0.1:7001/"
 
 _session = requests.Session()
 _retry = Retry(
-    total=3,
+    total=1,
     connect=3,
     read=3,
     backoff_factor=0.2,
