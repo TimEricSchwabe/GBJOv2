@@ -83,9 +83,9 @@ def create_random_join_orders(triples: List[List[str]], count: int, rdf2vec_dict
     return plans
 
 
-def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> Tuple[Query, float]:
+def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> List[Tuple[Query, float]]:
     """
-    Build a left-deep plan using beam search to find plans that minimize cost.
+    Build left-deep plans using beam search to find plans that minimize cost.
     Keeps top beam_width partial plans at each step.
     
     Args:
@@ -93,14 +93,14 @@ def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> Tupl
         beam_width: Number of top plans to keep at each step (1 = greedy)
         
     Returns:
-        Tuple of (Query object, final_cost) - the best plan and its cost
+        List of (Query object, cost) tuples - up to beam_width best plans sorted by cost ascending
     """
     triple_objs = [Triple(*(Entity(name=name) for name in t[:3])) for t in triples]
     n = len(triple_objs)
     
     if n == 1:
         # C_out cost for a single triple is 0 (leaves have no cost)
-        return Query(root=triple_objs[0], triples_num=1), 0
+        return [(Query(root=triple_objs[0], triples_num=1), 0)]
     
     # Initialize beam with single triples
     # Each beam entry: (cardinality_for_sorting, plan, used_indices_frozenset)
@@ -149,14 +149,13 @@ def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> Tupl
         candidates.sort(key=lambda x: x[0])
         beam = candidates[:beam_width]
     
-    # Return the best complete plan
-    best_cost, best_plan, _ = beam[0]
-    return Query(root=best_plan, triples_num=n), best_cost
+    # Return ALL complete plans in the beam (already sorted by cost ascending)
+    return [(Query(root=plan, triples_num=n), cost) for cost, plan, _ in beam]
 
 
-def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> Tuple[Query, float]:
+def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> List[Tuple[Query, float]]:
     """
-    Build a left-deep plan using beam search to find plans that MAXIMIZE cost.
+    Build left-deep plans using beam search to find plans that MAXIMIZE cost.
     Keeps top beam_width partial plans (by highest cost) at each step.
     
     Args:
@@ -164,14 +163,14 @@ def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> Tup
         beam_width: Number of top plans to keep at each step (1 = greedy)
         
     Returns:
-        Tuple of (Query object, final_cost) - the worst plan and its cost
+        List of (Query object, cost) tuples - up to beam_width worst plans sorted by cost descending
     """
     triple_objs = [Triple(*(Entity(name=name) for name in t[:3])) for t in triples]
     n = len(triple_objs)
     
     if n == 1:
         # C_out cost for a single triple is 0 (leaves have no cost)
-        return Query(root=triple_objs[0], triples_num=1), 0
+        return [(Query(root=triple_objs[0], triples_num=1), 0)]
     
     # Initialize beam with single triples
     # Each beam entry: (cardinality_for_sorting, plan, used_indices_frozenset)
@@ -219,23 +218,22 @@ def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> Tup
         candidates.sort(key=lambda x: x[0], reverse=True)
         beam = candidates[:beam_width]
     
-    # Return the worst (highest cost) complete plan
-    worst_cost, worst_plan, _ = beam[0]
-    return Query(root=worst_plan, triples_num=n), worst_cost
+    # Return ALL complete plans in the beam (already sorted by cost descending)
+    return [(Query(root=plan, triples_num=n), cost) for cost, plan, _ in beam]
 
 
 def create_diverse_join_orders(triples: List[List[str]], num_random: int = 3, 
                                 beam_width: int = 1) -> List[Tuple[Query, Optional[float]]]:
     """
     Create a diverse set of join orders including:
-    - 1 beam-search-best plan (minimizes real execution cost)
-    - 1 beam-search-worst plan (maximizes real execution cost)
+    - beam_width beam-search-best plans (minimize real execution cost)
+    - beam_width beam-search-worst plans (maximize real execution cost)
     - num_random random plans (for coverage of middle ground)
     
     Args:
         triples: List of triple patterns
         num_random: Number of random plans to generate
-        beam_width: Beam width for search (1 = greedy, higher = more exploration)
+        beam_width: Beam width for search (returns this many best and worst plans)
         
     Returns:
         List of (Query, cost_or_None) tuples. Beam search plans include pre-computed costs,
@@ -243,20 +241,20 @@ def create_diverse_join_orders(triples: List[List[str]], num_random: int = 3,
     """
     plans = []
     
-    # 1. Beam search best plan (comes with pre-computed cost)
+    # 1. Beam search best plans (come with pre-computed costs)
     try:
-        best_plan, best_cost = beam_search_best_plan(triples, beam_width=beam_width)
-        plans.append((best_plan, best_cost))
+        best_plans = beam_search_best_plan(triples, beam_width=beam_width)
+        plans.extend(best_plans)  # Add all beam_width best plans
     except Exception as e:
-        print(f"Error creating beam-search-best plan: {e}")
+        print(f"Error creating beam-search-best plans: {e}")
         return None
     
-    # 2. Beam search worst plan (comes with pre-computed cost)
+    # 2. Beam search worst plans (come with pre-computed costs)
     try:
-        worst_plan, worst_cost = beam_search_worst_plan(triples, beam_width=beam_width)
-        plans.append((worst_plan, worst_cost))
+        worst_plans = beam_search_worst_plan(triples, beam_width=beam_width)
+        plans.extend(worst_plans)  # Add all beam_width worst plans
     except Exception as e:
-        print(f"Error creating beam-search-worst plan: {e}")
+        print(f"Error creating beam-search-worst plans: {e}")
         return None
     
     # 3. Random plans (cost will be calculated later)
@@ -493,7 +491,7 @@ def save_sparql_queries_single_file(sparql_queries, output_file):
     print(f"Saved {len(sparql_queries)} SPARQLQuery objects to {output_file}")
 
 
-def save_sparql_queries_human_readable(sparql_queries, output_file, use_diverse_plans=True):
+def save_sparql_queries_human_readable(sparql_queries, output_file, use_diverse_plans=True, beam_width=1):
     """
     Save SPARQLQuery objects to a human-readable JSON file.
     
@@ -502,15 +500,16 @@ def save_sparql_queries_human_readable(sparql_queries, output_file, use_diverse_
     - plans: List of join plan structures with their costs
     - best_plan_index: Index of the plan with lowest cost (actual best)
     
-    When use_diverse_plans=True, plans are labeled as:
-    - Index 0: beam_search_best (greedy optimizer's best plan)
-    - Index 1: beam_search_worst (greedy optimizer's worst plan)
-    - Index 2+: random plans
+    When use_diverse_plans=True, plans are labeled based on beam_width:
+    - Indices [0:beam_width): beam_search_best plans (ranked 1st, 2nd, etc.)
+    - Indices [beam_width:2*beam_width): beam_search_worst plans (ranked 1st, 2nd, etc.)
+    - Indices [2*beam_width:): random plans
     
     Args:
         sparql_queries: List of SPARQLQuery objects
         output_file: Path to save the JSON file
         use_diverse_plans: If True, label plans with beam search info
+        beam_width: Beam width used for search (to properly label plans)
     """
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     
@@ -518,10 +517,16 @@ def save_sparql_queries_human_readable(sparql_queries, output_file, use_diverse_
         """Get the type label for a plan based on its index."""
         if not use_diverse_plans:
             return "random"
-        if plan_idx == 0:
-            return "beam_search_best"
-        elif plan_idx == 1:
-            return "beam_search_worst"
+        
+        # With beam_width plans, we have:
+        # [0:beam_width) = beam_search_best plans
+        # [beam_width:2*beam_width) = beam_search_worst plans
+        # [2*beam_width:) = random plans
+        
+        if plan_idx < beam_width:
+            return f"beam_search_best_rank_{plan_idx + 1}"
+        elif plan_idx < 2 * beam_width:
+            return f"beam_search_worst_rank_{plan_idx - beam_width + 1}"
         else:
             return "random"
     
@@ -645,7 +650,7 @@ if __name__ == "__main__":
 
 
     # How many queries to process
-    MAX_QUERIES = 1000
+    MAX_QUERIES = 5
 
     # The minimum cardinality of the queries to process
     MIN_CARDINALITY = 1
@@ -760,6 +765,6 @@ if __name__ == "__main__":
     
     # Save human-readable version
     human_readable_file = sparql_queries_file.replace('.pkl', '_readable.json')
-    save_sparql_queries_human_readable(sparql_queries, human_readable_file, use_diverse_plans=USE_DIVERSE_PLANS)
+    save_sparql_queries_human_readable(sparql_queries, human_readable_file, use_diverse_plans=USE_DIVERSE_PLANS, beam_width=BEAM_WIDTH)
 
     print("\nDataset creation complete!")
