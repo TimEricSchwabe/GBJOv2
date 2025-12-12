@@ -18,9 +18,13 @@ from .plan_decoder import project_to_leftdeep, project_leftdeep_greedy_beam
 
 from torch_geometric.utils import scatter, spmm
 
+import torch_optimizer as optim_extra
+
+import matplotlib.pyplot as plt  # Add this import if not present
 
 
-def optimize_query_gumbel(
+
+def GBJO(
     query_data,
     model,
     device: str = "cpu",
@@ -52,6 +56,7 @@ def optimize_query_gumbel(
     lr_warmup_steps: int = 200,
     decoding_method: str = 'greedy', # 'threshold', 'beam', 'greedy', 'hungarian'
     k: int = 1, #not used
+    use_gumbel_noise: bool = True,
 ):
 
     # Move data 
@@ -75,11 +80,13 @@ def optimize_query_gumbel(
 
     # Optimiser 
     if logit_sampling == 'dual-softmax':
-        optimiser = optim.AdamW([edge_logits, edge_logits_slot2], lr=learning_rate)
+        #optimiser = optim.AdamW([edge_logits, edge_logits_slot2], lr=learning_rate)
+        optimiser = optim.RAdam([edge_logits, edge_logits_slot2], lr=learning_rate)
+        optimiser = optim_extra.Lookahead(optimiser, k=10, alpha=0.5)
+
     else:
-        optimiser = optim.AdamW([edge_logits], lr=learning_rate)
-        # SGD with momentum
-        #optimiser = optim.SGD([edge_logits], lr=learning_rate, momentum=0.9)
+        optimiser = optim.RAdam([edge_logits], lr=learning_rate)
+        optimiser = optim_extra.Lookahead(optimiser, k=10, alpha=0.5)
     
 
     # Optional Learning rate scheduler for warmup and decay
@@ -154,9 +161,9 @@ def optimize_query_gumbel(
 
             # Sample only on join targets to avoid NaNs for empty groups
             slot1[join_target_mask] = sample_grouped_gumbel_softmax(
-                masked_logits_1[join_target_mask], edge_index[1][join_target_mask], tau)
+                masked_logits_1[join_target_mask], edge_index[1][join_target_mask], tau, use_gumbel_noise)
             slot2[join_target_mask] = sample_grouped_gumbel_softmax(
-                masked_logits_2[join_target_mask], edge_index[1][join_target_mask], tau)
+                masked_logits_2[join_target_mask], edge_index[1][join_target_mask], tau, use_gumbel_noise)
             
             edge_weights = slot1 + slot2  # relaxed 2-hot (values in (0,2))
             # Ensure root join has no outgoing edges (w.l.o.g.)
@@ -176,7 +183,7 @@ def optimize_query_gumbel(
             masked_logits[join_to_triple_mask] = float('-inf')
             
             # Use Gumbel-Softmax for exactly one outgoing edge per source node
-            edge_weights = sample_grouped_gumbel_softmax(masked_logits, edge_index[0], tau)
+            edge_weights = sample_grouped_gumbel_softmax(masked_logits, edge_index[0], tau, use_gumbel_noise)
             # Root (final join) should have *no* outgoing edge
             edge_weights[edge_index[0] == (N_NODES - 1)] = 0.0
         else:
@@ -397,9 +404,9 @@ def optimize_query_gumbel(
 
                 # Sample only on join targets to avoid NaNs for empty groups
                 slot1[join_target_mask] = sample_grouped_gumbel_softmax(
-                    masked_logits_1[join_target_mask], edge_index[1][join_target_mask], tau)
+                    masked_logits_1[join_target_mask], edge_index[1][join_target_mask], tau, use_gumbel_noise)
                 slot2[join_target_mask] = sample_grouped_gumbel_softmax(
-                    masked_logits_2[join_target_mask], edge_index[1][join_target_mask], tau)
+                    masked_logits_2[join_target_mask], edge_index[1][join_target_mask], tau, use_gumbel_noise)
                 
                 edge_weights = slot1 + slot2  # relaxed 2-hot (values in (0,2))
                 # Ensure root join has no outgoing edges
@@ -454,7 +461,7 @@ def optimize_query_gumbel(
                 masked_logits[join_to_triple_mask] = float('-inf')
                 
                 # Use grouped Gumbel-Softmax for exactly one outgoing edge per source node
-                edge_weights = sample_grouped_gumbel_softmax(masked_logits, edge_index[0], tau)
+                edge_weights = sample_grouped_gumbel_softmax(masked_logits, edge_index[0], tau, use_gumbel_noise)
                 # Root (final join) should have *no* outgoing edge
                 edge_weights[edge_index[0] == (N_NODES - 1)] = 0.0
                 final_edge_weights = edge_weights
@@ -524,13 +531,16 @@ def optimize_query_gumbel(
         return final_A, triples_num, predicted_cost_exp
 
 
-def greedy_optimize_query(query_data, model, original_triples, device='cpu', verbose=True, choose_random=False):
+def GreedySearch(query_data, model, original_triples, device='cpu', verbose=True, choose_random=False):
     """
     Use a greedy heuristic to build a query plan using the cost model.
     After picking the first triple pattern, every further candidate is
     evaluated by creating a new join node that the current (sub-)plan
     root and the candidate triple both point to.
     """
+    PICK_FIRST_MODE = "Join" # "Join" or "Triple"
+
+
     model.eval()
     data = query_data.to(device)  # Ensure consistent device
     triples_num = len(original_triples)
@@ -539,14 +549,15 @@ def greedy_optimize_query(query_data, model, original_triples, device='cpu', ver
         raise ValueError("No triples provided")
     if triples_num == 1:
         # Handle single triple case
-        pass
+        raise ValueError("Single triple case not supported")
     
     if verbose:
         print("Starting greedy query optimization")
         print(f"Number of triple patterns: {triples_num}")
     
+    # ---------------------------------------------------------------------------------
     # Helper: build a graph consisting of the current plan + new triple
-    def build_join_graph(curr_x, curr_edge_index, curr_root_idx, candidate_feat):
+    def build_join_graph(curr_x, curr_edge_index, curr_root_idx, candidate_feat, join_feat):
         """
         curr_x            : node feature matrix of current plan
         curr_edge_index   : edge index of current plan
@@ -556,9 +567,6 @@ def greedy_optimize_query(query_data, model, original_triples, device='cpu', ver
         returns:
             new_x, new_edge_index, new_root_idx
         """
-        # (1) new join node feature  (all-zeros + last dim = 1 to mark join)
-        join_feat = torch.zeros_like(candidate_feat)
-        join_feat[..., -1] = 1.0
 
         # (2) concatenate features   [ current | candidate | join ]
         new_x = torch.cat([curr_x, candidate_feat, join_feat], dim=0)
@@ -580,30 +588,82 @@ def greedy_optimize_query(query_data, model, original_triples, device='cpu', ver
             new_edge_index = torch.cat([curr_edge_index, additional_edges], dim=1)
 
         return new_x, new_edge_index, join_node_idx
+    # ---------------------------------------------------------------------------------
 
     # Step 1 : choose the cheapest single triple
     original_features = query_data.x[:triples_num].clone().to(device)
 
+    
+    if PICK_FIRST_MODE == "Join":
+        best_pair_cost  = float('inf')
+        best_i, best_j = -1, -1
 
-    best_first_cost, best_first_idx = float('inf'), -1
-    for i in range(triples_num):
-        with torch.no_grad():
-            cost = model(original_features[i:i + 1],
-                            torch.zeros((2, 0), dtype=torch.long, device=device)).item()
-        if cost < best_first_cost:
-            best_first_cost, best_first_idx = cost, i
+        # Fixed Join Node Feature
+        join_feat = torch.zeros_like(original_features[-1])
+        join_feat[-1] = 1.0
+        gaussian = torch.randn((64,), device=device)
+        gaussian = gaussian / gaussian.norm(p=2)
 
-    if verbose:
-        print(f"Initial best triple: {best_first_idx} (cost={best_first_cost:.4f})")
+        join_feat[:64] = gaussian
+        join_feat = join_feat.unsqueeze(0)
 
-    # initialise current plan
-    current_x = original_features[best_first_idx:best_first_idx + 1]           # one node
-    current_edge_index = torch.zeros((2, 0), dtype=torch.long, device=device)  # no edges yet
-    current_root_idx = 0                                                       # only node is root
-    current_plan = original_triples[best_first_idx]
 
-    remaining_triples = list(range(triples_num))
-    remaining_triples.remove(best_first_idx)
+        current_edge_index = torch.tensor([[0,1],
+                                    [2,2]], dtype=torch.long, device=device)
+        for i,j in itertools.combinations(range(triples_num),2):
+            x_i = original_features[i:i + 1]
+            x_j = original_features[j:j + 1]
+
+            x = torch.cat([x_i, x_j, join_feat], dim=0)
+
+
+
+            with torch.no_grad():
+                cost = model(x, current_edge_index).item()
+            
+            if cost < best_pair_cost:
+                best_pair_cost = cost
+                best_i, best_j = i, j
+
+        # Build start Join Plan
+        x_i = original_features[best_i:best_i + 1]
+        x_j = original_features[best_j:best_j + 1]
+
+
+        current_x = torch.cat([x_i, x_j, join_feat], dim=0)
+        current_root_idx = 2
+        current_plan = Join(left=original_triples[best_i], right=original_triples[best_j])
+
+        remaining_triples = list(range(triples_num))
+        remaining_triples.remove(best_i)
+        remaining_triples.remove(best_j)
+
+
+    else:
+        raise ValueError("icking first triple not without Join in Greedy")
+        best_first_cost, best_first_idx = float('inf'), -1
+        for i in range(triples_num):
+            with torch.no_grad():
+                cost = model(original_features[i:i + 1],
+                                torch.zeros((2, 0), dtype=torch.long, device=device)).item()
+            if cost < best_first_cost:
+                best_first_cost, best_first_idx = cost, i
+
+        if verbose:
+            print(f"Initial best triple: {best_first_idx} (cost={best_first_cost:.4f})")
+
+        # initialise current plan
+        current_x = original_features[best_first_idx:best_first_idx + 1]           # one node
+        current_edge_index = torch.zeros((2, 0), dtype=torch.long, device=device)  # no edges yet
+        current_root_idx = 0            
+        
+                                                   # only node is root
+        current_plan = original_triples[best_first_idx]
+
+        remaining_triples = list(range(triples_num))
+        remaining_triples.remove(best_first_idx)
+
+    
 
     # Greedily add triples one by one
     while remaining_triples:
@@ -611,12 +671,21 @@ def greedy_optimize_query(query_data, model, original_triples, device='cpu', ver
         best_x = best_edge_index = None
         best_root_idx = None
 
+        # Init fixed new join feature
+        join_feat = torch.zeros_like(current_x[-1])
+        join_feat[-1] = 1.0
+        gaussian = torch.randn((64,), device=device)
+        gaussian = gaussian / gaussian.norm(p=2)
+
+        join_feat[:64] = gaussian
+        join_feat = join_feat.unsqueeze(0)
+
         for cand_idx in remaining_triples:
             cand_feat = original_features[cand_idx:cand_idx + 1]
 
             # build graph with extra join
             new_x, new_edge_index, new_root_idx = build_join_graph(
-                current_x, current_edge_index, current_root_idx, cand_feat
+                current_x, current_edge_index, current_root_idx, cand_feat, join_feat
             )
 
             # predict cost
@@ -673,7 +742,7 @@ def random_join_plan(original_triples, seed=None):
     
     return random_plan
 
-def dp_leftdeep_best_plan(query_data, model, device="cpu"):
+def DPLinear(query_data, model, device="cpu"):
     """
     Selinger Style Dynamic Programming for Left-Deep Join Plans, motivated by:
     https://www.cs.emory.edu/~cheung/Courses/554/Syllabus/5-query-opt/dyn-prog-join2.html
@@ -681,9 +750,9 @@ def dp_leftdeep_best_plan(query_data, model, device="cpu"):
     Parameters
     ----------
     query_data : torch_geometric.data.Data
-        Node-feature matrix x (nTP + nJoin × F) of *one* random plan plus
-        triple-count.  We ignore the supplied edges and create our own.
-    model      : CostGNNv2
+        Node-feature matrix x (nTP + nJoin * F) of *one* random plan plus
+        triple-count.
+    model      : CostGNN
         Trained cost model in eval mode.
     device     : "cpu" | "cuda"
         Device on which to run the CostGNN.
@@ -701,8 +770,9 @@ def dp_leftdeep_best_plan(query_data, model, device="cpu"):
     # Pre-build template node-feature matrix: first n triple features,
     # followed by (n-1) identical join-node features.
     triple_feats = data.x[:n_triples].clone()
-    join_feat    = torch.zeros(F, device=device);  join_feat[-1] = 1.0
-    join_feats   = join_feat.unsqueeze(0).repeat(n_triples - 1, 1)
+    join_feats = data.x[n_triples:].clone()
+    #join_feat    = torch.zeros(F, device=device);  join_feat[-1] = 1.0
+    #join_feats   = join_feat.unsqueeze(0).repeat(n_triples - 1, 1)
     node_feats   = torch.cat([triple_feats, join_feats], dim=0)
 
     # DP table: key = frozenset({indices of triples}); value = (cost, A)
@@ -720,15 +790,15 @@ def dp_leftdeep_best_plan(query_data, model, device="cpu"):
     for k in range(2, n_triples + 1):
         for subset in itertools.combinations(range(n_triples), k):
             S = frozenset(subset)
-            best_cost, best_A = float("inf"), None
+            best_cost, best_A = float("inf"), None #Best cost and best plan (adjancency) to join this subset of triples
 
             # Try every triple as the *last* right child
             for last in subset:
                 left_set = S - {last}
-                left_cost, left_A = dp[left_set]
+                left_cost, left_A = dp[left_set] # Note, we already computed the best plan to join leftset
 
                 # Build adjacency for (left ⨝ last)
-                A = left_A.clone()
+                A = left_A.clone() #optimal plan to join leftset
                 idx_join = n_triples + k - 2            # next free join idx
                 # connect children → parent
                 #   a) root of left plan
@@ -913,6 +983,7 @@ def optimize_query_gumbel_efficient_reduced(
     use_lr_scheduling: bool = True,
     lr_warmup_steps: int = 200,
     decoding_method: str = "threshold",
+    use_gumbel_noise: bool = True,
     **kwargs,
 ):
     """Same optimiser as *optimize_query_gumbel_efficient* but stores logits
@@ -976,8 +1047,8 @@ def optimize_query_gumbel_efficient_reduced(
 
         # ----------------  edge sampling  -----------------------------------
         # No invalid-edge masking needed: every candidate is valid.
-        slot1 = sample_grouped_gumbel_softmax(edge_logits, dst, tau)
-        slot2 = sample_grouped_gumbel_softmax(edge_logits_slot2, dst, tau)
+        slot1 = sample_grouped_gumbel_softmax(edge_logits, dst, tau, use_gumbel_noise)
+        slot2 = sample_grouped_gumbel_softmax(edge_logits_slot2, dst, tau, use_gumbel_noise)
         edge_weights = slot1 + slot2  # (0,2)
         edge_weights[root_outgoing_mask] = 0.0
 
@@ -1050,7 +1121,7 @@ def optimize_query_gumbel_efficient_reduced(
     return final_A, triples_num, predicted_cost_exp
 
 
-def optimize_query_neuralsort(
+def optimize_query_gumbel_sinkhorn(
     query_data,
     model,
     device: str = "cpu",
@@ -1225,7 +1296,7 @@ def optimize_query_neuralsort(
         return final_A, triples_num, final_cost
 
 
-def optimize_query_neuralsort_v2(
+def NeuralSort(
     query_data,
     model,
     device: str = "cpu",
@@ -1286,29 +1357,40 @@ def optimize_query_neuralsort_v2(
         device=device, 
         dtype=torch.float32
     )  # Shape: (n,)
+
+
+    costs_history = [] 
+    soft_costs_history = []
     
     for step in range(optimization_steps):
         optimizer.zero_grad()
         
         # Temperature annealing
-        tau = max(min_tau, init_tau * (tau_decay ** step))
+        tau = 4
         
         # ========================================
         # NeuralSort Formula (Equation 6)
         # ========================================
-        # P[i, j] = softmax((n+1-2*(i+1)) * s / tau)[j]
-        # 
-        # For each row i, we compute:
-        #   logits[i, :] = position_weights[i] * scores / tau
-        #   P[i, :] = softmax(logits[i, :])
+        # P[i, j] = softmax(((n+1-2*(i+1)) * s_j - sum_k|s_j - s_k|) / tau)[j]
         
-        # Outer product: (n,) × (n,) -> (n, n)
-        # logits[i, j] = position_weights[i] * scores[j] / tau
-        logits = torch.outer(position_weights, scores) / tau  # Shape: (n, n)
+        # 1. Compute pairwise absolute differences: A[j] = sum_k |s_j - s_k|
+        # scores: (n,)
+        s_vec = scores.unsqueeze(1) # (n, 1)
+        A_scores = torch.abs(s_vec - s_vec.t()) # (n, n)
+        A = torch.sum(A_scores, dim=1) # (n,)
+        
+        # 2. Compute logits
+        # Term 1: (n+1-2i) * s_j -> Outer product (n, n)
+        term1 = torch.outer(position_weights, scores)
+        
+        # Term 2: -A[j] -> Broadcast to (n, n)
+        term2 = A.unsqueeze(0) # (1, n)
+        
+        # Combine
+        logits = (term1 - term2) / tau
         
         # Softmax over columns (which table goes to each position)
         P = torch.softmax(logits, dim=1)  # Shape: (n, n)
-        # P[i, j] = probability that position i gets table j
         
         # Permute Triple Features
         permuted_triples = torch.matmul(P, data.x[:triples_num])
@@ -1318,16 +1400,58 @@ def optimize_query_neuralsort_v2(
         
         # Predict Cost
         cost_pred = model(node_feats, fixed_edge_index)
+
         
         # Loss = just the cost (no penalties needed!)
         loss = cost_pred
         loss.backward()
         optimizer.step()
+
+
+        with torch.no_grad():
+            # 1. Decode current scores to hard permutation
+            current_perm = torch.argsort(scores, descending=True)
+            
+            # 2. Map to graph structure (same as Final Decoding logic)
+            temp_src = []
+            temp_dst = []
+            perm_map = current_perm.cpu().numpy()
+            fixed_src_np = fixed_edge_index[0].cpu().numpy()
+            fixed_dst_np = fixed_edge_index[1].cpu().numpy()
+            
+            for s, d in zip(fixed_src_np, fixed_dst_np):
+                real_s = perm_map[s] if s < triples_num else s
+                real_d = perm_map[d] if d < triples_num else d
+                temp_src.append(real_s)
+                temp_dst.append(real_d)
+            
+            temp_edge_idx = torch.tensor([temp_src, temp_dst], device=device)
+            
+            # 3. Evaluate Model with HARD edges and ORIGINAL data
+            hard_cost = model(data.x, temp_edge_idx).item()
+            
+            if hard_cost < best_cost:
+                best_cost = hard_cost
+                best_scores = scores.detach().clone()
         
         # Track Best
-        if return_best and cost_pred.item() < best_cost:
-            best_cost = cost_pred.item()
-            best_scores = scores.detach().clone()
+        #if return_best and cost_pred.item() < best_cost:
+        #    best_cost = cost_pred.item()
+        #    best_scores = scores.detach().clone()
+
+
+        costs_history.append(hard_cost)
+        soft_costs_history.append(cost_pred.item())
+
+    # plt.figure(figsize=(10, 5))
+    # plt.plot(costs_history, label='Predicted Cost')
+    # plt.plot(soft_costs_history, label='Soft Cost')
+    # plt.xlabel('Optimization Step')
+    # plt.ylabel('Cost')
+    # plt.title('NeuralSort Optimization Progress')
+    # plt.legend()
+    # plt.grid(True)
+    # plt.show() 
     
     # ========================================
     # Final Decoding: Simple argsort
@@ -1368,7 +1492,268 @@ def optimize_query_neuralsort_v2(
         final_log_cost = model(data.x, final_edge_idx).item()
         final_cost = float(np.exp(final_log_cost))
 
+
+
     if save_animation_data:
         return final_A, triples_num, final_cost, None
     else:
         return final_A, triples_num, final_cost
+
+
+def optimize_query_nevergrad(
+    query_data,
+    model,
+    device: str = "cpu",
+    *,
+    optimization_steps: int = 500,
+    verbose: bool = True,
+    lambda_acyclic: float = 1000.0,
+    lambda_triple_in: float = 1000.0,
+    lambda_triple_out: float = 1000.0,
+    lambda_join_in: float = 500.0,
+    lambda_join_out: float = 1000.0,
+    lambda_left_linear: float = 1000.0,
+    lambda_total_penalty: float = 1.0,
+    use_lambda_ramping: bool = True,
+    lambda_ramp_exponent: float = 2.0,
+    logit_sampling: str = 'dual-softmax',
+    decoding_method: str = 'greedy',
+    save_animation_data: bool = False,
+    num_workers: int = 1,
+    **kwargs,
+):
+    """
+    Gradient-free query plan optimization using Nevergrad's NGOpt.
+    
+    Same objective as optimize_query_gumbel but uses evolutionary/derivative-free
+    optimization instead of gradient descent.
+    """
+    import nevergrad as ng
+    
+    model.eval()
+    data = query_data.to(device)
+    N_NODES = len(data.x)
+    triples_num = (N_NODES + 1) // 2
+    
+    # Build candidate edges (exclude self-loops)
+    src, dst = torch.where(~torch.eye(N_NODES, dtype=torch.bool, device=device))
+    edge_index = torch.stack([src, dst], dim=0)
+    num_edges = edge_index.size(1)
+    
+    # Precompute masks for valid edges
+    triple_to_triple = (src < triples_num) & (dst < triples_num)
+    join_to_triple = (src >= triples_num) & (dst < triples_num)
+    invalid_mask = triple_to_triple | join_to_triple
+    root = N_NODES - 1
+    
+    triple_nodes = torch.arange(triples_num, device=device)
+    join_nodes = torch.arange(triples_num, N_NODES, device=device)
+    non_root_joins = torch.arange(triples_num, root, device=device)
+    
+    call_counter = [0]
+    
+    def objective(params):
+        """Evaluate cost + penalties for given edge logits."""
+        # Lambda ramping: landscape changes over time
+        if use_lambda_ramping:
+            frac = min(1.0, call_counter[0] / optimization_steps)
+            lambda_total = lambda_total_penalty * (frac ** lambda_ramp_exponent)
+        else:
+            lambda_total = lambda_total_penalty
+        call_counter[0] += 1
+        
+        with torch.no_grad():
+            if logit_sampling == 'dual-softmax':
+                logits1 = torch.tensor(params[:num_edges], dtype=torch.float32, device=device)
+                logits2 = torch.tensor(params[num_edges:], dtype=torch.float32, device=device)
+                
+                # Mask invalid edges
+                logits1[invalid_mask] = float('-inf')
+                logits2[invalid_mask] = float('-inf')
+                
+                # Grouped softmax per target join node
+                slot1 = torch.zeros(num_edges, device=device)
+                slot2 = torch.zeros(num_edges, device=device)
+                
+                for j in join_nodes:
+                    cand = (dst == j)
+                    if cand.any():
+                        slot1[cand] = torch.softmax(logits1[cand], dim=0)
+                        slot2[cand] = torch.softmax(logits2[cand], dim=0)
+                
+                edge_weights = slot1 + slot2
+                edge_weights[src == root] = 0.0
+                
+            else:  # softmax
+                logits = torch.tensor(params, dtype=torch.float32, device=device)
+                logits[invalid_mask] = float('-inf')
+                
+                edge_weights = torch.zeros(num_edges, device=device)
+                for v in torch.unique(src):
+                    if v == root:
+                        continue
+                    m = (src == v)
+                    edge_weights[m] = torch.softmax(logits[m], dim=0)
+            
+            # Cost prediction
+            cost = model(data.x, edge_index, edge_weight=edge_weights).item()
+            
+            # Build adjacency for penalties
+            A = torch.zeros((N_NODES, N_NODES), device=device)
+            A[src, dst] = edge_weights
+            
+            in_deg = A.sum(0)
+            out_deg = A.sum(1)
+            
+            # Structural penalties
+            P_triple_in = (in_deg[triple_nodes] ** 2).sum().item()
+            P_triple_out = ((out_deg[triple_nodes] - 1) ** 2).sum().item()
+            P_join_in = ((in_deg[join_nodes] - 2) ** 2).sum().item()
+            P_join_out = ((out_deg[non_root_joins] - 1) ** 2).sum().item() + (out_deg[root] ** 2).item()
+            P_acyclic = (torch.trace(torch.matrix_exp(A)) - N_NODES).item()
+            
+            # Left-deep penalty
+            child_triple_counts = A[:triples_num, :][:, join_nodes].sum(0)
+            child_join_counts = A[join_nodes, :][:, join_nodes].sum(0)
+            
+            if len(join_nodes) > 0:
+                P_first = ((child_triple_counts[0] - 2) ** 2 + child_join_counts[0] ** 2).item()
+                if len(join_nodes) > 1:
+                    P_rest = ((child_triple_counts[1:] - 1) ** 2).sum().item()
+                    P_rest += ((child_join_counts[1:] - 1) ** 2).sum().item()
+                    P_left_linear = P_first + P_rest
+                else:
+                    P_left_linear = P_first
+            else:
+                P_left_linear = 0.0
+            
+            total_penalty = (
+                lambda_triple_in * P_triple_in +
+                lambda_triple_out * P_triple_out +
+                lambda_join_in * P_join_in +
+                lambda_join_out * P_join_out +
+                lambda_acyclic * P_acyclic +
+                lambda_left_linear * P_left_linear
+            )
+            
+            return cost + lambda_total * total_penalty
+    
+    # Set up nevergrad parametrization
+    if logit_sampling == 'dual-softmax':
+        param = ng.p.Array(shape=(2 * num_edges,), lower=-5.0, upper=5.0)
+    else:
+        param = ng.p.Array(shape=(num_edges,), lower=-5.0, upper=5.0)
+    
+    # Create optimizer
+    optimizer = ng.optimizers.CMA(parametrization=param, budget=optimization_steps, num_workers=num_workers)
+    
+    # Run optimization
+    if verbose:
+        pbar = tqdm(range(optimization_steps), desc="Nevergrad optimization")
+        for _ in pbar:
+            x = optimizer.ask()
+            loss = objective(x.value)
+            optimizer.tell(x, loss)
+            if _ % 50 == 0:
+                pbar.set_postfix({"loss": f"{loss:.2f}"})
+    else:
+        for _ in range(optimization_steps):
+            x = optimizer.ask()
+            loss = objective(x.value)
+            optimizer.tell(x, loss)
+    
+    # Get best solution
+    recommendation = optimizer.provide_recommendation()
+    best_params = recommendation.value
+    
+    # Decode final solution
+    with torch.no_grad():
+        if logit_sampling == 'dual-softmax':
+            logits1 = torch.tensor(best_params[:num_edges], dtype=torch.float32, device=device)
+            logits2 = torch.tensor(best_params[num_edges:], dtype=torch.float32, device=device)
+            logits1[invalid_mask] = float('-inf')
+            logits2[invalid_mask] = float('-inf')
+            
+            if decoding_method == 'threshold':
+                final_edge_weights = torch.zeros(num_edges, device=device)
+                for j in join_nodes:
+                    cand = (dst == j)
+                    if cand.any():
+                        idx1 = torch.argmax(logits1[cand])
+                        idx2 = torch.argmax(logits2[cand])
+                        indices = torch.where(cand)[0]
+                        final_edge_weights[indices[idx1]] = 1.0
+                        final_edge_weights[indices[idx2]] = 1.0
+                
+                final_A = torch.zeros((N_NODES, N_NODES), device=device)
+                final_A[src, dst] = final_edge_weights
+            else:
+                # Soft weights for projection-based decoding
+                slot1 = torch.zeros(num_edges, device=device)
+                slot2 = torch.zeros(num_edges, device=device)
+                for j in join_nodes:
+                    cand = (dst == j)
+                    if cand.any():
+                        slot1[cand] = torch.softmax(logits1[cand], dim=0)
+                        slot2[cand] = torch.softmax(logits2[cand], dim=0)
+                edge_weights = slot1 + slot2
+                edge_weights[src == root] = 0.0
+                
+                A = torch.zeros((N_NODES, N_NODES), device=device)
+                A[src, dst] = edge_weights
+                
+                if decoding_method == 'beam':
+                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=6, use_product=False)
+                elif decoding_method == 'greedy':
+                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=1, use_product=False)
+                elif decoding_method == 'hungarian':
+                    final_A = project_to_leftdeep(A.cpu().numpy(), exact_threshold=8)
+                else:
+                    final_A = A.cpu().numpy()
+                final_A = torch.tensor(final_A, device=device)
+        
+        else:  # softmax
+            logits = torch.tensor(best_params, dtype=torch.float32, device=device)
+            logits[invalid_mask] = float('-inf')
+            
+            if decoding_method == 'threshold':
+                final_edge_weights = torch.zeros(num_edges, device=device)
+                for v in torch.unique(src):
+                    if v == root:
+                        continue
+                    m = (src == v)
+                    idx = torch.argmax(logits[m])
+                    final_edge_weights[torch.where(m)[0][idx]] = 1.0
+                
+                final_A = torch.zeros((N_NODES, N_NODES), device=device)
+                final_A[src, dst] = final_edge_weights
+            else:
+                edge_weights = torch.zeros(num_edges, device=device)
+                for v in torch.unique(src):
+                    if v == root:
+                        continue
+                    m = (src == v)
+                    edge_weights[m] = torch.softmax(logits[m], dim=0)
+                
+                A = torch.zeros((N_NODES, N_NODES), device=device)
+                A[src, dst] = edge_weights
+                
+                if decoding_method == 'beam':
+                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=6, use_product=False)
+                elif decoding_method == 'greedy':
+                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=1, use_product=False)
+                elif decoding_method == 'hungarian':
+                    final_A = project_to_leftdeep(A.cpu().numpy(), exact_threshold=8)
+                else:
+                    final_A = A.cpu().numpy()
+                final_A = torch.tensor(final_A, device=device)
+        
+        # Compute final cost
+        final_edge_weights = final_A[src, dst]
+        final_log_cost = model(data.x, edge_index, edge_weight=final_edge_weights).item()
+        predicted_cost_exp = float(np.exp(final_log_cost))
+    
+    if save_animation_data:
+        return final_A, triples_num, predicted_cost_exp, None
+    else:
+        return final_A, triples_num, predicted_cost_exp

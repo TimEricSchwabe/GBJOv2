@@ -21,6 +21,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 from functools import partial
+import graphviz
 
 # Add the parent directory to Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -32,13 +33,13 @@ from data import Triple, Join, Query, Entity
 from model import CostGNNv2, CostGNNv3
 
 from optimization import (
-    optimize_query_gumbel,
-    optimize_query_neuralsort,
-    greedy_optimize_query,
+    GBJO,
+    NeuralSort,
+    GreedySearch,
     random_join_plan,
-    dp_leftdeep_best_plan,
+    DPLinear,
     exhaustive_leftdeep_best_plan,
-    optimize_query_neuralsort_v2
+    optimize_query_nevergrad
 )
 
 from utils.data_utils import (
@@ -52,7 +53,14 @@ from utils.data_utils import (
 )
 
 # Import plotting functions
-from visualization.plot_optimization_results import extract_costs_and_metrics, plot_statistics
+from visualization.plot_optimization_results import (
+    load_data, 
+    plot_overall_boxplot, 
+    plot_mean_costs_bar, 
+    plot_lineplots_by_size, 
+    plot_boxplot_per_size, 
+    plot_scatter_correlations
+)
 
 # Add module compatibility for old pickle files
 import sys
@@ -61,10 +69,10 @@ sys.modules['explicit_join_model.data'] = data_module
 sys.modules['explicit_join_model'] = sys.modules['src']
 
 
-def add_fingerprints_to_query_data(query_data, fingerprint_dim=14, max_joins=14):
+def add_fingerprints_to_query_data(query_data, fingerprint_dim=64):
     """
-    Add orthonormal fingerprints to join nodes in query data.
-    Call this ONCE before starting gradient optimization.
+    Add random Gaussian fingerprints to join nodes in query data.
+    Matches AddRandomGaussianFingerprints from data_loader.py
     """
     x = query_data.x.clone()
     
@@ -75,10 +83,9 @@ def add_fingerprints_to_query_data(query_data, fingerprint_dim=14, max_joins=14)
     if n_joins == 0:
         return query_data
     
-    # Orthonormal basis
-    fingerprint_basis = torch.eye(max_joins, fingerprint_dim, device=x.device)
-    perm = torch.randperm(max_joins)[:n_joins]
-    fingerprints = fingerprint_basis[perm]
+    # random fingerprints, normalized (same as training)
+    fingerprints = torch.randn(n_joins, fingerprint_dim, device=x.device)
+    fingerprints = fingerprints / fingerprints.norm(dim=1, keepdim=True)
     
     for i, join_idx in enumerate(join_indices):
         x[join_idx, :fingerprint_dim] = fingerprints[i]
@@ -87,6 +94,321 @@ def add_fingerprints_to_query_data(query_data, fingerprint_dim=14, max_joins=14)
     return query_data
 
 
+def extract_join_order(plan, triple_objs):
+    """
+    Extract join order from a linear plan by finding the leaf at each level.
+    
+    For linear plans, at each Join node one child is a Triple (leaf).
+    We collect leaves from root to bottom, then reverse to get the join order.
+    
+    Args:
+        plan: Query object representing a join plan
+        triple_objs: List of Triple objects (the original triples)
+        
+    Returns:
+        List of indices representing the join order (from first joined to last joined)
+    """
+    if plan is None:
+        return None
+    
+    def find_triple_index(triple):
+        """Find the index of a triple in triple_objs by comparing string representation."""
+        triple_str = str(triple)
+        for i, t in enumerate(triple_objs):
+            if str(t) == triple_str:
+                return i
+        return -1
+    
+    leaves_from_root = []
+    
+    # Handle case where root is just a Triple
+    if isinstance(plan.root, Triple):
+        return [find_triple_index(plan.root)]
+        
+    current = plan.root
+    
+    while isinstance(current, Join):
+        left_is_leaf = isinstance(current.left, Triple)
+        right_is_leaf = isinstance(current.right, Triple)
+        
+        if left_is_leaf and right_is_leaf:
+            # Both are leaves - bottom of tree
+            # Convention: left first, then right (this order handles the base pair)
+            # When we reverse, right will be first (base), left will be second
+            # e.g., Join(t0, t1) -> leaves=[0, 1] -> reversed=[1, 0] -> t1 joined with t0
+            leaves_from_root.append(find_triple_index(current.left))
+            leaves_from_root.append(find_triple_index(current.right))
+            break
+        elif left_is_leaf:
+            # Left is leaf, right is Join - right-linear (most common for right-deep)
+            # e.g. Join(t2, Join(t0, t1))
+            leaves_from_root.append(find_triple_index(current.left))
+            current = current.right
+        elif right_is_leaf:
+            # Right is leaf, left is Join - left-linear
+            # e.g. Join(Join(t0, t1), t2)
+            leaves_from_root.append(find_triple_index(current.right))
+            current = current.left
+        else:
+            # Neither is leaf - bushy plan
+            # For bushy plans, we can't easily map to a linear sequence
+            # Just do a best-effort traversal to find leaves
+            print("Warning: Bushy plan detected, join order extraction may be approximate")
+            leaves_from_root.append(find_triple_index(current.right) if isinstance(current.right, Triple) else -1)
+            current = current.left
+            
+    # Reverse to get join order (first joined first)
+    return list(reversed(leaves_from_root))
+
+
+def compute_all_join_costs(triple_objs, timeout=60):
+    """
+    Compute the cumulative costs for all possible join orderings.
+    
+    Args:
+        triple_objs: List of Triple objects
+        timeout: Maximum time in seconds for the entire computation (default: 60)
+        
+    Returns:
+        Dictionary mapping tuple of triple indices (representing partial join order) 
+        to cumulative cost at that point.
+        Example: {(0,): 0, (1,): 0, (0, 1): 150, (0, 1, 2): 280, ...}
+    """
+    n = len(triple_objs)
+    costs = {}
+    start_time = time.time()
+    
+    # Level 0: Each single triple uses its cardinality
+    for i in range(n):
+        if time.time() - start_time > timeout:
+            print(f"Warning: Cost computation timed out after {timeout}s at level 0")
+            return costs
+        try:
+            cardinality = triple_objs[i].get_cardinality()
+            costs[(i,)] = cardinality
+        except Exception:
+            costs[(i,)] = 0
+    
+    # Generate all permutations and compute costs at each level
+    for perm in itertools.permutations(range(n)):
+        if time.time() - start_time > timeout:
+            print(f"Warning: Cost computation timed out after {timeout}s")
+            return costs
+            
+        # Build the join tree incrementally and compute cost at each level
+        current_node = triple_objs[perm[0]]
+        
+        for level in range(1, n):
+            if time.time() - start_time > timeout:
+                print(f"Warning: Cost computation timed out after {timeout}s")
+                return costs
+                
+            # Join current_node with the next triple
+            next_triple = triple_objs[perm[level]]
+            join_node = Join(left=current_node, right=next_triple)
+            
+            # Compute cost for this partial join
+            partial_order = tuple(perm[:level + 1])
+            
+            if partial_order not in costs:
+                try:
+                    # get_cost() computes c_out cost (cumulative)
+                    cost = join_node.get_cost()
+                    costs[partial_order] = cost
+                except Exception as e:
+                    # If SPARQL query fails, use infinity
+                    costs[partial_order] = float('inf')
+            
+            # Update current_node for next iteration
+            current_node = join_node
+    
+    return costs
+
+
+def visualize_join_order_tree(triple_objs, gradient_plan, greedy_plan, dp_plan, save_path):
+    """
+    Visualize all possible join orderings as a tree with costs, highlighting
+    the paths taken by gradient, greedy, and DP optimizers.
+    
+    Args:
+        triple_objs: List of Triple objects
+        gradient_plan: Query object from gradient optimization (or None)
+        greedy_plan: Query object from greedy optimization (or None)
+        dp_plan: Query object from DP optimization (or None)
+        save_path: Path to save the visualization (without extension)
+    """
+    n = len(triple_objs)
+    
+    if n > 5:
+        print(f"Skipping visualization: {n} triples exceeds limit of 5")
+        return
+    
+    # Extract join orders from each plan
+    gradient_order = extract_join_order(gradient_plan, triple_objs)
+    greedy_order = extract_join_order(greedy_plan, triple_objs)
+    dp_order = extract_join_order(dp_plan, triple_objs)
+    
+    # Compute costs for all permutations
+    costs = compute_all_join_costs(triple_objs)
+    
+    # Create graphviz digraph
+    graph = graphviz.Digraph(
+        'Join Order Tree',
+        comment='All possible join orderings with costs',
+        graph_attr={
+            'rankdir': 'TB',
+            'splines': 'line',
+            'nodesep': '0.3',
+            'ranksep': '0.8'
+        },
+        node_attr={
+            'shape': 'box',
+            'style': 'rounded,filled',
+            'fillcolor': 'white',
+            'fontname': 'Helvetica'
+        },
+        edge_attr={
+            'dir': 'none'
+        }
+    )
+    
+    # Helper to create node ID from partial order
+    def node_id(partial_order):
+        return '_'.join(map(str, partial_order))
+    
+    # Helper to format cost for display
+    def format_cost(cost):
+        if cost == float('inf'):
+            return '∞'
+        elif cost >= 1e6:
+            return f'{cost:.1e}'
+        elif cost >= 1000:
+            return f'{cost:.0f}'
+        else:
+            return f'{cost:.1f}'
+    
+    # Helper to check if an edge is on a highlighted path
+    def edge_on_path(parent_order, child_order, plan_order):
+        if plan_order is None:
+            return False
+        parent_len = len(parent_order)
+        child_len = len(child_order)
+        # Check if child_order is an extension of parent_order matching plan_order
+        return (list(parent_order) == list(plan_order[:parent_len]) and 
+                list(child_order) == list(plan_order[:child_len]))
+    
+    # Build tree level by level
+    for level in range(n):
+        # Create subgraph for this level to ensure same rank
+        with graph.subgraph() as s:
+            s.attr(rank='same')
+            
+            if level == 0:
+                # Level 0: individual triples
+                for i in range(n):
+                    partial = (i,)
+                    nid = node_id(partial)
+                    cost = costs.get(partial, 0)
+                    label = f't{i}|{format_cost(cost)}'
+                    s.node(nid, label=label)
+            else:
+                # Subsequent levels: all permutation prefixes of length level+1
+                seen = set()
+                for perm in itertools.permutations(range(n)):
+                    partial = tuple(perm[:level + 1])
+                    if partial in seen:
+                        continue
+                    seen.add(partial)
+                    
+                    nid = node_id(partial)
+                    cost = costs.get(partial, float('inf'))
+                    # Label shows only the last triple added and the cumulative cost
+                    last_triple = partial[-1]
+                    label = f't{last_triple}|{format_cost(cost)}'
+                    s.node(nid, label=label)
+    
+    # Add edges between levels
+    for level in range(n - 1):
+        seen_edges = set()
+        if level == 0:
+            # Edges from level 0 to level 1
+            for perm in itertools.permutations(range(n)):
+                if len(perm) < 2:
+                    continue
+                parent = (perm[0],)
+                child = (perm[0], perm[1])
+                
+                edge_key = (parent, child)
+                if edge_key in seen_edges:
+                    continue
+                seen_edges.add(edge_key)
+                
+                parent_nid = node_id(parent)
+                child_nid = node_id(child)
+                
+                # Determine edge color based on highlighted paths
+                colors = []
+                if edge_on_path(parent, child, gradient_order):
+                    colors.append('#3498db')  # Blue for gradient
+                if edge_on_path(parent, child, greedy_order):
+                    colors.append('#2ecc71')  # Green for greedy
+                if edge_on_path(parent, child, dp_order):
+                    colors.append('#e74c3c')  # Red for DP
+                
+                if colors:
+                    # Use colon-separated colors for multiple paths
+                    edge_color = ':'.join(colors)
+                    graph.edge(parent_nid, child_nid, color=edge_color, penwidth='3')
+                else:
+                    graph.edge(parent_nid, child_nid, color='#cccccc')
+        else:
+            # Edges from level to level+1
+            for perm in itertools.permutations(range(n)):
+                if len(perm) < level + 2:
+                    continue
+                parent = tuple(perm[:level + 1])
+                child = tuple(perm[:level + 2])
+                edge_key = (parent, child)
+                if edge_key in seen_edges:
+                    continue
+                seen_edges.add(edge_key)
+                
+                parent_nid = node_id(parent)
+                child_nid = node_id(child)
+                
+                # Determine edge color
+                colors = []
+                if edge_on_path(parent, child, gradient_order):
+                    colors.append('#3498db')  # Blue
+                if edge_on_path(parent, child, greedy_order):
+                    colors.append('#2ecc71')  # Green
+                if edge_on_path(parent, child, dp_order):
+                    colors.append('#e74c3c')  # Red
+                
+                if colors:
+                    edge_color = ':'.join(colors)
+                    graph.edge(parent_nid, child_nid, color=edge_color, penwidth='3')
+                else:
+                    graph.edge(parent_nid, child_nid, color='#cccccc')
+    
+    # Add legend
+    with graph.subgraph(name='cluster_legend') as legend:
+        legend.attr(label='Method', style='rounded', color='gray')
+        legend.node('legend_gradient', 'Gradient', fillcolor='#3498db', fontcolor='white')
+        legend.node('legend_greedy', 'Greedy', fillcolor='#2ecc71', fontcolor='white')
+        legend.node('legend_dp', 'DP', fillcolor='#e74c3c', fontcolor='white')
+        legend.edge('legend_gradient', 'legend_greedy', style='invis')
+        legend.edge('legend_greedy', 'legend_dp', style='invis')
+    
+    # Render the graph
+    try:
+        graph.render(save_path, format='png', cleanup=True)
+        print(f"Saved join order tree visualization to: {save_path}.png")
+    except Exception as e:
+        print(f"Error rendering join order tree: {e}")
+    
+    return graph
+
 
 def process_single_query(args):
     """
@@ -94,37 +416,36 @@ def process_single_query(args):
     
     Args:
         args: Tuple containing (query_index, query, model_path, device_str, optimization_params, 
-              optimization_function_name, use_exhaustive, use_true_costs, use_dp, optimization_steps, dp_limit)
+              optimization_function_name, use_exhaustive, use_true_costs, use_dp, optimization_steps, dp_limit, save_directory)
     
     Returns:
         Dictionary with detailed results for this query
     """
     (query_index, query, model_path, device_str, optimization_params, 
-     optimization_function_name, use_exhaustive, use_true_costs, use_dp, optimization_steps, dp_limit) = args
+     optimization_algorithms, use_exhaustive, use_true_costs, optimization_steps, dp_limit, save_directory, model_params) = args
     
     # Set device
     device = torch.device(device_str)
     
     # Load model
-    node_feature_dim = 307
-    hidden_dim = 128
-    model = CostGNNv2(node_feature_dim=node_feature_dim, hidden_dim=hidden_dim).to(device)
+    if model_params is None:
+        node_feature_dim = 307
+        hidden_dim = 128
+        model = CostGNNv3(node_feature_dim=node_feature_dim, hidden_dim=hidden_dim).to(device)
+    else:
+        params = model_params.copy()
+        if params.get('version') == 'v3':
+            model = CostGNNv3(**params).to(device)
+        elif params.get('version') == 'v2':
+            model = CostGNNv2(**params).to(device)
+        else:
+            raise ValueError(f"Unknown model version: {params.get('version')}")
+
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
     
-    # Get optimization function
-    if optimization_function_name == 'optimize_query_gumbel':
-        optimization_function = optimize_query_gumbel
-    elif optimization_function_name == 'optimize_query_gumbel_lbfgs':
-        optimization_function = optimize_query_gumbel_lbfgs
-    elif optimization_function_name == 'optimize_query_neuralsort':
-        optimization_function = optimize_query_neuralsort
-    elif optimization_function_name == 'optimize_query_neuralsort_v2':
-        optimization_function = optimize_query_neuralsort_v2
-    else:
-        raise ValueError(f"Unknown optimization function: {optimization_function_name}")
     
     try:
         # Get the torch data from one of the plans
@@ -132,9 +453,8 @@ def process_single_query(args):
         torch_data = query.torch_data[plan_idx]
 
 
-        # Todo decide whether to add this or not !
-        raise ValueError("Decide whether to add this or not !")
-        torch_data = add_fingerprints_to_query_data(torch_data, fingerprint_dim=14)
+
+        torch_data = add_fingerprints_to_query_data(torch_data, fingerprint_dim=64)
 
 
         triple_objs = [Triple(*(Entity(name=name) for name in triple[:3])) for triple in query.triples]
@@ -161,9 +481,9 @@ def process_single_query(args):
         true_cost_best_pred = float('inf')
         
         # Only run DP if enabled AND query size is within the limit
-        if use_dp and len(query_triples) <= dp_limit:
+        if 'DP' in optimization_algorithms and len(query_triples) <= dp_limit:
             try:
-                best_adj, best_pred_cost = dp_leftdeep_best_plan(torch_data, model, device)
+                best_adj, best_pred_cost = DPLinear(torch_data, model, device)
                 triples_num = len(triple_objs)
                 best_pred_plan = adjacency_to_query_with_real_triples(
                     best_adj, triples_num, triple_objs)
@@ -214,7 +534,7 @@ def process_single_query(args):
         random_pred_cost = float('inf')
         
         # Run gradient-based optimization
-        try:
+        if 'GBJO' in optimization_algorithms:
             # Run gradient optimization k times and pick the best result
             k = optimization_params.get('k', 1)  # Number of runs, default to 1
             best_adjacency = None
@@ -223,7 +543,7 @@ def process_single_query(args):
             best_animation_data = None
             
             for run_idx in range(k):
-                optimization_result = optimization_function(
+                optimization_result = NeuralSort(
                     torch_data, model, device, 
                     optimization_steps=optimization_steps, 
                     verbose=False,  # Always false for parallel execution
@@ -263,15 +583,11 @@ def process_single_query(args):
                 # Calculate the actual cost (only if enabled)
                 if use_true_costs:
                     gradient_cost = gradient_plan.root.get_cost()
-                    
-        except Exception as e:
-            print(f"Error in gradient optimization for query {query_index}: {e}")
-            gradient_plan = None
-            grad_pred_cost = float('inf')
+
         
         # Run greedy optimization
-        try:
-            greedy_plan, greedy_pred_cost = greedy_optimize_query(
+        if 'GreedySearch' in optimization_algorithms:
+            greedy_plan, greedy_pred_cost = GreedySearch(
                 torch_data, model, triple_objs, device, verbose=False
             )
             
@@ -284,15 +600,14 @@ def process_single_query(args):
                 # Calculate the actual cost (only if enabled)
                 if use_true_costs:
                     greedy_cost = greedy_plan.root.get_cost()
-                    
-        except Exception as e:
-            print(f"Error in greedy optimization for query {query_index}: {e}")
-            greedy_cost = float('inf')
         
         # Create a random plan
         try:
-            log_pred_cost = model(query.torch_data[0].x, edge_index=query.torch_data[0]['edge_index']).item()
+            log_pred_cost = model(query.torch_data[-1].x, edge_index=query.torch_data[-1]['edge_index']).item()
             random_pred_cost = float(np.exp(log_pred_cost))
+
+            if use_true_costs:
+                random_true_cost = query.join_plans[-1].root.get_cost()
         except Exception as e:
             print(f"Error creating random plan for query {query_index}: {e}")
             random_cost = float('inf')
@@ -315,12 +630,30 @@ def process_single_query(args):
         if use_true_costs:
             result["plans"]["gradient"]["real_cost"] = float(gradient_cost)
             result["plans"]["greedy"]["real_cost"] = float(greedy_cost)
-            result["plans"]["random"]["real_cost"] = float(random_cost)
+            result["plans"]["random"]["real_cost"] = float(random_true_cost)
         
         # Add exhaustive comparison only if exhaustive search was performed
         if use_exhaustive and exhaustive_plan is not None:
             result["greedy_equal_exhaustive"] = plans_are_equivalent(greedy_plan, exhaustive_plan)
             result["gradient_equal_exhaustive"] = plans_are_equivalent(gradient_plan, exhaustive_plan)
+        
+        # Generate join order tree visualization for small queries with true costs
+        if use_true_costs and len(triple_objs) <= -1:
+            try:
+                # Create visualizations directory if needed
+                viz_dir = os.path.join(save_directory, "join_order_trees")
+                os.makedirs(viz_dir, exist_ok=True)
+                
+                save_path = os.path.join(viz_dir, f"query_{query_index}_join_tree")
+                visualize_join_order_tree(
+                    triple_objs, 
+                    gradient_plan, 
+                    greedy_plan, 
+                    best_pred_plan,  # DP plan
+                    save_path
+                )
+            except Exception as e:
+                print(f"Warning: Could not generate join order tree for query {query_index}: {e}")
         
         return result
         
@@ -330,8 +663,8 @@ def process_single_query(args):
 
 
 def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None, optimization_steps=500, 
-                                 optimization_params=None, optimization_function=None, save_directory=".", 
-                                 use_exhaustive=True, use_true_costs=True, use_dp=True, num_workers=None, dp_limit=9):
+                                 optimization_params=None, optimization_algorithms=None, save_directory=".", 
+                                 use_exhaustive=True, use_true_costs=True, num_workers=None, dp_limit=9, model_params=None):
     """
     Evaluate the optimization algorithm on the given SPARQL queries in parallel.
     
@@ -348,17 +681,12 @@ def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None,
         use_dp: Whether to perform dynamic programming search (default: True)
         num_workers: Number of parallel workers (default: number of CPU cores)
         dp_limit: Maximum number of triples for DP execution (default: 9)
+        model_params: Dictionary of model parameters for CostGNNv3
         
     Returns:
         List of detailed results for each query
     """
-    # Set default optimization function if not provided
-    if optimization_function is None:
-        optimization_function = optimize_query_gumbel
-    
-    # Get optimization function name for serialization
-    optimization_function_name = optimization_function.__name__
-    
+
     # Set device string for serialization
     device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device_str}")
@@ -377,7 +705,7 @@ def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None,
     args_list = []
     for i, query in enumerate(sparql_queries):
         args = (i, query, model_path, device_str, optimization_params, 
-                optimization_function_name, use_exhaustive, use_true_costs, use_dp, optimization_steps, dp_limit)
+                optimization_algorithms, use_exhaustive, use_true_costs, optimization_steps, dp_limit, save_directory, model_params)
         args_list.append(args)
     
     # Process queries in parallel
@@ -456,7 +784,8 @@ if __name__ == "__main__":
             "lr_warmup_steps": 46,
             "gradient_clip_norm": 3.3,
             "use_lr_scheduling": True,
-            "decoding_method": "greedy"
+            "decoding_method": "greedy",
+            "use_gumbel_noise": True
         }
     }
 
@@ -496,26 +825,27 @@ if __name__ == "__main__":
             "lr_warmup_steps": 150,
             "gradient_clip_norm": 4.1,
             "use_lr_scheduling": True,
-            "decoding_method": "greedy"
+            "decoding_method": "greedy",
+            "use_gumbel_noise": True
         }
     }
 
     config_lubm_star = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
-        "model_path": "/home/tim/query_optimization/training_results/lubm-star-new-v2/model.pt",
+         "model_path": "/home/tim/query_optimization/training_results/v3-stars-6layers/model.pt",
         "num_queries": 20,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
-        "optimization_steps": 1000,
+        "optimization_steps": 500,
         "use_exhaustive": False,
         "use_dp": True,
         "dp_limit": 9,  # Set the limit here (e.g., 15 for star queries)
         "use_true_costs": True,
         "save_path": "optimization_results",
-        "num_workers": 6,  # Use all available cores
-        "optimization_params": {
-            "optimization_procedure": "gumbel",
-            "k": 5,  # Number of gradient optimization runs
-            "learning_rate": 1.7,
+        "num_workers": 8,  # Use all available cores
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch"],
+        "optimization_params": { # params for GBJO
+            "k": 1,  # Number of gradient optimization runs
+            "learning_rate": 1.7, # 1.7
             "lambda_acyclic": 3081.0,
             "lambda_triple_in": 3714.0,
             "lambda_triple_out": 135.0,
@@ -538,24 +868,37 @@ if __name__ == "__main__":
             "lr_warmup_steps": 50,
             "gradient_clip_norm": 2,
             "use_lr_scheduling": True,
-            "decoding_method": "greedy"
+            "decoding_method": "greedy",
+            "use_gumbel_noise": False
         }
     }
 
     config_lubm_path = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl",
-        "model_path": "/home/tim/query_optimization/datasets/models/lubm/path_model.pt",
+        "model_path": "/home/tim/query_optimization/training_results/lubm-path-nice-v3-6-layer/model.pt",
         "num_queries": 20,
         "optimization_steps": 1000,
         "use_exhaustive": False,
+        "max_query_size": 5,  # Filter queries larger than this (None for no filter)
         "use_dp": True,
         "use_true_costs": True,
         "save_path": "optimization_results",
-        "num_workers": None,  # Use all available cores
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch"],
+        "model_params": {
+            "version": "v3",
+            "hidden_dim": 128,
+            "node_feature_dim": 307,
+            "n_layers": 6,
+            "use_jk": False,
+            "jk_mode": "cat",
+            "use_residual": False,
+            "use_layer_norm": False,
+            "dropout": 0.0,
+        },
+        "num_workers": 9,  # Use all available cores
         "optimization_params": {
-            "optimization_procedure": "gumbel",
-            "k": 5,  # Number of gradient optimization runs - 5
-            "learning_rate": 1.8, # 1.8
+            "k": 1,  # Number of gradient optimization runs - 5
+            "learning_rate": 0.001, # 1.8
             "lambda_acyclic": 4415.0,
             "lambda_triple_in": 3027.0,
             "lambda_triple_out": 790.0,
@@ -568,7 +911,7 @@ if __name__ == "__main__":
             "min_tau": 1.0,
             "tau_decay": 0.963, # 0.963
             "use_temperature_annealing": True,
-            "return_best": True,
+            "return_best": False,
             "min_penalty_threshold": 8.6,
             "use_lambda_ramping": True,
             "logit_sampling": "dual-softmax",
@@ -577,14 +920,15 @@ if __name__ == "__main__":
             "lambda_ramp_exponent": 6.8, # 6.8
             "lr_warmup_steps": 200,
             "gradient_clip_norm": 1.9,
-            "use_lr_scheduling": True,
-            "decoding_method": "greedy"
+            "use_lr_scheduling": False,
+            "decoding_method": "greedy",
+            "use_gumbel_noise": False
         }
     }
 
     config_lubm_path_gumbel_sinkhorn = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
-        "model_path": "/home/tim/query_optimization/datasets/models/lubm/star_model.pt",
+        "model_path": "/home/tim/query_optimization/training_results/gnn_20251210_185635/model.pt",
         "num_queries": 20,
         "optimization_steps": 1000,
         "use_exhaustive": False,
@@ -594,7 +938,7 @@ if __name__ == "__main__":
         "num_workers": None,  # Use all available cores
         "optimization_params": {
             "optimization_procedure": "neuralsort_v2",
-            "k":3,  # Number of gradient optimization runs - 5
+            "k":1,  # Number of gradient optimization runs - 5
             "learning_rate": 1, # 1.8
             "lambda_acyclic": 4415.0,
             "lambda_triple_in": 3027.0,
@@ -618,11 +962,12 @@ if __name__ == "__main__":
             "lr_warmup_steps": 200,
             "gradient_clip_norm": 1.9,
             "use_lr_scheduling": True,
-            "decoding_method": "greedy"
+            "decoding_method": "greedy",
+            "use_gumbel_noise": True
         }
     }
 
-    config = config_lubm_star
+    config = config_lubm_path
     
     # Create unique save directory based on datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -656,23 +1001,14 @@ if __name__ == "__main__":
         print(f"Filtering queries with size > {max_size}")
         original_len = len(sparql_queries)
         sparql_queries = [q for q in sparql_queries if len(q.triples) <= max_size]
+        #sparql_queries = [q for q in sparql_queries if len(q.triples) == 3] # TODO just for now to visulaize
+
         print(f"Retained {len(sparql_queries)}/{original_len} queries")
         
         # Update num_queries in config for accurate logging
         config['num_queries'] = len(sparql_queries)
     
-    # Select optimization function based on config
-    optimization_procedure = config['optimization_params'].pop('optimization_procedure')
-    if optimization_procedure == 'gumbel':
-        optimization_function = optimize_query_gumbel 
-    elif optimization_procedure == 'neuralsort':
-        optimization_function = optimize_query_neuralsort
-    elif optimization_procedure == 'neuralsort_v2':
-        optimization_function = optimize_query_neuralsort_v2
-    else:  # 'normal'
-        raise ValueError(f"Invalid optimization procedure: {optimization_procedure}")
-    
-    # Start timing
+
     start_time = time.time()
     
     # Evaluate optimization in parallel
@@ -682,13 +1018,13 @@ if __name__ == "__main__":
         num_queries=config['num_queries'],
         optimization_steps=config['optimization_steps'],
         optimization_params=config['optimization_params'],
-        optimization_function=optimization_function,
+        optimization_algorithms=config['optimization_algorithms'],
         save_directory=save_directory,
         use_exhaustive=config['use_exhaustive'],
         use_true_costs=config.get('use_true_costs', True),
-        use_dp=config.get('use_dp', True),
         num_workers=config.get('num_workers', None),
-        dp_limit=config.get('dp_limit', 9)  # Pass dp_limit from config or default to 9
+        dp_limit=config.get('dp_limit', 9),  # Pass dp_limit from config or default to 9
+        model_params=config.get('model_params', None)
     )
     
     end_time = time.time()
@@ -713,12 +1049,23 @@ if __name__ == "__main__":
     # Generate plots automatically
     try:
         print("\nGenerating plots...")
-        stats = extract_costs_and_metrics(detailed_results)
+        # Load data from the saved file using the new Pandas-based loader
+        stats_df = load_data(save_directory)
         plots_dir = os.path.join(save_directory, 'plots')
-        plot_statistics(stats, show_plots=False, save_directory=plots_dir)
+        os.makedirs(plots_dir, exist_ok=True)
+        
+        # Generate all plots
+        plot_overall_boxplot(stats_df, plots_dir)
+        plot_mean_costs_bar(stats_df, plots_dir)
+        plot_lineplots_by_size(stats_df, plots_dir)
+        plot_boxplot_per_size(stats_df, plots_dir)
+        plot_scatter_correlations(stats_df, plots_dir)
+        
         print(f"Plots saved to: {plots_dir}")
     except Exception as e:
         print(f"Error generating plots: {e}")
+        import traceback
+        traceback.print_exc()
     
     print(f"\n" + "="*50)
     print("PARALLEL EVALUATION COMPLETE")

@@ -15,6 +15,9 @@ from typing import Dict
 from model import CostGNN, CostGNNv2, CostGNNv3
 from data_loader import QueryDataset, SingleFileQueryDataset, AddRandomGaussianFingerprints
 
+import torch_optimizer as optim_extra
+
+
 import scienceplots
 plt.style.use('science')
 
@@ -433,15 +436,23 @@ if __name__ == "__main__":
     # Hyperparameters and configuration
     config = {
         # Model parameters
-        'model_type': 'CostGNNv3',  # Options: 'CostGNN', 'CostGNNv2'
+        'model_type': 'CostGNNv3',  # Options: 'CostGNN', 'CostGNNv2', 'CostGNNv3'
         'node_feature_dim': 307,    # Input feature dimension
-        'hidden_dim': 16,          # Hidden layer dimension
+        'hidden_dim': 128,          # Hidden layer dimension
+        
+        # CostGNNv3 architecture parameters
+        'n_layers': 6,              # Number of GIN message-passing layers
+        'use_jk': False,            # Whether to use Jumping Knowledge
+        'jk_mode': 'cat',           # JK mode: 'cat', 'max', or 'lstm'
+        'use_residual': False,       # Whether to use residual connections
+        'use_layer_norm': False,    # Whether to use layer normalization (disable for counting)
+        'dropout': 0.0,             # Dropout probability
         
         # Training parameters
         'learning_rate': 0.0001,
         'batch_size': 128,
-        'num_epochs': 800,
-        'loss_type': 'huber',         # Options: 'mse', 'qerror'
+        'num_epochs': 1000,
+        'loss_type': 'huber',         # Options: 'mse', 'qerror', 'huber'
         
         # Dataset parameters
         'use_single_file': True,
@@ -449,7 +460,7 @@ if __name__ == "__main__":
         
         # Paths
         'root_dir': '',
-        'dataset_dir': 'datasets/new-lubm',
+        'dataset_dir': 'datasets/plans/lubm/star-greedy',
         
         # Other settings
         'enable_training': True,    # Set to False to skip training
@@ -506,13 +517,22 @@ if __name__ == "__main__":
         model = CostGNNv2(node_feature_dim=config['node_feature_dim'], 
                          hidden_dim=config['hidden_dim']).to(device)
     elif config['model_type'] == 'CostGNNv3':
-        model = CostGNNv3(node_feature_dim=config['node_feature_dim'], 
-                         hidden_dim=config['hidden_dim']).to(device)
+        model = CostGNNv3(
+            node_feature_dim=config['node_feature_dim'], 
+            hidden_dim=config['hidden_dim'],
+            n_layers=config['n_layers'],
+            use_jk=config['use_jk'],
+            jk_mode=config['jk_mode'],
+            use_residual=config['use_residual'],
+            use_layer_norm=config['use_layer_norm'],
+            dropout=config['dropout']
+        ).to(device)
     else:
         raise ValueError(f"Unknown model type: {config['model_type']}")
     
     # Training setup
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'])
+    optimizer = optim_extra.Lookahead(optimizer, k=10, alpha=0.5)
 
     print(model)
 

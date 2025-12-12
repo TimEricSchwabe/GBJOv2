@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -283,7 +284,8 @@ class CostGNNv3(nn.Module):
         jk_mode='cat',
         use_residual=False,
         use_layer_norm=False,
-        dropout=0.0001
+        dropout=0.0001,
+        **kwargs
     ):
         super(CostGNNv3, self).__init__()
         
@@ -310,6 +312,13 @@ class CostGNNv3(nn.Module):
             if use_layer_norm:
                 self.layer_norms.append(nn.LayerNorm(hidden_dim))
         
+        # ReZero: learnable scales starting at 0 for each layer
+        # At init, conv output is multiplied by 0, so only residual passes through
+        # The model learns to gradually incorporate conv layers during training
+        #self.layer_scales = nn.ParameterList([
+        #    nn.Parameter(torch.zeros(1)) for _ in range(n_layers)
+        #])
+        
         # Dropout
         self.dropout = nn.Dropout(dropout)
         
@@ -333,6 +342,45 @@ class CostGNNv3(nn.Module):
         # Output layers
         self.fc1 = nn.Linear(jk_output_dim, jk_output_dim // 2)
         self.fc2 = nn.Linear(jk_output_dim // 2, 1)
+        
+        # Apply safe initialization to prevent explosion
+        self._init_weights()
+    
+    def _init_weights(self):
+        """
+        Safe initialization to prevent count explosion.
+        
+        Strategy:
+        - Use Xavier/Glorot initialization with reduced gain for stability
+        - Initialize the second linear layer of each GIN MLP with small weights
+          (similar to ReZero/FixUp) so residual connections dominate early
+        - Scale down by 1/sqrt(n_layers) to account for depth
+        """
+        depth_scale = 1.0 / math.sqrt(self.n_layers)
+        
+        # Initialize projection layer
+        nn.init.xavier_uniform_(self.projection.weight, gain=0.5)
+        nn.init.zeros_(self.projection.bias)
+        
+        # Initialize GIN MLP layers
+        for i, conv in enumerate(self.convs):
+            mlp = conv.nn
+            # First linear layer in MLP: standard init with reduced gain
+            nn.init.xavier_uniform_(mlp[0].weight, gain=0.5)
+            nn.init.zeros_(mlp[0].bias)
+            
+            # Second linear layer in MLP: small initialization
+            # This ensures the conv output starts small, letting residuals dominate
+            nn.init.xavier_uniform_(mlp[2].weight, gain=0.1 * depth_scale)
+            nn.init.zeros_(mlp[2].bias)
+        
+        # Initialize output layers
+        nn.init.xavier_uniform_(self.fc1.weight, gain=0.5)
+        nn.init.zeros_(self.fc1.bias)
+        
+        # Final layer: small init for stable initial predictions
+        nn.init.xavier_uniform_(self.fc2.weight, gain=0.1)
+        nn.init.zeros_(self.fc2.bias)
 
     def forward(self, x, edge_index, edge_weight=None, batch=None):
         # Project input
@@ -343,12 +391,15 @@ class CostGNNv3(nn.Module):
         
         # Message passing layers
         for i, conv in enumerate(self.convs):
+
+						# Layer normalization
+            if self.use_layer_norm:
+                x = self.layer_norms[i](x)
+
             residual = x if self.use_residual else None
 
 
-			# Layer normalization
-            if self.use_layer_norm:
-                x = self.layer_norms[i](x)
+
             
             # Graph convolution
             if edge_weight is not None:
@@ -360,10 +411,11 @@ class CostGNNv3(nn.Module):
             # Activation
             x = F.gelu(x)
 
-			# Residual connection
+            # Residual connection with ReZero scaling
+            # layer_scales[i] starts at 0, so conv output is ignored initially
             if self.use_residual:
-                x = x + residual
-            
+                #x = residual + self.layer_scales[i] * x
+                x = residual + x
             # Dropout (skip on last layer if not using JK)
             if i < self.n_layers - 1:
                 pass

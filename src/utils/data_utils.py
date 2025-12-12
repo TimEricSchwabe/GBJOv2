@@ -9,6 +9,11 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '.', '..'))
 from src.create_data.create_cost_model_training_data import SPARQLQuery
 import random
 
+# Add module compatibility for old pickle files
+import src.data as data_module
+sys.modules['explicit_join_model.data'] = data_module
+sys.modules['explicit_join_model'] = sys.modules['src']
+
 
 def left_deep_adj_from_perm(pi):
     """

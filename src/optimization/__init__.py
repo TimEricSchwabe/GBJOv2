@@ -1,12 +1,13 @@
 from .methods import (
-    optimize_query_gumbel,
+    GBJO,
     optimize_query_gumbel_efficient_reduced,
-    greedy_optimize_query,
+    GreedySearch,
     random_join_plan,
-    dp_leftdeep_best_plan,
+    DPLinear,
     exhaustive_leftdeep_best_plan,
-    optimize_query_neuralsort,
-    optimize_query_neuralsort_v2
+    NeuralSort,
+    optimize_query_gumbel_sinkhorn,
+    optimize_query_nevergrad
 )
 
 from .gumbel_utils import (
@@ -18,14 +19,15 @@ from .gumbel_utils import (
 
 
 __all__ = [
-    'optimize_query_gumbel',
+    'GBJO',
     'optimize_query_gumbel_efficient_reduced',
-    'greedy_optimize_query', 
+    'GreedySearch', 
     'random_join_plan',
-    'dp_leftdeep_best_plan',
+    'DPLinear',
     'exhaustive_leftdeep_best_plan',
-    'optimize_query_neuralsort',
-    'optimize_query_neuralsort_v2',
+    'NeuralSort',
+    'optimize_query_gumbel_sinkhorn',
+    'optimize_query_nevergrad',
     'sample_gumbel',
     'sample_binary_concrete',
     'sample_grouped_gumbel_softmax',

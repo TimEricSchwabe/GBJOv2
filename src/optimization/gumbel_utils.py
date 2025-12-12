@@ -52,7 +52,8 @@ def sample_binary_concrete(logits: torch.Tensor, temperature: float) -> torch.Te
 
 def sample_grouped_gumbel_softmax(edge_logits: torch.Tensor,
                                   src_nodes: torch.Tensor,
-                                  temperature: float) -> torch.Tensor:
+                                  temperature: float,
+                                  use_gumbel_noise: bool = True) -> torch.Tensor:
     """
     Return relaxed one-hot edge weights such that every *source* node
     emits exactly one outgoing edge (in expectation) using the Gumbel-Softmax
@@ -62,6 +63,7 @@ def sample_grouped_gumbel_softmax(edge_logits: torch.Tensor,
         edge_logits: Tensor of shape (E,) - Unconstrained logits of every candidate edge.
         src_nodes: Tensor of shape (E,) - Source node index for each edge (aligned with edge_logits).
         temperature: Positive softmax temperature τ.
+        use_gumbel_noise: Whether to add Gumbel noise for stochastic sampling.
 
     Returns:
         Tensor of shape (E,) – edge weights in (0,1) summing to 1 for every
@@ -73,9 +75,11 @@ def sample_grouped_gumbel_softmax(edge_logits: torch.Tensor,
     for v in torch.unique(src_nodes):
         mask = (src_nodes == v)
         logits_group = edge_logits[mask]
-        g = sample_gumbel(logits_group.shape, device=device)
-        edge_weights[mask] = torch.softmax((logits_group + g) / temperature, dim=0)
-        #edge_weights[mask] = torch.softmax((logits_group) / temperature, dim=0)
+        if use_gumbel_noise:
+            g = sample_gumbel(logits_group.shape, device=device)
+            edge_weights[mask] = torch.softmax((logits_group + g) / temperature, dim=0)
+        else:
+            edge_weights[mask] = torch.softmax(logits_group / temperature, dim=0)
 
 
 
