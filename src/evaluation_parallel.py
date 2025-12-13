@@ -34,12 +34,14 @@ from model import CostGNNv2, CostGNNv3
 
 from optimization import (
     GBJO,
+    GEQO,
     NeuralSort,
     GreedySearch,
     random_join_plan,
     DPLinear,
     exhaustive_leftdeep_best_plan,
-    optimize_query_nevergrad
+    optimize_query_nevergrad,
+    IterativeImprovement
 )
 
 from utils.data_utils import (
@@ -473,6 +475,35 @@ def process_single_query(args):
             "ntriplepattern": len(triple_objs),
             "plans": {}
         }
+
+
+        if "GEQO" in optimization_algorithms:
+            GEQO_adj, GEQO_pred_cost = GEQO(torch_data, model, optimization_steps, device)
+            GEQO_plan = adjacency_to_query_with_real_triples(GEQO_adj, len(triple_objs), triple_objs)
+            GEQO_real_cost = GEQO_plan.root.get_cost()
+
+            result["plans"]["GEQO"] = {
+                "predicted_cost": float(GEQO_pred_cost),
+                "plan_string": plan_to_string(GEQO_plan) if GEQO_plan else None
+            }
+            if use_true_costs:
+                result["plans"]["GEQO"]["real_cost"] = float(GEQO_real_cost)
+
+
+        if "IterativeImprovement" in optimization_algorithms:
+            # Run Iterative Improvement
+            II_adj, II_pred_cost = IterativeImprovement(torch_data, model, optimization_steps, device)
+            II_plan = adjacency_to_query_with_real_triples(II_adj, len(triple_objs), triple_objs)
+            II_real_cost = II_plan.root.get_cost()
+
+            result["plans"]["II"] = {
+                "predicted_cost": float(II_pred_cost),
+                "plan_string": plan_to_string(II_plan) if II_plan else None
+            }
+            if use_true_costs:
+                result["plans"]["II"]["real_cost"] = float(II_real_cost)
+
+
         
         # Run DP-based best plan search (only if enabled)
         best_adj = None
@@ -543,7 +574,7 @@ def process_single_query(args):
             best_animation_data = None
             
             for run_idx in range(k):
-                optimization_result = NeuralSort(
+                optimization_result = GBJO(
                     torch_data, model, device, 
                     optimization_steps=optimization_steps, 
                     verbose=False,  # Always false for parallel execution
@@ -658,6 +689,7 @@ def process_single_query(args):
         return result
         
     except Exception as e:
+        raise e
         print(f"Error processing query {query_index}: {e}")
         return None
 
@@ -729,6 +761,7 @@ def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None,
                     print(f"Completed {completed}/{len(sparql_queries)} queries ({completed/len(sparql_queries)*100:.1f}%)")
                     
             except Exception as e:
+                raise e
                 args = future_to_args[future]
                 query_index = args[0]
                 print(f"Query {query_index} generated an exception: {e}")
@@ -842,7 +875,7 @@ if __name__ == "__main__":
         "use_true_costs": True,
         "save_path": "optimization_results",
         "num_workers": 8,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch"],
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement"],
         "optimization_params": { # params for GBJO
             "k": 1,  # Number of gradient optimization runs
             "learning_rate": 1.7, # 1.7
@@ -877,13 +910,13 @@ if __name__ == "__main__":
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl",
         "model_path": "/home/tim/query_optimization/training_results/lubm-path-nice-v3-6-layer/model.pt",
         "num_queries": 20,
-        "optimization_steps": 1000,
+        "optimization_steps": 500,
         "use_exhaustive": False,
         "max_query_size": 5,  # Filter queries larger than this (None for no filter)
         "use_dp": True,
         "use_true_costs": True,
         "save_path": "optimization_results",
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch"],
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO"],
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -895,10 +928,10 @@ if __name__ == "__main__":
             "use_layer_norm": False,
             "dropout": 0.0,
         },
-        "num_workers": 9,  # Use all available cores
+        "num_workers": 10,  # Use all available cores
         "optimization_params": {
             "k": 1,  # Number of gradient optimization runs - 5
-            "learning_rate": 0.001, # 1.8
+            "learning_rate": 1.8, # 1.8
             "lambda_acyclic": 4415.0,
             "lambda_triple_in": 3027.0,
             "lambda_triple_out": 790.0,

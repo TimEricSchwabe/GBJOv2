@@ -828,6 +828,174 @@ def DPLinear(query_data, model, device="cpu"):
     full_key = frozenset(range(n_triples))
     return dp[full_key][1], dp[full_key][0]
 
+def IterativeImprovement(query_data, model, optimization_steps=100, device="cpu"):
+    """
+    Iterative Improvement for Left-Deep Join Plans, motivated by:
+    """
+    model.eval()
+    data = query_data.to(device)
+    n_triples = (data.x.size(0) + 1) // 2
+    F = data.x.size(1)
+
+    pairs = torch.combinations(torch.arange(n_triples, device=device), r=2) # all possible swaps we will consider
+
+    # Start with a random permutation of the triples
+    current_plan = torch.randperm(n_triples, device=device)
+
+    n_steps_taken = 0
+
+    best_cost = float('inf')
+    best_plan = None
+
+    best_costs = []
+
+    while n_steps_taken < optimization_steps:
+        previous_best_cost = best_cost
+
+
+        for i,j in pairs.tolist():
+
+            if n_steps_taken > optimization_steps:
+                break
+            n_steps_taken += 1
+
+            candidate_plan = current_plan.clone()
+            candidate_plan[i], candidate_plan[j] = current_plan[j], current_plan[i]
+            A_candidate = left_deep_adj_from_perm(candidate_plan).to(device)
+
+            src, dst = torch.where(A_candidate > 0.5)
+            edge_index = torch.stack([src, dst], dim=0)
+
+            with torch.no_grad():
+                cost_pred = model(data.x, edge_index).item()
+            
+            if cost_pred < best_cost:
+                best_cost = cost_pred
+                best_plan = candidate_plan
+                best_costs.append(best_cost)
+        if best_cost < previous_best_cost:
+            current_plan = best_plan.clone()
+        else:
+            # We have found no better plan in this neighborhood
+            break
+
+    # print('Did a total of %d steps' % n_steps_taken)
+    # print('len of best_costs: %d' % len(best_costs))
+    # plt.figure(figsize=(10, 5))
+    # plt.plot(best_costs, label='Predicted Cost')
+    # plt.xlabel('Optimization Step')
+    # plt.ylabel('Cost')
+    # plt.legend()
+    # plt.grid(True)
+    # plt.show() 
+
+
+    return left_deep_adj_from_perm(best_plan), float(np.exp(best_cost))
+
+
+def GEQO(query_data, model, optimization_steps=100, device="cpu"):
+    """
+    Genetic Search as implemented in Postgres:
+    https://www.postgresql.org/docs/current/geqo-pg-intro.html
+
+    """
+
+    population_size: int = 30 
+    generations: int = 50
+    mutation_rate: float = 0.05
+    elite_fraction: float = 0.1 # top n candidates that survive generation unchanged
+
+    model.eval()
+    data = query_data.to(device)
+    n_triples = (data.x.size(0)+1) // 2
+
+    base_perm = list(range(n_triples))  #default permutation
+
+    # Generate initial population of plans
+    population = [tuple(random.sample(base_perm, n_triples)) for _ in range(population_size)]
+
+
+    best_plan = None
+    best_cost = float('inf')
+
+    
+    for gen in range(generations):
+
+        # Turn the permutations into valid adjacency matrices
+        A_inds = [left_deep_adj_from_perm(ind) for ind in population]
+
+        edge_indices = [torch.stack(torch.where(A > 0.5), dim=0) for A in A_inds]
+
+
+        # Calculate costs for all plans in this generation
+        costs = [model(data.x, edge_index).item() for edge_index in edge_indices]
+
+        # Get best plan of generation and compare to overall best
+        best_idx = min(range(population_size), key=lambda i: costs[i])
+        if costs[best_idx] < best_cost:
+            best_cost = costs[best_idx]
+            best_plan = population[best_idx]
+
+        # Elitism: carry the top plans to next generation unchanged
+        elite_count = max(1, int(population_size * elite_fraction))
+        elite_indices = sorted(range(population_size), key=lambda i: costs[i])[:elite_count]
+
+        # Start new population
+        new_population = [population[i] for i in elite_indices]
+
+
+        # Generate children plans via parent selection and crossover
+        while len(new_population) < population_size:
+            # Select parents
+            parent1 = parent_selection(population, costs)
+            parent2 = parent_selection(population, costs)
+
+            child = order_crossover(parent1, parent2)
+
+            new_population.append(child)
+
+        population = new_population
+
+    return left_deep_adj_from_perm(best_plan), float(np.exp(best_cost))
+
+
+def parent_selection(population, costs, k=5):
+    """
+    Tournament style selection of parent. We sample k individuals at random
+    and return the one with the lowest cost
+    """
+
+    random_candidates = random.sample(range(len(population)), k)
+    best = random_candidates[0]
+    for cand in random_candidates[1:]:
+        if costs[cand] < costs[best]:
+            best=cand
+    return population[best]
+
+def order_crossover(p1, p2):
+    """
+    Order crosssover to merge 2 permutations.
+    - choose two cut points a < b
+    - we copy p1[a:b+1] into child[a:b+1]
+    - fill the remaining positions with genes from p2 in their relative order while skipping the
+     ones already entered in the first step
+    """
+
+    n = len(p1)
+    a,b = sorted(random.sample(range(n),2))
+
+    child = [None] * n
+
+    child[a:b+1] = p1[a: b+1]
+
+    pos = (b + 1) % n
+    for gene in p2:
+        if gene not in child:
+            child[pos] = gene
+            pos = (pos + 1) % n
+
+    return tuple(child)
+
 
 def exhaustive_leftdeep_best_plan(query_data, model, device="cpu"):
     """

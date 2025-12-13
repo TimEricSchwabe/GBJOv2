@@ -7,12 +7,13 @@ from .methods import (
     exhaustive_leftdeep_best_plan,
     NeuralSort,
     optimize_query_gumbel_sinkhorn,
-    optimize_query_nevergrad
+    optimize_query_nevergrad,
+    IterativeImprovement,
+    GEQO
 )
 
 from .gumbel_utils import (
     sample_gumbel,
-
     sample_binary_concrete,
     sample_grouped_gumbel_softmax
 )
@@ -32,5 +33,7 @@ __all__ = [
     'sample_binary_concrete',
     'sample_grouped_gumbel_softmax',
     'left_deep_adj_from_perm',
-    '_temperature_anneal'
+    '_temperature_anneal',
+    'IterativeImprovement',
+    'GEQO'
 ] 
