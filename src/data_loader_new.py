@@ -14,9 +14,10 @@ class SPARQLQueryDataset(Dataset):
     Dataset that loads a list of SPARQLQuery objects from a pickle file.
     Each item in the dataset is a SPARQLQuery object containing multiple plans.
     """
-    def __init__(self, root, transform=None, pre_transform=None, pre_filter=None):
+    def __init__(self, root, transform=None, pre_transform=None, pre_filter=None, hard_negative_prob=0.1):
         self.dataset_path = os.path.join(root, 'queries.pt') # Assumes queries.pkl is the filename
         super(SPARQLQueryDataset, self).__init__(root, transform, pre_transform, pre_filter)
+        self.hard_negative_prob = hard_negative_prob
         
         if os.path.exists(self.dataset_path):
             try:
@@ -43,51 +44,58 @@ class SPARQLQueryDataset(Dataset):
 
     def get(self, idx):
         """
-        Returns the SPARQLQuery object at index `idx`.
-        Note: The DataLoader will collate these. Since SPARQLQuery is a custom object,
-        standard PyG collation might not work directly if we return the object itself.
-        We should return what the training loop needs: a pair of (good_plan_data, bad_plan_data).
+
         """
-        # We'll handle sampling here to return compatible data types (torch_geometric.data.Data)
-        # However, 'get' is expected to return a single item.
-        # If we want to support pairwise sampling, we can do it here.
+
         query = self.sparql_queries[idx]
         return self._sample_pair(query)
 
     def _sample_pair(self, query):
         """
         Samples a pair of (good, bad) plans from the query.
+        With probability `hard_negative_prob`, samples from pairs with the smallest cost difference.
         """
-        num_plans = len(query.costs)
+        costs = torch.tensor(query.costs, dtype=torch.float)
         
-        # Try to find a pair with different costs
-        for _ in range(20):
-            idx1, idx2 = torch.randint(0, num_plans, (2,)).tolist()
-            if idx1 == idx2:
-                continue
+        # Find all valid pairs (i, j) where costs[i] < costs[j]
+        valid_pairs = torch.nonzero(costs.unsqueeze(1) < costs.unsqueeze(0))
+        
+        if len(valid_pairs) > 0:
+            # Check if we should sample the hardest pair (smallest cost difference)
+            if random.random() < self.hard_negative_prob:
+                # Calculate differences for all valid pairs: cost[j] - cost[i]
+                diffs = costs[valid_pairs[:, 1]] - costs[valid_pairs[:, 0]]
                 
-            cost1 = query.costs[idx1]
-            cost2 = query.costs[idx2]
+                # Find minimum difference
+                min_diff = diffs.min()
+                
+                # Select pairs that are close to the minimum difference (within small epsilon)
+                hard_mask = diffs <= (min_diff + 1e-6)
+                
+                # Get indices in valid_pairs that satisfy the condition
+                candidate_indices = torch.nonzero(hard_mask).flatten()
+                
+                # Sample randomly from the hardest candidates
+                pair_idx = candidate_indices[torch.randint(0, len(candidate_indices), (1,)).item()]
+            else:
+                # Randomly select one pair from all possible valid pairs
+                pair_idx = torch.randint(0, len(valid_pairs), (1,)).item()
             
-            if cost1 != cost2:
-                if cost1 < cost2:
-                    good_idx, bad_idx = idx1, idx2
-                else:
-                    good_idx, bad_idx = idx2, idx1
-                
-                good_data = query.torch_data[good_idx]
-                bad_data = query.torch_data[bad_idx]
-                
-                # Ensure y (cost) is correct in the data object (in case it wasn't stored/updated)
-                # It seems create_data stores it, but let's be safe if we need it for regression
-                if not hasattr(good_data, 'y') or good_data.y is None:
-                     good_data.y = torch.tensor([query.costs[good_idx]], dtype=torch.float)
-                if not hasattr(bad_data, 'y') or bad_data.y is None:
-                     bad_data.y = torch.tensor([query.costs[bad_idx]], dtype=torch.float)
+            good_idx, bad_idx = valid_pairs[pair_idx].tolist()
+            
+            good_data = query.torch_data[good_idx]
+            bad_data = query.torch_data[bad_idx]
+            
+            # Ensure y (cost) is set
+            if not hasattr(good_data, 'y') or good_data.y is None:
+                 good_data.y = costs[good_idx].view(1)
+            if not hasattr(bad_data, 'y') or bad_data.y is None:
+                 bad_data.y = costs[bad_idx].view(1)
 
-                return good_data, bad_data
+            return good_data, bad_data
         
-        # Fallback: return first two (or same if only 1 plan, though create_data filters those)
+        # Fallback: return first two (or same if only 1 plan)
+        num_plans = len(query.costs)
         idx1, idx2 = 0, 1 if num_plans > 1 else 0
         return query.torch_data[idx1], query.torch_data[idx2]
 

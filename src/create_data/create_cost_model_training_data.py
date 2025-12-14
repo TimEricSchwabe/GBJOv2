@@ -1,5 +1,10 @@
-import pickle
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1" 
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+import pickle
 import json
 import torch
 from dataclasses import dataclass
@@ -267,6 +272,98 @@ def create_diverse_join_orders(triples: List[List[str]], num_random: int = 3,
     
     return plans
 
+
+def generate_invalid_plan(valid_data: Data) -> Data:
+    """
+    Generate an invalid plan by modifying valid data:
+    1. Randomly remove between 0 and num_edges/2 edges
+    2. Randomly add between 0 and num_edges/2 edges
+    3. Ensure at least one modification makes it invalid (if 0 removed, add at least 1)
+    4. Added edges must NOT be present in the original valid data
+    5. Set cost to infinity
+    
+    Args:
+        valid_data: valid Data object to base the invalid one on
+        
+    Returns:
+        Modified Data object representing an invalid plan
+    """
+    # Clone the data to avoid modifying the original
+    invalid_data = valid_data.clone()
+    
+    # edge_index has shape [2, num_edges]
+    num_edges = invalid_data.edge_index.size(1)
+    
+    # Determine bounds for random operations
+    # Use max(1, ...) to ensure range is valid even for small graphs
+    max_changes = max(1, num_edges // 2)
+    
+    # 1. Remove edges
+    # Randomly remove between 0 and num_edges/2 edges
+    n_remove = np.random.randint(0, max_changes + 1)
+    
+    if n_remove > 0 and num_edges > 0:
+        # Create a mask of all True
+        mask = torch.ones(num_edges, dtype=torch.bool)
+        
+        # Select n_remove unique indices to remove
+        if n_remove >= num_edges:
+            # Remove all edges
+            mask[:] = False
+        else:
+            remove_indices = np.random.choice(num_edges, size=n_remove, replace=False)
+            mask[remove_indices] = False
+            
+        # Apply mask to remove edges
+        invalid_data.edge_index = invalid_data.edge_index[:, mask]
+    
+    # 2. Add edges
+    # Randomly add between 0 and num_edges/2 edges
+    n_add = np.random.randint(0, max_changes + 1)
+    
+    # Constraint: if no edge has been removed, add at least one invalid edge
+    if n_remove == 0 and n_add == 0:
+        n_add = 1
+        
+    num_nodes = invalid_data.x.size(0)
+    
+    if n_add > 0 and num_nodes > 1:
+        # Get existing edges from the VALID data to ensure we add truly new edges
+        existing_edges = set()
+        # Ensure we're on CPU for numpy conversion
+        edge_index_np = valid_data.edge_index.cpu().numpy()
+        for i in range(edge_index_np.shape[1]):
+            existing_edges.add((edge_index_np[0, i], edge_index_np[1, i]))
+            
+        new_edges_list = []
+        attempts = 0
+        max_attempts = n_add * 20  # Limit attempts to avoid infinite loops
+        
+        while len(new_edges_list) < n_add and attempts < max_attempts:
+            attempts += 1
+            u = np.random.randint(0, num_nodes)
+            v = np.random.randint(0, num_nodes)
+            
+            # Check if this edge exists in the original valid data
+            if (u, v) not in existing_edges:
+                # Add to list
+                new_edges_list.append([u, v])
+                # Add to local set so we don't add the same new edge twice
+                existing_edges.add((u, v))
+        
+        if new_edges_list:
+            # Create tensor for new edges [2, n_added]
+            new_edges_tensor = torch.tensor(new_edges_list, dtype=torch.long).t()
+            
+            # Concatenate with existing edges (which might have been reduced)
+            invalid_data.edge_index = torch.cat([invalid_data.edge_index, new_edges_tensor], dim=1)
+    
+    # 3. Set cost to infinity
+    invalid_data.y = torch.tensor([float('inf')], dtype=torch.float)
+    
+    return invalid_data
+
+
 def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans: int = 10, 
                           use_diverse_plans: bool = False, num_random_plans: int = 3,
                           beam_width: int = 1) -> SPARQLQuery:
@@ -343,6 +440,23 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
             torch_data_list.append(None)  # Add None for failed plans
             triples_where_list.append([])  # Add empty list for failed plans
     
+    # Generate one invalid plan if we have valid plans # TODO make a flag here to make invalid plans optional
+    if torch_data_list:
+        try:
+            # Find first valid data to base off
+            valid_idx = next((i for i, d in enumerate(torch_data_list) if d is not None), -1)
+            
+            if valid_idx != -1:
+                valid_data = torch_data_list[valid_idx]
+                invalid_data = generate_invalid_plan(valid_data)
+                
+                final_join_plans.append(None)  # Invalid plan has no Query object
+                costs.append(float('inf'))
+                torch_data_list.append(invalid_data)
+                triples_where_list.append(triples_where_list[valid_idx])
+        except Exception as e:
+            print(f"Error generating invalid plan: {e}")
+
     if cost_error:
         return None
     
@@ -465,7 +579,7 @@ def create_datapoints(sparql_query: SPARQLQuery, rdf2vec_dict, counts_dict) -> L
     triple_to_index = {str(triple): i for i, triple in enumerate(triple_objs)}
     
     for i, plan in enumerate(sparql_query.join_plans):
-        if sparql_query.torch_data[i] is not None:
+        if plan is not None and sparql_query.torch_data[i] is not None:
             try:
                 # Use the consistent version for datapoint creation
                 datapoint = join_order_to_adjacency_matrix_consistent(
@@ -554,6 +668,18 @@ def save_sparql_queries_human_readable(sparql_queries, output_file, use_diverse_
         }
         
         for j, (plan, cost) in enumerate(zip(sq.join_plans, sq.costs)):
+            if plan is None:
+                 plan_data = {
+                    "plan_index": j,
+                    "plan_type": "invalid",
+                    "cost": to_python_type(cost),
+                    "is_actual_best": False,
+                    "join_tree": "INVALID",
+                    "where_clause": "INVALID"
+                }
+                 query_data["plans"].append(plan_data)
+                 continue
+
             plan_type = get_plan_type(j, len(sq.join_plans))
             plan_data = {
                 "plan_index": j,
@@ -614,6 +740,8 @@ def visualize_and_save_plans(sparql_query: SPARQLQuery, query_idx: int, output_d
     
     # Visualize each plan
     for i, plan in enumerate(sparql_query.join_plans):
+        if plan is None:
+            continue
         try:
             # Define output path - mark the best plan with "_best"
             plan_label = f"_best_cost_{sparql_query.costs[i]:.0f}" if i == best_plan_idx else f"_cost_{sparql_query.costs[i]:.0f}"

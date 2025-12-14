@@ -101,7 +101,7 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
             # Using softplus(out_good - out_bad)
             rank_loss = torch.nn.functional.softplus(out_good - out_bad).mean()
             
-            loss = reg_loss + 10 * rank_loss
+            loss = reg_loss + 2 * rank_loss
                 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -255,14 +255,24 @@ def update_running_plots(history, metrics_dir):
     # 1. Loss History
     plt.figure(figsize=(10, 5))
     plt.plot(epochs, history['val_loss_reg'], label='Regression Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.title('Validation Regression Loss')
+    plt.yscale('log')
+    plt.grid(True)
+    plt.savefig(metrics_dir / 'loss_history_regression.png')
+    plt.close()
+
+    plt.figure(figsize=(10, 5))
     plt.plot(epochs, history['val_loss_rank'], label='Ranking Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
-    plt.title('Validation Losses')
+    plt.title('Validation Ranking Loss')
     plt.yscale('log')
     plt.grid(True)
-    plt.savefig(metrics_dir / 'loss_history.png')
+    plt.savefig(metrics_dir / 'loss_history_ranking.png')
     plt.close()
     
     # 2. Q-Error History
@@ -310,7 +320,7 @@ if __name__ == "__main__":
         'num_epochs': 1000,
         'loss_type': 'huber',
         'root_dir': '',
-        'dataset_dir': 'datasets/plans/lubm/path-greedy/new', # Directory containing queries.pkl
+        'dataset_dir': '/home/tim/query_optimization/sparql_queries_star_lubm', # Directory containing queries.pkl
         'enable_training': True,
     }
     
