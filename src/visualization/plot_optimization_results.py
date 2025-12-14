@@ -30,8 +30,21 @@ METHODS_MAP = {
     'greedy': 'Greedy',
     'gradient': 'Gradient',
     'dp': 'DP',
-    'random': 'Random'
+    'random': 'Random',
+    'II': 'Iterative Improvement',
+    'GEQO': 'Genetic Search'
 }
+
+# Define the list of methods to plot (keys from METHODS_MAP) determines Order and Selection
+METHODS_TO_PLOT = [
+    'exhaustive',
+    'dp',
+    'gradient',
+    'II',
+    'greedy',
+    'GEQO',
+    'random'
+]
 
 # Define consistent styles to match original plots exactly
 METHOD_STYLES = {
@@ -39,7 +52,9 @@ METHOD_STYLES = {
     'Greedy': {'color': 'green', 'marker': 's', 'markeredgecolor': 'white', 'markersize': 5},
     'DP': {'color': 'purple', 'marker': 'd', 'markeredgecolor': 'white', 'markersize': 5},
     'Random': {'color': 'red', 'marker': '^', 'markeredgecolor': 'white', 'markersize': 5},
-    'Exhaustive': {'color': 'orange', 'marker': 'x', 'markeredgecolor': 'white', 'markersize': 5}
+    'Exhaustive': {'color': 'orange', 'marker': 'x', 'markeredgecolor': 'white', 'markersize': 5},
+    'Iterative Improvement': {'color': 'brown', 'marker': 'P', 'markeredgecolor': 'white', 'markersize': 6},
+    'Genetic Search': {'color': 'cyan', 'marker': '*', 'markeredgecolor': 'black', 'markersize': 8}
 }
 
 def load_data(results_dir: str) -> pd.DataFrame:
@@ -89,11 +104,15 @@ def plot_overall_boxplot(df: pd.DataFrame, output_dir: str):
     # Filter for columns with data
     cols = [c for c in df.columns if ('_real' in c or '_pred' in c) and df[c].notna().any()]
     
+    # Create a rank map for sorting based on METHODS_TO_PLOT
+    method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
+
     # Sort columns: Method order, then Real vs Pred
     def sort_key(col):
         method = col.split('_')[0]
         type_ = col.split('_')[1]
-        order = {'Exhaustive': 0, 'DP': 1, 'Gradient': 2, 'Greedy': 3, 'Random': 4}
+        # Default to 99 if method not in rank map
+        order = method_ranks
         type_order = {'real': 0, 'pred': 1}
         return (order.get(method, 99), type_order.get(type_, 99))
     
@@ -121,6 +140,11 @@ def plot_mean_costs_bar(df: pd.DataFrame, output_dir: str):
         return
         
     methods = sorted(list(set([c.split('_')[0] for c in means.index])))
+    
+    # Sort methods by METHODS_TO_PLOT order
+    method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
+    methods.sort(key=lambda m: method_ranks.get(m, 99))
+
     real_means = [means.get(f'{m}_real', np.nan) for m in methods]
     pred_means = [means.get(f'{m}_pred', np.nan) for m in methods]
     
@@ -167,12 +191,13 @@ def plot_lineplots_by_size(df: pd.DataFrame, output_dir: str):
     grouped = df.groupby('query_size').median()
     
     # 1. True Costs
-    #plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(10, 6))
     real_cols = [c for c in grouped.columns if '_real' in c]
     has_data = False
     
     # Sort columns to ensure consistent legend order
-    real_cols.sort()
+    method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
+    real_cols.sort(key=lambda c: method_ranks.get(c.replace('_real', ''), 99))
     
     for col in real_cols:
         if grouped[col].notna().any():
@@ -200,12 +225,13 @@ def plot_lineplots_by_size(df: pd.DataFrame, output_dir: str):
     plt.close()
 
     # 2. Predicted Costs
-    #plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(10, 6))
     pred_cols = [c for c in grouped.columns if '_pred' in c]
     has_data = False
     
     # Sort columns
-    pred_cols.sort()
+    method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
+    pred_cols.sort(key=lambda c: method_ranks.get(c.replace('_pred', ''), 99))
     
     for col in pred_cols:
         if grouped[col].notna().any():

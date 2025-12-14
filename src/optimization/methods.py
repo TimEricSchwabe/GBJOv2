@@ -23,6 +23,9 @@ import torch_optimizer as optim_extra
 import matplotlib.pyplot as plt  # Add this import if not present
 
 
+from pytorch_optimizer import *
+
+
 
 def GBJO(
     query_data,
@@ -83,6 +86,7 @@ def GBJO(
         #optimiser = optim.AdamW([edge_logits, edge_logits_slot2], lr=learning_rate)
         optimiser = optim.RAdam([edge_logits, edge_logits_slot2], lr=learning_rate)
         optimiser = optim_extra.Lookahead(optimiser, k=10, alpha=0.5)
+
 
     else:
         optimiser = optim.RAdam([edge_logits], lr=learning_rate)
@@ -900,10 +904,10 @@ def GEQO(query_data, model, optimization_steps=100, device="cpu"):
 
     """
 
-    population_size: int = 30 
+    population_size: int = 20 
     generations: int = 50
-    mutation_rate: float = 0.05
-    elite_fraction: float = 0.1 # top n candidates that survive generation unchanged
+    elite_fraction: float = 0.05 # top n candidates that survive generation unchanged
+    mutation_rate = 0.05
 
     model.eval()
     data = query_data.to(device)
@@ -918,6 +922,8 @@ def GEQO(query_data, model, optimization_steps=100, device="cpu"):
     best_plan = None
     best_cost = float('inf')
 
+    best_costs = []
+
     
     for gen in range(generations):
 
@@ -928,13 +934,15 @@ def GEQO(query_data, model, optimization_steps=100, device="cpu"):
 
 
         # Calculate costs for all plans in this generation
-        costs = [model(data.x, edge_index).item() for edge_index in edge_indices]
+        with torch.no_grad():
+            costs = [model(data.x, edge_index).item() for edge_index in edge_indices]
 
         # Get best plan of generation and compare to overall best
         best_idx = min(range(population_size), key=lambda i: costs[i])
         if costs[best_idx] < best_cost:
             best_cost = costs[best_idx]
             best_plan = population[best_idx]
+            best_costs.append(best_cost)
 
         # Elitism: carry the top plans to next generation unchanged
         elite_count = max(1, int(population_size * elite_fraction))
@@ -950,16 +958,26 @@ def GEQO(query_data, model, optimization_steps=100, device="cpu"):
             parent1 = parent_selection(population, costs)
             parent2 = parent_selection(population, costs)
 
-            child = order_crossover(parent1, parent2)
+            #child = order_crossover(parent1, parent2)
+            child = edge_crossover(parent1, parent2)
+            child = mutate_swap(child, mutation_rate)
 
             new_population.append(child)
 
         population = new_population
 
+    # plt.figure(figsize=(10, 5))
+    # plt.plot(best_costs, label='Predicted Cost')
+    # plt.xlabel('Optimization Step')
+    # plt.ylabel('Cost')
+    # plt.legend()
+    # plt.grid(True)
+    # plt.show() 
+
     return left_deep_adj_from_perm(best_plan), float(np.exp(best_cost))
 
 
-def parent_selection(population, costs, k=5):
+def parent_selection(population, costs, k=2):
     """
     Tournament style selection of parent. We sample k individuals at random
     and return the one with the lowest cost
@@ -995,6 +1013,104 @@ def order_crossover(p1, p2):
             pos = (pos + 1) % n
 
     return tuple(child)
+
+
+def build_edge_table(p1, p2):
+    """
+    Build the edge table for ERX (Edge Recombination Crossover).
+
+    Both parents p1, p2 are treated as cycles:
+      - In p1, each gene i is adjacent to its left and right neighbor (with wrap-around).
+      - Same for p2.
+    The edge table for gene g is the union of all neighbors of g in both parents.
+    """
+    assert len(p1) == len(p2)
+    n = len(p1)
+
+    # Initialize empty neighbor sets
+    edge_table: Dict[int, Set[int]] = {gene: set() for gene in p1}
+
+    def add_edges_from_parent(parent):
+        for idx, gene in enumerate(parent):
+            left = parent[(idx - 1) % n]
+            right = parent[(idx + 1) % n]
+            # Treat as undirected edges
+            edge_table[gene].add(left)
+            edge_table[gene].add(right)
+
+    add_edges_from_parent(p1)
+    add_edges_from_parent(p2)
+
+    return edge_table
+
+
+def edge_crossover(p1, p2):
+    """
+    Edge Recombination Crossover (ERX) for permutations.
+
+    Steps:
+      1. Build edge table (neighbors) from both parents.
+      2. Pick a random starting gene.
+      3. At each step:
+         - Append current gene to child.
+         - Remove it from all neighbor sets.
+         - If its neighbor set is non-empty:
+             choose among those neighbors the one with the smallest
+             neighbor set (ties broken randomly).
+           Else:
+             choose a random gene among the unused ones.
+      4. Continue until child is full.
+
+    Returns:
+      A new permutation (child) of the same elements as p1 and p2.
+    """
+    edge_table = build_edge_table(p1, p2)
+    remaining = set(p1)
+
+    # Start from a random gene (could also pick from the better parent)
+    current = random.choice(p1)
+    child = []
+
+    while remaining:
+        child.append(current)
+        remaining.remove(current)
+
+        # Remove current from all neighbor lists
+        for neighbors in edge_table.values():
+            neighbors.discard(current)
+
+        if not remaining:
+            break
+
+        # Candidate neighbors are the neighbors of current that are still unused
+        candidates = [g for g in edge_table[current] if g in remaining]
+
+        if candidates:
+            # Choose candidate with smallest neighbor set
+            # (i.e., most constrained), ties broken randomly
+            min_len = min(len(edge_table[g]) for g in candidates)
+            best_candidates = [g for g in candidates if len(edge_table[g]) == min_len]
+            current = random.choice(best_candidates)
+        else:
+            # No neighbors left: pick random unused gene
+            current = random.choice(tuple(remaining))
+
+    return tuple(child)
+
+def mutate_swap(perm, mutation_rate):
+    """
+    Swap mutation: for each position, with probability mutation_rate,
+    swap it with another random position.
+    """
+    n = len(perm)
+    p = list(perm)
+
+    for i in range(n):
+        if random.random() < mutation_rate:
+            j = random.randrange(n)
+            p[i], p[j] = p[j], p[i]
+
+    return tuple(p)
 
 
 def exhaustive_leftdeep_best_plan(query_data, model, device="cpu"):

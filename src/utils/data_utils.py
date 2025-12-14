@@ -272,8 +272,13 @@ def load_sparql_queries(queries_file: str, num_queries, seed=42):
     Returns:
         List of SPARQLQuery objects
     """
-    with open(queries_file, 'rb') as f:
-        sparql_queries = pickle.load(f)
+    try:
+        # Try loading with torch.load first (faster, handles tensors better)
+        sparql_queries = torch.load(queries_file, weights_only=False)
+    except (RuntimeError, pickle.UnpicklingError, TypeError):
+        # Fallback to standard pickle load
+        with open(queries_file, 'rb') as f:
+            sparql_queries = pickle.load(f)
     
     if num_queries is not None:
         print(f"Loaded {num_queries} SPARQL queries from {queries_file}")

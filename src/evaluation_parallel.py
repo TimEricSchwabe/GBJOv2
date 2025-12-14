@@ -6,8 +6,15 @@ on SPARQL queries in parallel and compares their performance using a trained cos
 Removes all visualization and plotting, focusing only on detailed results.
 """
 
-import sys
 import os
+# critical: must be set before importing numpy/torch
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1" 
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+import sys
 import pickle
 import numpy as np
 import torch
@@ -689,7 +696,7 @@ def process_single_query(args):
         return result
         
     except Exception as e:
-        raise e
+        #raise e
         print(f"Error processing query {query_index}: {e}")
         return None
 
@@ -761,7 +768,7 @@ def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None,
                     print(f"Completed {completed}/{len(sparql_queries)} queries ({completed/len(sparql_queries)*100:.1f}%)")
                     
             except Exception as e:
-                raise e
+                #raise e
                 args = future_to_args[future]
                 query_index = args[0]
                 print(f"Query {query_index} generated an exception: {e}")
@@ -782,18 +789,30 @@ def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None,
 if __name__ == "__main__":
     # Configuration for optimization
     config_wikidata_star = {
-        "queries_file": "/home/tim/query_optimization/datasets/wikidata_star_plan_datasets_optimization/queries.pkl",
-        "model_path": "/home/tim/query_optimization/explicit_join_model/models/wikidata/star_model.pt",
-        "num_queries": 20,
-        "optimization_steps": 1000, # 2500
+        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl",
+        "model_path": "/home/tim/query_optimization/training_results/wikidata-star-new/model.pt",
+        "num_queries": 200,
+        "optimization_steps": 500, # 2500
         "use_exhaustive": False,
         "use_dp": True,
-        "use_true_costs": False,
+        "dp_limit": 9,  # Set the limit here (e.g., 15 for star queries)
+        "use_true_costs": True,
         "save_path": "optimization_results",
-        "num_workers": 6,  # Use all available cores
+        "num_workers": 3,  # Use all available cores
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO"],
+        "model_params": {
+            "version": "v3",
+            "hidden_dim": 128,
+            "node_feature_dim": 307,
+            "n_layers": 6,
+            "use_jk": False,
+            "jk_mode": "cat",
+            "use_residual": False,
+            "use_layer_norm": True,
+            "dropout": 0.0,
+        },
         "optimization_params": {
-            "optimization_procedure": "gumbel",
-            "k": 1,  # Number of gradient optimization runs
+            "k": 3,  # Number of gradient optimization runs
             "learning_rate": 1, # 0.35
             "lambda_acyclic": 3391.0,
             "lambda_triple_in": 3334.0,
@@ -818,7 +837,7 @@ if __name__ == "__main__":
             "gradient_clip_norm": 3.3,
             "use_lr_scheduling": True,
             "decoding_method": "greedy",
-            "use_gumbel_noise": True
+            "use_gumbel_noise": False
         }
     }
 
@@ -832,6 +851,18 @@ if __name__ == "__main__":
         "use_true_costs": False,
         "save_path": "optimization_results",
         "num_workers": None,  # Use all available cores
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO"],
+        "model_params": {
+            "version": "v3",
+            "hidden_dim": 128,
+            "node_feature_dim": 307,
+            "n_layers": 6,
+            "use_jk": False,
+            "jk_mode": "cat",
+            "use_residual": False,
+            "use_layer_norm": True,
+            "dropout": 0.0,
+        },
         "optimization_params": {
             "optimization_procedure": "gumbel",
             "k": 1,  # Number of gradient optimization runs
@@ -865,8 +896,8 @@ if __name__ == "__main__":
 
     config_lubm_star = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
-         "model_path": "/home/tim/query_optimization/training_results/v3-stars-6layers/model.pt",
-        "num_queries": 20,
+        "model_path": "/home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt",
+        "num_queries": 200,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "optimization_steps": 500,
         "use_exhaustive": False,
@@ -874,8 +905,19 @@ if __name__ == "__main__":
         "dp_limit": 9,  # Set the limit here (e.g., 15 for star queries)
         "use_true_costs": True,
         "save_path": "optimization_results",
-        "num_workers": 8,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement"],
+        "num_workers": 6,  # Use all available cores
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO"],
+        "model_params": {
+            "version": "v3",
+            "hidden_dim": 128,
+            "node_feature_dim": 307,
+            "n_layers": 6,
+            "use_jk": False,
+            "jk_mode": "cat",
+            "use_residual": False,
+            "use_layer_norm": True,
+            "dropout": 0.0,
+        },
         "optimization_params": { # params for GBJO
             "k": 1,  # Number of gradient optimization runs
             "learning_rate": 1.7, # 1.7
@@ -885,7 +927,7 @@ if __name__ == "__main__":
             "lambda_join_in": 1742.0,
             "lambda_join_out": 1558.0,
             "lambda_entropy": 0.0,
-            "lambda_total_penalty": 2.6,
+            "lambda_total_penalty": 2.6, # 2.6
             "lambda_left_linear": 2300.0,
             "init_tau": 4.5,
             "min_tau": 1.0,
@@ -909,7 +951,7 @@ if __name__ == "__main__":
     config_lubm_path = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl",
         "model_path": "/home/tim/query_optimization/training_results/lubm-path-nice-v3-6-layer/model.pt",
-        "num_queries": 20,
+        "num_queries": 200,
         "optimization_steps": 500,
         "use_exhaustive": False,
         "max_query_size": 5,  # Filter queries larger than this (None for no filter)
@@ -1000,7 +1042,7 @@ if __name__ == "__main__":
         }
     }
 
-    config = config_lubm_path
+    config = config_wikidata_star
     
     # Create unique save directory based on datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1034,7 +1076,7 @@ if __name__ == "__main__":
         print(f"Filtering queries with size > {max_size}")
         original_len = len(sparql_queries)
         sparql_queries = [q for q in sparql_queries if len(q.triples) <= max_size]
-        #sparql_queries = [q for q in sparql_queries if len(q.triples) == 3] # TODO just for now to visulaize
+        #sparql_queries = [q for q in sparql_queries if len(q.triples) >= 8] # TODO just for now to visulaize
 
         print(f"Retained {len(sparql_queries)}/{original_len} queries")
         
