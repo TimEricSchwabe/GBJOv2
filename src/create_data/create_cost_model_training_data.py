@@ -482,11 +482,11 @@ def create_datapoints(sparql_query: SPARQLQuery, rdf2vec_dict, counts_dict) -> L
     return results
 
 def save_sparql_queries_single_file(sparql_queries, output_file):
-    """Save all SPARQLQuery objects to a single pickle file"""
+    """Save all SPARQLQuery objects to a single file using torch.save"""
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     
-    with open(output_file, 'wb') as f:
-        pickle.dump(sparql_queries, f)
+    # torch.save is optimized for saving objects containing PyTorch tensors
+    torch.save(sparql_queries, output_file)
     
     print(f"Saved {len(sparql_queries)} SPARQLQuery objects to {output_file}")
 
@@ -640,17 +640,17 @@ if __name__ == "__main__":
 
     
     # Queries to generate random plans for
-    input_file = "datasets/queries/lubm/paths/path_queries.json"
+    input_file = "datasets/queries/lubm/stars/star_queries.json"
 
     # Directory to save the plans
-    dataset_dir = "datasets/plans/lubm/path/plans/new_dataset"
+    dataset_dir = "datasets/plans/lubm/star/plans/new_dataset"
 
     #visualization_dir = "join_plan_visualizations_path_wikidata"
-    sparql_queries_file = "sparql_queries_path_lubm/queries.pkl"
+    sparql_queries_file = "sparql_queries_star_lubm/queries.pt"
 
 
     # How many queries to process
-    MAX_QUERIES = 5
+    MAX_QUERIES = 10
 
     # The minimum cardinality of the queries to process
     MIN_CARDINALITY = 1
@@ -764,7 +764,7 @@ if __name__ == "__main__":
     save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
     
     # Save human-readable version
-    human_readable_file = sparql_queries_file.replace('.pkl', '_readable.json')
+    human_readable_file = sparql_queries_file.replace('.pt', '_readable.json')
     save_sparql_queries_human_readable(sparql_queries, human_readable_file, use_diverse_plans=USE_DIVERSE_PLANS, beam_width=BEAM_WIDTH)
 
     print("\nDataset creation complete!")
