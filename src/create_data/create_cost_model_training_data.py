@@ -881,6 +881,8 @@ if __name__ == "__main__":
                 if (n_queries % SAVE_INTERVAL) == 0:
                     print(f"\nSaving checkpoint at {n_queries} queries...")
                     save_dataset_single_file(all_triples, all_torch_data, dataset_dir)
+                    save_sparql_queries_single_file(sparql_queries, sparql_queries_file)
+
                     print(f"Checkpoint saved at {n_queries} queries")
 
             except Exception as e:
