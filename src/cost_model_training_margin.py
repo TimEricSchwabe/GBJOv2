@@ -25,6 +25,24 @@ from create_data.create_cost_model_training_data import SPARQLQuery
 
 import torch_optimizer as optim_extra
 
+
+def get_hard_negative_prob(epoch, num_epochs, max_prob=0.8, ramp_fraction=0.75):
+    """
+    Linear ramp from 0 to max_prob over first ramp_fraction of training,
+    then hold at max_prob.
+    
+    Args:
+        epoch: Current epoch (1-indexed)
+        num_epochs: Total number of epochs
+        max_prob: Maximum probability to reach (default 0.8 = 80%)
+        ramp_fraction: Fraction of training to ramp over (default 0.75 = 75%)
+    """
+    ramp_epochs = int(num_epochs * ramp_fraction)
+    if epoch >= ramp_epochs:
+        return max_prob
+    else:
+        return max_prob * (epoch / ramp_epochs)
+
 def calculate_qerror(pred, true):
     """Calculate Q-Error between predicted and true values"""
     epsilon = 1e-10
@@ -66,6 +84,11 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
         total_loss = 0
         prev_time = time.time()
         model.train()
+
+
+        # Calculate hard negative probability for sampling pairs
+        current_prob = get_hard_negative_prob(epoch+1, num_epochs, max_prob=0.8, ramp_fraction=0.75)
+        train_loader.dataset.dataset.set_hard_negative_prob(current_prob)
         
         # Add progress bar
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
@@ -84,16 +107,36 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
             out_bad = model(bad_batch.x, bad_batch.edge_index, batch=bad_batch.batch).view(-1)
             
             # Regression Loss
-            if loss_type != "qerror":
-                reg_loss_good = criterion(out_good, torch.log(good_batch.y.view(-1)))
-                reg_loss_bad = criterion(out_bad, torch.log(bad_batch.y.view(-1)))
-            else:
-                pred_y_good = torch.exp(out_good)
-                reg_loss_good = torch.mean(calculate_qerror(pred_y_good, good_batch.y.view(-1)))
-                pred_y_bad = torch.exp(out_bad)
-                reg_loss_bad = torch.mean(calculate_qerror(pred_y_bad, bad_batch.y.view(-1)))
+            # Create masks for finite (valid) costs
+            mask_good = torch.isfinite(good_batch.y.view(-1)) & (good_batch.y.view(-1) > 0)
+            mask_bad = torch.isfinite(bad_batch.y.view(-1)) & (bad_batch.y.view(-1) > 0)
             
-            reg_loss = (reg_loss_good + reg_loss_bad) / 2
+            # Initialize regression losses
+            reg_loss_good = torch.tensor(0.0, device=device)
+            reg_loss_bad = torch.tensor(0.0, device=device)
+            
+            if loss_type != "qerror":
+                if mask_good.any():
+                    reg_loss_good = criterion(out_good[mask_good], torch.log(good_batch.y.view(-1)[mask_good]))
+                if mask_bad.any():
+                    reg_loss_bad = criterion(out_bad[mask_bad], torch.log(bad_batch.y.view(-1)[mask_bad]))
+            else:
+                if mask_good.any():
+                    pred_y_good = torch.exp(out_good[mask_good])
+                    reg_loss_good = torch.mean(calculate_qerror(pred_y_good, good_batch.y.view(-1)[mask_good]))
+                if mask_bad.any():
+                    pred_y_bad = torch.exp(out_bad[mask_bad])
+                    reg_loss_bad = torch.mean(calculate_qerror(pred_y_bad, bad_batch.y.view(-1)[mask_bad]))
+            
+            # Average regression loss over valid components only
+            valid_components = 0
+            if mask_good.any(): valid_components += 1
+            if mask_bad.any(): valid_components += 1
+            
+            if valid_components > 0:
+                reg_loss = (reg_loss_good + reg_loss_bad) / valid_components
+            else:
+                reg_loss = torch.tensor(0.0, device=device)
             
             # Ranking Loss: Minimize max(0, -1 * (out_bad - out_good) + margin)
             # => Minimize max(0, out_good - out_bad + margin)
@@ -101,7 +144,7 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
             # Using softplus(out_good - out_bad)
             rank_loss = torch.nn.functional.softplus(out_good - out_bad).mean()
             
-            loss = reg_loss + 2 * rank_loss
+            loss = 1 * reg_loss + 1 * rank_loss
                 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -140,7 +183,7 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
             update_running_plots(history, metrics_dir)
             
             # Save best model based on regression loss (or whatever metric you prefer)
-            current_perf = metrics['reg_loss'] # using regression loss for model selection
+            current_perf = metrics['reg_loss'] # using regression loss for model selection # TODO REMOVE REGRESSION LOSS
             if current_perf < best_performance:
                 best_performance = current_perf
                 torch.save(model.state_dict(), save_path)
@@ -188,20 +231,32 @@ def validate_model(model, criterion, val_loader, device='cpu', loss_type="mse"):
     pred_all = torch.cat([pred_good, pred_bad])
     true_all = torch.cat([true_good, true_bad])
     
-    if loss_type != "qerror":
-        reg_loss = criterion(pred_all, torch.log(true_all)).item()
+    # Filter valid data (finite true cost)
+    mask_valid = torch.isfinite(true_all) & (true_all > 0)
+    
+    if mask_valid.any():
+        pred_valid = pred_all[mask_valid]
+        true_valid = true_all[mask_valid]
+        
+        if loss_type != "qerror":
+            reg_loss = criterion(pred_valid, torch.log(true_valid)).item()
+        else:
+            qerrors = calculate_qerror(torch.exp(pred_valid), true_valid)
+            reg_loss = torch.mean(qerrors).item()
+            
+        # --- 3. Q-Error ---
+        # Calculate Q-error only on valid data
+        pred_cost_valid = torch.exp(pred_valid)
+        qerrors_valid = calculate_qerror(pred_cost_valid, true_valid)
+        qerror_mean = torch.mean(qerrors_valid).item()
     else:
-        qerrors = calculate_qerror(torch.exp(pred_all), true_all)
-        reg_loss = torch.mean(qerrors).item()
+        reg_loss = 0.0
+        qerror_mean = 0.0
         
     # --- 2. Ranking Loss ---
     # Using softplus(pred_good - pred_bad)
+    # Ranking loss uses ALL data including invalid plans
     rank_loss = torch.nn.functional.softplus(pred_good - pred_bad).mean().item()
-    
-    # --- 3. Q-Error ---
-    pred_cost_all = torch.exp(pred_all)
-    qerrors_all = calculate_qerror(pred_cost_all, true_all)
-    qerror_mean = torch.mean(qerrors_all).item()
     
     # --- 4. Pairwise Accuracy ---
     # We want to check if the model correctly identified that cost(good) < cost(bad)
@@ -218,8 +273,11 @@ def validate_model(model, criterion, val_loader, device='cpu', loss_type="mse"):
         'pairwise_acc': pairwise_acc
     }
     
+    # Calculate exp(pred) for all data for raw_data return
+    pred_cost_all = torch.exp(pred_all)
+
     raw_data = {
-        'pred_all': pred_cost_all.numpy(),
+        'pred_all': pred_cost_all.numpy(), 
         'true_all': true_all.numpy()
     }
     
@@ -229,6 +287,14 @@ def plot_pred_vs_true(raw_data, save_path):
     """Plot Predicted vs True Cost"""
     y_pred = raw_data['pred_all']
     y_true = raw_data['true_all']
+    
+    # Filter out infinite values from true costs (invalid plans)
+    mask = np.isfinite(y_true)
+    if mask.sum() == 0:
+        return
+        
+    y_pred = y_pred[mask]
+    y_true = y_true[mask]
     
     plt.figure(figsize=(8, 6))
     plt.scatter(y_true, y_pred, alpha=0.5, s=10)
@@ -317,10 +383,10 @@ if __name__ == "__main__":
         'dropout': 0.0,
         'learning_rate': 0.0001,
         'batch_size': 64, # Batch size of QUERIES (so 32*2 = 64 plans per batch)
-        'num_epochs': 1000,
+        'num_epochs': 3000,
         'loss_type': 'huber',
         'root_dir': '',
-        'dataset_dir': '/home/tim/query_optimization/sparql_queries_star_lubm', # Directory containing queries.pkl
+        'dataset_dir': '/home/tim/query_optimization/datasets/plans/wn18rr/stars/', # Directory containing queries.pkl
         'enable_training': True,
     }
     
@@ -333,7 +399,10 @@ if __name__ == "__main__":
     # Load Dataset
     dataset_path = os.path.join(config['root_dir'], config['dataset_dir'])
     print(f"Loading dataset from {dataset_path}")
-    dataset = SPARQLQueryDataset(root=dataset_path)
+    
+    # Add random fingerprints to join nodes
+    fingerprint_transform = AddRandomGaussianFingerprints(fingerprint_dim=64)
+    dataset = SPARQLQueryDataset(root=dataset_path, transform=fingerprint_transform)
     
     print(f"Dataset loaded: {len(dataset)} queries")
     
@@ -362,7 +431,7 @@ if __name__ == "__main__":
     ).to(device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'])
-    optimizer = optim_extra.Lookahead(optimizer, k=10, alpha=0.5)
+    optimizer = optim_extra.Lookahead(optimizer, k=5, alpha=0.5)
     
     if config['loss_type'] == 'huber':
         criterion = nn.HuberLoss()

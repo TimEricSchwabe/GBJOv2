@@ -9,10 +9,13 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(os.path.dirname(__file__))
 
-from model import CostGNNv2
+from model import CostGNNv2, CostGNNv3
 from src.create_data.create_cost_model_training_data import SPARQLQuery
 from mpl_toolkits.mplot3d import Axes3D
 import torch.optim as optim
+
+import torch_optimizer as optim_extra
+
 
 
 from utils.data_utils import (
@@ -372,6 +375,7 @@ def optimize_query_with_trajectory_tracking(
     gradient_clip_norm: float = 5.0,
     use_lr_scheduling: bool = True,
     lr_warmup_steps: int = 200,
+    use_gumbel_noise: bool = True,
 ):
     """
     Modified optimization function that tracks trajectory in the (α, β) space.
@@ -384,12 +388,17 @@ def optimize_query_with_trajectory_tracking(
     num_edges = edge_index.size(1)
     
     # Initialize edge logits (matching methods.py initialization)
-    edge_logits = torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device=device)
-    edge_logits_slot2 = torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device=device)
+    #edge_logits = torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device=device)
+    #edge_logits_slot2 = torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device=device) # TODO
+
+    edge_logits = torch.zeros(num_edges, requires_grad=True, device=device)
+    edge_logits_slot2 = torch.zeros(num_edges, requires_grad=True, device=device)
     
     # Optimizer
     if logit_sampling == 'dual-softmax':
-        optimiser = optim.AdamW([edge_logits, edge_logits_slot2], lr=learning_rate)
+        #optimiser = optim.AdamW([edge_logits, edge_logits_slot2], lr=learning_rate)
+        optimiser = optim.RAdam([edge_logits, edge_logits_slot2], lr=learning_rate)
+        #optimiser = optim_extra.Lookahead(optimiser, k=10, alpha=0.5)
         #optimiser = optim.SGD([edge_logits, edge_logits_slot2], lr=learning_rate, momentum=0.9)
     else:
         optimiser = optim.AdamW([edge_logits], lr=learning_rate)
@@ -441,9 +450,9 @@ def optimize_query_with_trajectory_tracking(
             
             # Sample only on join targets to avoid NaNs for empty groups
             slot1[join_target_mask] = sample_grouped_gumbel_softmax(
-                masked_logits_1[join_target_mask], edge_index[1][join_target_mask], tau)
+                masked_logits_1[join_target_mask], edge_index[1][join_target_mask], tau, use_gumbel_noise)
             slot2[join_target_mask] = sample_grouped_gumbel_softmax(
-                masked_logits_2[join_target_mask], edge_index[1][join_target_mask], tau)
+                masked_logits_2[join_target_mask], edge_index[1][join_target_mask], tau, use_gumbel_noise)
             
             edge_weights = slot1 + slot2  # relaxed 2-hot (values in (0,2))
             # Ensure root join has no outgoing edges (w.l.o.g.)
@@ -454,7 +463,7 @@ def optimize_query_with_trajectory_tracking(
             masked_logits[triple_to_triple_mask] = float('-inf')
             join_to_triple_mask = (edge_index[0] >= triples_num) & (edge_index[1] < triples_num)
             masked_logits[join_to_triple_mask] = float('-inf')
-            edge_weights = sample_grouped_gumbel_softmax(masked_logits, edge_index[0], tau)
+            edge_weights = sample_grouped_gumbel_softmax(masked_logits, edge_index[0], tau, use_gumbel_noise)
             edge_weights[edge_index[0] == (N_NODES - 1)] = 0.0
         else:
             # Use Binary Concrete (Gumbel-Sigmoid) sampling
@@ -604,13 +613,20 @@ def visualize_optimization_trajectory_3d(query_file, model_path, config, device=
         clean_plot: If True, remove all axes, grids, and labels for minimal visualization
     """
     # Load model
-    model = CostGNNv2(node_feature_dim=307, hidden_dim=512).to(device)
+    #model = CostGNNv2(node_feature_dim=307, hidden_dim=512).to(device)
+    #model.load_state_dict(torch.load(model_path, map_location=device))
+    #model.eval()
+
+    # elsenif using v3
+    model = CostGNNv3(node_feature_dim=307, hidden_dim=128, n_layers=6, use_jk=False, jk_mode='cat', use_residual=False, use_layer_norm=True, dropout=0.0).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
+
     
     # Load query
     queries = load_sparql_queries(query_file, 100)
-    query_data = queries[2].torch_data[0]
+    queries = [q for q in queries if len(q.triples) == 3]
+    query_data = queries[1].torch_data[0]
     
     # Reference adjacency matrices
     A_base = left_deep_adj_from_perm(torch.tensor([0, 1, 2]))   # "1 JOIN 2 JOIN 3"
@@ -901,13 +917,13 @@ if __name__ == "__main__":
         'optimization_steps': 500,
         'verbose': False,
         'optimization_params': {
-            'learning_rate': 1,
+            'learning_rate': 1.8,
             'lambda_acyclic': 3081.0,
             'lambda_triple_in': 3714.0,
             'lambda_triple_out': 135.0,
             'lambda_join_in': 1742.0,
             'lambda_join_out': 1558.0,
-            'lambda_entropy': 0.0,
+            'lambda_entropy': 1.0,
             'lambda_total_penalty': 2.6,
             'lambda_left_linear': 2300.0,
             'init_tau': 4.5,
@@ -921,15 +937,17 @@ if __name__ == "__main__":
             'trajectory_save_interval': 1,
             'gradient_clip_norm': 2,
             'use_lr_scheduling': True,
+            'use_gumbel_noise': False,
             'lr_warmup_steps': 50,
         }
     }
     
-    query_file = "/home/tim/query_optimization/datasets/plans/plans_for_landscape_visualization/lubm_star_3/queries.pkl"
-    model_path = "/home/tim/query_optimization/datasets/models/lubm/star_model.pt"
+    query_file = "/home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl"
+    #model_path = "/home/tim/query_optimization/training_results/lubm-path-nice-v3-6-layer/model.pt"
+    model_path = "/home/tim/query_optimization/training_results/lubm-path-ranking-loss/model.pt"
     
     # Visualization options
-    show_penalty_landscape = False  # Toggle to include penalty in landscape
+    show_penalty_landscape = True  # Toggle to include penalty in landscape
     
     # Choose which visualization to run:
     #visualize_cost_transition(query_file, model_path)  # 2D version

@@ -7,10 +7,9 @@ from .methods import (
     exhaustive_leftdeep_best_plan,
     NeuralSort,
     optimize_query_gumbel_sinkhorn,
-    optimize_query_nevergrad,
+    CMA,
     IterativeImprovement,
-    GEQO
-)
+    GEQO)
 
 from .gumbel_utils import (
     sample_gumbel,
@@ -28,12 +27,11 @@ __all__ = [
     'exhaustive_leftdeep_best_plan',
     'NeuralSort',
     'optimize_query_gumbel_sinkhorn',
-    'optimize_query_nevergrad',
+    'CMA',
     'sample_gumbel',
     'sample_binary_concrete',
     'sample_grouped_gumbel_softmax',
     'left_deep_adj_from_perm',
     '_temperature_anneal',
     'IterativeImprovement',
-    'GEQO'
-] 
+    'GEQO'] 

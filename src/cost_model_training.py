@@ -18,8 +18,8 @@ from data_loader import QueryDataset, SingleFileQueryDataset, AddRandomGaussianF
 import torch_optimizer as optim_extra
 
 
-import scienceplots
-plt.style.use('science')
+#import scienceplots
+#plt.style.use('science')
 
 
 def calculate_qerror(pred, true):
@@ -445,7 +445,7 @@ if __name__ == "__main__":
         'use_jk': False,            # Whether to use Jumping Knowledge
         'jk_mode': 'cat',           # JK mode: 'cat', 'max', or 'lstm'
         'use_residual': False,       # Whether to use residual connections
-        'use_layer_norm': False,    # Whether to use layer normalization (disable for counting)
+        'use_layer_norm': True,    # Whether to use layer normalization (disable for counting)
         'dropout': 0.0,             # Dropout probability
         
         # Training parameters
@@ -460,7 +460,7 @@ if __name__ == "__main__":
         
         # Paths
         'root_dir': '',
-        'dataset_dir': 'datasets/plans/lubm/star-greedy',
+        'dataset_dir': 'datasets/plans/wn18rr/stars',
         
         # Other settings
         'enable_training': True,    # Set to False to skip training
@@ -481,6 +481,20 @@ if __name__ == "__main__":
         dataset_path = os.path.join(config['root_dir'], config['dataset_dir'])
         dataset = SingleFileQueryDataset(root=dataset_path, transform=fingerprint_transform)
         print(f"Using single-file dataset from {dataset_path}")
+
+        # Filter out plans with infinite cost
+        initial_len = len(dataset)
+        indices_to_keep = [i for i, data in enumerate(dataset.data_list) if not torch.isinf(data.y).any()]
+        
+        if len(indices_to_keep) < initial_len:
+            dataset.data_list = [dataset.data_list[i] for i in indices_to_keep]
+            
+            # Also filter triples if available to maintain consistency
+            if hasattr(dataset, 'data_dict') and 'triples' in dataset.data_dict:
+                dataset.data_dict['triples'] = [dataset.data_dict['triples'][i] for i in indices_to_keep]
+            
+            print(f"Filtered out {initial_len - len(dataset)} plans with infinite cost. Remaining: {len(dataset)}")
+
     else:
         dataset_path = os.path.join(config['root_dir'], config['dataset_dir'])
         dataset = QueryDataset(root=dataset_path)
@@ -490,7 +504,7 @@ if __name__ == "__main__":
     total_size = len(dataset)
     print(f"Dataset loaded: {total_size} samples")
     
-    train_size = int(0.9 * total_size)
+    train_size = int(0.8 * total_size)
     val_size = total_size - train_size
     
     print(f"Using {train_size} samples for training and {val_size} samples for validation")
@@ -532,7 +546,7 @@ if __name__ == "__main__":
     
     # Training setup
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'])
-    optimizer = optim_extra.Lookahead(optimizer, k=10, alpha=0.5)
+    #optimizer = optim_extra.Lookahead(optimizer, k=10, alpha=0.5)
 
     print(model)
 

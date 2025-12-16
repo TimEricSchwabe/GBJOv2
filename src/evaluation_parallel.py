@@ -7,7 +7,6 @@ Removes all visualization and plotting, focusing only on detailed results.
 """
 
 import os
-# critical: must be set before importing numpy/torch
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1" 
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -47,9 +46,8 @@ from optimization import (
     random_join_plan,
     DPLinear,
     exhaustive_leftdeep_best_plan,
-    optimize_query_nevergrad,
-    IterativeImprovement
-)
+    CMA,
+    IterativeImprovement)
 
 from utils.data_utils import (
     adjacency_to_query_with_real_triples,
@@ -59,6 +57,7 @@ from utils.data_utils import (
     plan_to_string,
     plans_are_equivalent,
     load_sparql_queries,
+    left_deep_adj_from_perm
 )
 
 # Import plotting functions
@@ -487,13 +486,14 @@ def process_single_query(args):
         if "GEQO" in optimization_algorithms:
             GEQO_adj, GEQO_pred_cost = GEQO(torch_data, model, optimization_steps, device)
             GEQO_plan = adjacency_to_query_with_real_triples(GEQO_adj, len(triple_objs), triple_objs)
-            GEQO_real_cost = GEQO_plan.root.get_cost()
+            GEQO_real_cost = float('inf')
 
             result["plans"]["GEQO"] = {
                 "predicted_cost": float(GEQO_pred_cost),
                 "plan_string": plan_to_string(GEQO_plan) if GEQO_plan else None
             }
             if use_true_costs:
+                GEQO_real_cost = GEQO_plan.root.get_cost()
                 result["plans"]["GEQO"]["real_cost"] = float(GEQO_real_cost)
 
 
@@ -501,14 +501,87 @@ def process_single_query(args):
             # Run Iterative Improvement
             II_adj, II_pred_cost = IterativeImprovement(torch_data, model, optimization_steps, device)
             II_plan = adjacency_to_query_with_real_triples(II_adj, len(triple_objs), triple_objs)
-            II_real_cost = II_plan.root.get_cost()
+            II_real_cost = float('inf')
 
             result["plans"]["II"] = {
                 "predicted_cost": float(II_pred_cost),
                 "plan_string": plan_to_string(II_plan) if II_plan else None
             }
             if use_true_costs:
+                II_real_cost = II_plan.root.get_cost()
                 result["plans"]["II"]["real_cost"] = float(II_real_cost)
+
+        if "NeuralSort" in optimization_algorithms:
+             # Run NeuralSort optimization
+            try:
+                ns_result = NeuralSort(
+                    torch_data, model, device,
+                    optimization_steps=optimization_steps,
+                    **optimization_params
+                )
+                
+                if len(ns_result) == 4:
+                    ns_adj, ns_triples_num, ns_pred_cost, _ = ns_result
+                else:
+                    ns_adj, ns_triples_num, ns_pred_cost = ns_result
+
+                ns_plan = adjacency_to_query_with_real_triples(ns_adj, len(triple_objs), triple_objs)
+                
+                 # Validate
+                is_valid, validation_msg = validate_plan(ns_plan, triple_objs)
+                if not is_valid:
+                    print(f"Warning: Invalid NeuralSort plan for query {query_index}: {validation_msg}")
+                    ns_plan = None
+                    ns_pred_cost = float('inf')
+                    ns_real_cost = float('inf')
+                else:
+                    if use_true_costs:
+                         ns_real_cost = ns_plan.root.get_cost()
+                
+                result["plans"]["NeuralSort"] = {
+                    "predicted_cost": float(ns_pred_cost),
+                    "plan_string": plan_to_string(ns_plan) if ns_plan else None
+                }
+                if use_true_costs and is_valid:
+                     result["plans"]["NeuralSort"]["real_cost"] = float(ns_real_cost)
+            except Exception as e:
+                print(f"Error in NeuralSort for query {query_index}: {e}")
+
+        if "CMA" in optimization_algorithms:
+             # Run CMA optimization
+            try:
+                cma_result = CMA(
+                    torch_data, model, device,
+                    optimization_steps=optimization_steps,
+                    **optimization_params
+                )
+                
+                if len(cma_result) == 4:
+                    cma_adj, cma_triples_num, cma_pred_cost, _ = cma_result
+                else:
+                    cma_adj, cma_triples_num, cma_pred_cost = cma_result
+
+                cma_plan = adjacency_to_query_with_real_triples(cma_adj, len(triple_objs), triple_objs)
+                
+                 # Validate
+                is_valid, validation_msg = validate_plan(cma_plan, triple_objs)
+                if not is_valid:
+                    print(f"Warning: Invalid CMA plan for query {query_index}: {validation_msg}")
+                    cma_plan = None
+                    cma_pred_cost = float('inf')
+                    cma_real_cost = float('inf')
+                else:
+                    if use_true_costs:
+                         cma_real_cost = cma_plan.root.get_cost()
+                
+                result["plans"]["CMA"] = {
+                    "predicted_cost": float(cma_pred_cost),
+                    "plan_string": plan_to_string(cma_plan) if cma_plan else None
+                }
+                if use_true_costs and is_valid:
+                     result["plans"]["CMA"]["real_cost"] = float(cma_real_cost)
+            except Exception as e:
+                 print(f"Error in CMA for query {query_index}: {e}")
 
 
         
@@ -640,15 +713,33 @@ def process_single_query(args):
                     greedy_cost = greedy_plan.root.get_cost()
         
         # Create a random plan
-        try:
-            log_pred_cost = model(query.torch_data[-1].x, edge_index=query.torch_data[-1]['edge_index']).item()
-            random_pred_cost = float(np.exp(log_pred_cost))
+        random_plan = None
+        random_pred_cost = float('inf')
+        random_true_cost = float('inf')
 
+        try:
+            # Generate random permutation
+            n_triples = len(triple_objs)
+            perm = torch.randperm(n_triples)
+            
+            # Create adjacency for left-deep tree
+            random_adj = left_deep_adj_from_perm(perm)
+            
+            # Predict cost
+            edge_index = random_adj.nonzero().t().to(device)
+            x = torch_data.x.to(device)
+            
+            log_pred_cost = model(x, edge_index=edge_index).item()
+            random_pred_cost = float(np.exp(log_pred_cost))
+            
+            # Convert to plan
+            random_plan = adjacency_to_query_with_real_triples(random_adj, n_triples, triple_objs)
+            
             if use_true_costs:
-                random_true_cost = query.join_plans[-1].root.get_cost()
+                random_true_cost = random_plan.root.get_cost()
         except Exception as e:
             print(f"Error creating random plan for query {query_index}: {e}")
-            random_cost = float('inf')
+            random_true_cost = float('inf')
         
         # Add results to the result dictionary
         result["plans"]["gradient"] = {
@@ -842,16 +933,16 @@ if __name__ == "__main__":
     }
 
     config_wikidata_path = {
-        "queries_file": "/home/tim/query_optimization/datasets/wikidata_path_plan_datasets_optimization/queries.pkl",
-        "model_path": "/home/tim/query_optimization/explicit_join_model/models/wikidata/path_model.pt",
-        "num_queries": 100000,
-        "optimization_steps": 1000, #2500
+        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_optimization/queries.pkl",
+        "model_path": "/home/tim/query_optimization/training_results/wikidata-path-new/model.pt",
+        "num_queries": 20,
+        "optimization_steps": 500, #2500
         "use_exhaustive": False,
         "use_dp": True,
         "use_true_costs": False,
         "save_path": "optimization_results",
         "num_workers": None,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO"],
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"],
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -863,10 +954,9 @@ if __name__ == "__main__":
             "use_layer_norm": True,
             "dropout": 0.0,
         },
-        "optimization_params": {
-            "optimization_procedure": "gumbel",
+        "optimization_params": { # params for GBJO
             "k": 1,  # Number of gradient optimization runs
-            "learning_rate": 0.5,
+            "learning_rate": 1, #0.5
             "lambda_acyclic": 467.0,
             "lambda_triple_in": 3194.0,
             "lambda_triple_out": 3661.0,
@@ -874,15 +964,15 @@ if __name__ == "__main__":
             "lambda_join_out": 1900.0,
             "lambda_entropy": 0.0,
             "lambda_total_penalty": 1.8,
-            "lambda_left_linear": 759.0,
+            "lambda_left_linear": 1900.0, #759
             "init_tau": 5,
             "min_tau": 1.0,
             "tau_decay": 0.973,
             "use_temperature_annealing": True,
             "return_best": True,
-            "min_penalty_threshold": 0.5,
+            "min_penalty_threshold": 4, # 0.5
             "use_lambda_ramping": True,
-            "logit_sampling": "softmax",
+            "logit_sampling": "dual-softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
             "lambda_ramp_exponent": 7,
@@ -890,14 +980,15 @@ if __name__ == "__main__":
             "gradient_clip_norm": 4.1,
             "use_lr_scheduling": True,
             "decoding_method": "greedy",
-            "use_gumbel_noise": True
+            "use_gumbel_noise": False,
+            "use_swa": False
         }
     }
 
     config_lubm_star = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
         "model_path": "/home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt",
-        "num_queries": 200,
+        "num_queries": 20,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "optimization_steps": 500,
         "use_exhaustive": False,
@@ -906,7 +997,7 @@ if __name__ == "__main__":
         "use_true_costs": True,
         "save_path": "optimization_results",
         "num_workers": 6,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO"],
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"],
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -942,23 +1033,24 @@ if __name__ == "__main__":
             "lambda_ramp_exponent": 6.5,
             "lr_warmup_steps": 50,
             "gradient_clip_norm": 2,
-            "use_lr_scheduling": True,
+            "use_lr_scheduling": False,
             "decoding_method": "greedy",
-            "use_gumbel_noise": False
+            "use_gumbel_noise": False,
+            "use_swa": False,
         }
     }
 
     config_lubm_path = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl",
         "model_path": "/home/tim/query_optimization/training_results/lubm-path-nice-v3-6-layer/model.pt",
-        "num_queries": 200,
+        "num_queries": 20,
         "optimization_steps": 500,
         "use_exhaustive": False,
-        "max_query_size": 5,  # Filter queries larger than this (None for no filter)
+        "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "use_dp": True,
         "use_true_costs": True,
         "save_path": "optimization_results",
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO"],
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"],
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -979,14 +1071,14 @@ if __name__ == "__main__":
             "lambda_triple_out": 790.0,
             "lambda_join_in": 2197.0,
             "lambda_join_out": 2204.0,
-            "lambda_entropy": 0, # 0
+            "lambda_entropy": 1, # 0
             "lambda_total_penalty": 4.2 ,#4.2
             "lambda_left_linear": 1910, # 1910
             "init_tau": 3.7, #3.7
-            "min_tau": 1.0,
+            "min_tau": 1, # 1.0
             "tau_decay": 0.963, # 0.963
             "use_temperature_annealing": True,
-            "return_best": False,
+            "return_best": True,
             "min_penalty_threshold": 8.6,
             "use_lambda_ramping": True,
             "logit_sampling": "dual-softmax",
@@ -997,52 +1089,67 @@ if __name__ == "__main__":
             "gradient_clip_norm": 1.9,
             "use_lr_scheduling": False,
             "decoding_method": "greedy",
-            "use_gumbel_noise": False
-        }
+            "use_gumbel_noise": False,
+            "use_swa": False
+                    }
     }
 
-    config_lubm_path_gumbel_sinkhorn = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
-        "model_path": "/home/tim/query_optimization/training_results/gnn_20251210_185635/model.pt",
+    config_wn18rr_star = {
+        "queries_file": "/home/tim/query_optimization/datasets/plans/wn18rr/stars/queries.pt",
+        "model_path": "/home/tim/query_optimization/training_results/gnn_20251216_160551/model.pt",
         "num_queries": 20,
-        "optimization_steps": 1000,
+        "max_query_size": None,  # Filter queries larger than this (None for no filter)
+        "optimization_steps": 500,
         "use_exhaustive": False,
         "use_dp": True,
+        "dp_limit": 9,  # Set the limit here (e.g., 15 for star queries)
         "use_true_costs": True,
         "save_path": "optimization_results",
-        "num_workers": None,  # Use all available cores
-        "optimization_params": {
-            "optimization_procedure": "neuralsort_v2",
-            "k":1,  # Number of gradient optimization runs - 5
-            "learning_rate": 1, # 1.8
-            "lambda_acyclic": 4415.0,
-            "lambda_triple_in": 3027.0,
-            "lambda_triple_out": 790.0,
-            "lambda_join_in": 2197.0,
-            "lambda_join_out": 2204.0,
+        "num_workers": 6,  # Use all available cores
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"],
+        "model_params": {
+            "version": "v3",
+            "hidden_dim": 128,
+            "node_feature_dim": 307,
+            "n_layers": 6,
+            "use_jk": False,
+            "jk_mode": "cat",
+            "use_residual": False,
+            "use_layer_norm": True,
+            "dropout": 0.0,
+        },
+        "optimization_params": { # params for GBJO
+            "k": 1,  # Number of gradient optimization runs
+            "learning_rate": 1.7, # 1.7
+            "lambda_acyclic": 3081.0,
+            "lambda_triple_in": 3714.0,
+            "lambda_triple_out": 135.0,
+            "lambda_join_in": 1742.0,
+            "lambda_join_out": 1558.0,
             "lambda_entropy": 0.0,
-            "lambda_total_penalty": 4.2 ,#4.2
-            "lambda_left_linear": 1910, # 1910
-            "init_tau": 3.0, #3.7
-            "min_tau": 0.1,
-            "tau_decay": 0.985, # 0.963
+            "lambda_total_penalty": 2.6, # 2.6
+            "lambda_left_linear": 2300.0,
+            "init_tau": 4.5,
+            "min_tau": 1.0,
+            "tau_decay": 0.963,
             "use_temperature_annealing": True,
             "return_best": True,
-            "min_penalty_threshold": 8.6,
+            "min_penalty_threshold": 5,
             "use_lambda_ramping": True,
-            "logit_sampling": "softmax",
+            "logit_sampling": "dual-softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
-            "lambda_ramp_exponent": 6.8, # 6.8
-            "lr_warmup_steps": 200,
-            "gradient_clip_norm": 1.9,
-            "use_lr_scheduling": True,
+            "lambda_ramp_exponent": 6.5,
+            "lr_warmup_steps": 50,
+            "gradient_clip_norm": 2,
+            "use_lr_scheduling": False,
             "decoding_method": "greedy",
-            "use_gumbel_noise": True
+            "use_gumbel_noise": False,
+            "use_swa": False,
         }
     }
 
-    config = config_wikidata_star
+    config = config_wn18rr_star
     
     # Create unique save directory based on datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1069,6 +1176,7 @@ if __name__ == "__main__":
     
     # Load queries
     sparql_queries = load_sparql_queries(config['queries_file'], config['num_queries'])
+
     
     # Filter queries by size if max_query_size is set
     if config.get('max_query_size') is not None:
@@ -1076,7 +1184,8 @@ if __name__ == "__main__":
         print(f"Filtering queries with size > {max_size}")
         original_len = len(sparql_queries)
         sparql_queries = [q for q in sparql_queries if len(q.triples) <= max_size]
-        #sparql_queries = [q for q in sparql_queries if len(q.triples) >= 8] # TODO just for now to visulaize
+        #sparql_queries = [q for q in sparql_queries if len(q.triples) >= 8] # TODO jus
+        # t for now to visulaize
 
         print(f"Retained {len(sparql_queries)}/{original_len} queries")
         

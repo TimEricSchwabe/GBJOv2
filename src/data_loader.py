@@ -36,8 +36,19 @@ class SingleFileQueryDataset(Dataset):
         super(SingleFileQueryDataset, self).__init__(root, transform, pre_transform, pre_filter)
         # Load the dataset after initialization
         if os.path.exists(self.dataset_path):
-            self.data_dict = torch.load(self.dataset_path)
-            self.data_list = self.data_dict['data']
+            self.data_dict = torch.load(self.dataset_path, weights_only=False)
+            raw_data_list = self.data_dict['data']
+
+            # Filter out samples with zero or invalid costs
+            self.data_list = [
+                d for d in raw_data_list 
+                if hasattr(d, 'y') and d.y is not None 
+                and torch.isfinite(d.y).all() and (d.y > 0).all()
+            ]
+            
+            n_filtered = len(raw_data_list) - len(self.data_list)
+            if n_filtered > 0:
+                print(f"Filtered out {n_filtered} samples with zero/invalid costs")
         else:
             raise FileNotFoundError(f"Dataset file not found at {self.dataset_path}")
         
@@ -135,7 +146,7 @@ def load_single_file_dataset_metadata(dataset_dir):
     """Load metadata about the single file dataset"""
     dataset_path = os.path.join(dataset_dir, 'dataset.pt')
     if os.path.exists(dataset_path):
-        data_dict = torch.load(dataset_path)
+        data_dict = torch.load(dataset_path, weights_only=False)
         return {
             'dataset_size': data_dict['dataset_size'],
             'triples': data_dict['triples']
@@ -222,3 +233,67 @@ class AddRandomGaussianFingerprints:
         
         data.x = x
         return data
+
+class QueryPairDataset(Dataset):
+    """
+    Wraps a flat dataset of plans (where n consecutive plans belong to one query)
+    and exposes it as a dataset of QUERIES.
+    
+    __getitem__ returns a pair (good_plan, bad_plan) sampled from the query.
+    """
+    def __init__(self, dataset, plans_per_query=None):
+        super().__init__()
+        self.dataset = dataset
+        
+        # Determine plans per query (n)
+        if plans_per_query is not None:
+            self.plans_per_query = plans_per_query
+        elif hasattr(dataset, 'data_dict') and 'triples' in dataset.data_dict:
+            # Infer from metadata
+            num_queries = len(dataset.data_dict['triples'])
+            if len(dataset) % num_queries != 0:
+                raise ValueError(f"Dataset size {len(dataset)} not divisible by num_queries {num_queries}")
+            self.plans_per_query = len(dataset) // num_queries
+        else:
+            raise ValueError("Could not infer plans_per_query. Please provide it explicitly.")
+            
+        self.num_queries = len(dataset) // self.plans_per_query
+
+    def len(self):
+        return self.num_queries
+
+    def get(self, idx):
+        """
+        Returns a pair (good_data, bad_data) for the query at `idx`.
+        """
+        base_idx = idx * self.plans_per_query
+        
+        # Naive sampling: pick two random indices from this query's block
+        # You can optimize this by pre-calculating costs if speed is an issue
+        
+        # Try a few times to find a pair with different costs
+        for _ in range(10):
+            offset1 = torch.randint(0, self.plans_per_query, (1,)).item()
+            offset2 = torch.randint(0, self.plans_per_query, (1,)).item()
+            
+            if offset1 == offset2:
+                continue
+                
+            idx1 = base_idx + offset1
+            idx2 = base_idx + offset2
+            
+            data1 = self.dataset[idx1]
+            data2 = self.dataset[idx2]
+            
+            cost1 = data1.y.item()
+            cost2 = data2.y.item()
+            
+            if cost1 != cost2:
+                if cost1 < cost2:
+                    return data1, data2 # (good, bad)
+                else:
+                    return data2, data1 # (good, bad)
+        
+        # Fallback: if all plans have same cost or we failed to find diff, return any two
+        # The ranking loss with margin will naturally be 0 if costs are effectively equal
+        return self.dataset[base_idx], self.dataset[base_idx + 1 if self.plans_per_query > 1 else 0]

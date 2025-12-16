@@ -43,4 +43,4 @@ def create_occurrences_file(dataset_name, kg_file):
 
 if __name__ == "__main__":
     print('Creating occurrence counts...')
-    create_occurrences_file("wikidata", "datasets/graphs/wikidata/wikidata.nt")
+    create_occurrences_file("wn18rr", "/home/tim/fully-inductive-cardinality-estimation/data/wn18rr_v4/raw/59622641?private_link=e97f83a035f7e24bb37c")

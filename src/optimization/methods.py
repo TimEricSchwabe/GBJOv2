@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt  # Add this import if not present
 
 
 from pytorch_optimizer import *
+from torch.optim.swa_utils import AveragedModel, SWALR
 
 
 
@@ -59,7 +60,9 @@ def GBJO(
     lr_warmup_steps: int = 200,
     decoding_method: str = 'greedy', # 'threshold', 'beam', 'greedy', 'hungarian'
     k: int = 1, #not used
-    use_gumbel_noise: bool = True,
+    use_gumbel_noise: bool = False,
+    use_swa: bool = False,
+    swa_update_interval: int = 10,
 ):
 
     # Move data 
@@ -76,21 +79,39 @@ def GBJO(
 
     # edge logits = L 
     # Step 1 of the algorithm
-    edge_logits = torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device=device)
+    #edge_logits = torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device=device)
 
     # Second L is needed only for dual-softmax variant
-    edge_logits_slot2 = torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device=device)
+    #edge_logits_slot2 = torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5), requires_grad=True, device=device)
+
+    # 1. Define a wrapper module for SWA compatibility
+    class LogitsModel(torch.nn.Module):
+        def __init__(self, n_edges):
+            super().__init__()
+            self.edge_logits = torch.nn.Parameter(torch.zeros(n_edges))
+            self.edge_logits_slot2 = torch.nn.Parameter(torch.zeros(n_edges))
+            
+    # 2. Initialize model and bind variables
+    logits_model = LogitsModel(num_edges).to(device)
+    edge_logits = logits_model.edge_logits
+    edge_logits_slot2 = logits_model.edge_logits_slot2
 
     # Optimiser 
     if logit_sampling == 'dual-softmax':
         #optimiser = optim.AdamW([edge_logits, edge_logits_slot2], lr=learning_rate)
         optimiser = optim.RAdam([edge_logits, edge_logits_slot2], lr=learning_rate)
-        optimiser = optim_extra.Lookahead(optimiser, k=10, alpha=0.5)
+        optimiser = optim_extra.Lookahead(optimiser, k=5, alpha=0.5)
 
 
     else:
         optimiser = optim.RAdam([edge_logits], lr=learning_rate)
-        optimiser = optim_extra.Lookahead(optimiser, k=10, alpha=0.5)
+        optimiser = optim_extra.Lookahead(optimiser, k=5, alpha=0.5)
+
+    # 3. SWA Setup
+    if use_swa:
+        swa_model = AveragedModel(logits_model)
+        swa_start = int(optimization_steps * 0.)  # Start averaging in last 25% of steps
+        swa_scheduler = SWALR(optimiser, swa_lr=learning_rate)
     
 
     # Optional Learning rate scheduler for warmup and decay
@@ -349,8 +370,13 @@ def GBJO(
         # Step 11 in Algorithm 1
         optimiser.step()
         
-        # Update learning rate schedule
-        if use_lr_scheduling:
+        # Update learning rate schedule (Standard or SWA)
+        if use_swa and step >= swa_start:
+            swa_scheduler.step()
+
+            if step % swa_update_interval == 0:
+                swa_model.update_parameters(logits_model)
+        elif use_lr_scheduling:
             scheduler.step()
 
         # Log
@@ -361,6 +387,13 @@ def GBJO(
                 f"Cost: {cost_pred.item():.2f}  Penalty: {total_penalty_raw.item():.2f}  "
                 f"LR: {current_lr:.6f}  Grad: {max_grad_norm:.4f}"
             )
+
+    # Switch to SWA weights for final inference
+    if use_swa and optimization_steps > swa_start:
+        if verbose:
+            print("Using SWA averaged weights for final decoding.")
+        edge_logits = swa_model.module.edge_logits
+        edge_logits_slot2 = swa_model.module.edge_logits_slot2
 
     # Step 14 in Algorithm 1
     with torch.no_grad():
@@ -1784,7 +1817,7 @@ def NeuralSort(
         return final_A, triples_num, final_cost
 
 
-def optimize_query_nevergrad(
+def CMA(
     query_data,
     model,
     device: str = "cpu",
@@ -1932,7 +1965,7 @@ def optimize_query_nevergrad(
     optimizer = ng.optimizers.CMA(parametrization=param, budget=optimization_steps, num_workers=num_workers)
     
     # Run optimization
-    if verbose:
+    if False:
         pbar = tqdm(range(optimization_steps), desc="Nevergrad optimization")
         for _ in pbar:
             x = optimizer.ask()

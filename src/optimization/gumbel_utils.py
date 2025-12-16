@@ -69,6 +69,7 @@ def sample_grouped_gumbel_softmax(edge_logits: torch.Tensor,
         Tensor of shape (E,) – edge weights in (0,1) summing to 1 for every
         set of edges that share the same source node.
     """
+
     device = edge_logits.device
     edge_weights = torch.empty_like(edge_logits)
 

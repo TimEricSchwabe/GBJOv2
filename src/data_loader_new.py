@@ -16,7 +16,9 @@ class SPARQLQueryDataset(Dataset):
     """
     def __init__(self, root, transform=None, pre_transform=None, pre_filter=None, hard_negative_prob=0.1):
         self.dataset_path = os.path.join(root, 'queries.pt') # Assumes queries.pkl is the filename
-        super(SPARQLQueryDataset, self).__init__(root, transform, pre_transform, pre_filter)
+        # FIX: Pass None to super to prevent it from applying transform to the tuple result
+        super(SPARQLQueryDataset, self).__init__(root, None, pre_transform, pre_filter)
+        self.custom_transform = transform
         self.hard_negative_prob = hard_negative_prob
         
         if os.path.exists(self.dataset_path):
@@ -50,6 +52,9 @@ class SPARQLQueryDataset(Dataset):
         query = self.sparql_queries[idx]
         return self._sample_pair(query)
 
+    def set_hard_negative_prob(self, hard_negative_prob):
+        self.hard_negative_prob = hard_negative_prob
+
     def _sample_pair(self, query):
         """
         Samples a pair of (good, bad) plans from the query.
@@ -57,8 +62,22 @@ class SPARQLQueryDataset(Dataset):
         """
         costs = torch.tensor(query.costs, dtype=torch.float)
         
-        # Find all valid pairs (i, j) where costs[i] < costs[j]
-        valid_pairs = torch.nonzero(costs.unsqueeze(1) < costs.unsqueeze(0))
+        # Create boolean mask for finite costs
+        # (N, 1) & (1, N) -> (N, N) matrix where True only if BOTH costs are finite
+        is_finite = torch.isfinite(costs.unsqueeze(1)) & torch.isfinite(costs.unsqueeze(0))
+
+        # Create boolean mask for positive costs (filter out zero costs)
+        is_positive = (costs.unsqueeze(1) > 0) & (costs.unsqueeze(0) > 0)
+            
+        # Create boolean mask for strictly increasing costs
+        is_valid_order = costs.unsqueeze(1) < costs.unsqueeze(0)
+        
+        # Combine: must be finite AND cost[i] < cost[j]
+        #valid_pairs_mask = is_finite & is_valid_order
+        valid_pairs_mask = is_valid_order & is_positive
+        
+        # Get indices
+        valid_pairs = torch.nonzero(valid_pairs_mask)
         
         if len(valid_pairs) > 0:
             # Check if we should sample the hardest pair (smallest cost difference)
@@ -92,12 +111,26 @@ class SPARQLQueryDataset(Dataset):
             if not hasattr(bad_data, 'y') or bad_data.y is None:
                  bad_data.y = costs[bad_idx].view(1)
 
+            # FIX: Use self.custom_transform instead of self.transform
+            if self.custom_transform is not None:
+                good_data = self.custom_transform(good_data.clone())
+                bad_data = self.custom_transform(bad_data.clone())
+
             return good_data, bad_data
         
         # Fallback: return first two (or same if only 1 plan)
         num_plans = len(query.costs)
         idx1, idx2 = 0, 1 if num_plans > 1 else 0
-        return query.torch_data[idx1], query.torch_data[idx2]
+        
+        good_data = query.torch_data[idx1]
+        bad_data = query.torch_data[idx2]
+        
+        # FIX: Use self.custom_transform instead of self.transform
+        if self.custom_transform is not None:
+            good_data = self.custom_transform(good_data.clone())
+            bad_data = self.custom_transform(bad_data.clone())
+
+        return good_data, bad_data
 
 # Add this class to data_loader.py
 

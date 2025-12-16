@@ -32,7 +32,9 @@ METHODS_MAP = {
     'dp': 'DP',
     'random': 'Random',
     'II': 'Iterative Improvement',
-    'GEQO': 'Genetic Search'
+    'GEQO': 'Genetic Search',
+    'NeuralSort': 'Neural Sort',
+    'CMA': 'CMA'
 }
 
 # Define the list of methods to plot (keys from METHODS_MAP) determines Order and Selection
@@ -43,7 +45,9 @@ METHODS_TO_PLOT = [
     'II',
     'greedy',
     'GEQO',
-    'random'
+    'random',
+    'NeuralSort',
+    'CMA'
 ]
 
 # Define consistent styles to match original plots exactly
@@ -54,7 +58,9 @@ METHOD_STYLES = {
     'Random': {'color': 'red', 'marker': '^', 'markeredgecolor': 'white', 'markersize': 5},
     'Exhaustive': {'color': 'orange', 'marker': 'x', 'markeredgecolor': 'white', 'markersize': 5},
     'Iterative Improvement': {'color': 'brown', 'marker': 'P', 'markeredgecolor': 'white', 'markersize': 6},
-    'Genetic Search': {'color': 'cyan', 'marker': '*', 'markeredgecolor': 'black', 'markersize': 8}
+    'Genetic Search': {'color': 'cyan', 'marker': '*', 'markeredgecolor': 'black', 'markersize': 8},
+    'Neural Sort': {'color': 'yellow', 'marker': 'v', 'markeredgecolor': 'white', 'markersize': 5},
+    'CMA': {'color': 'pink', 'marker': 'h', 'markeredgecolor': 'white', 'markersize': 5}
 }
 
 def load_data(results_dir: str) -> pd.DataFrame:
@@ -344,7 +350,7 @@ def plot_scatter_correlations(df: pd.DataFrame, output_dir: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Plot optimization results.")
-    parser.add_argument("results_dir", nargs='?', default="optimization_results/lubm-path-also-nice", 
+    parser.add_argument("results_dir", nargs='?', default="optimization_results/run_20251216_105158", 
                         help="Directory containing detailed_results.json")
     args = parser.parse_args()
 
