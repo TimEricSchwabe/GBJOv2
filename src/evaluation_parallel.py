@@ -233,16 +233,14 @@ def compute_all_join_costs(triple_objs, timeout=60):
     return costs
 
 
-def visualize_join_order_tree(triple_objs, gradient_plan, greedy_plan, dp_plan, save_path):
+def visualize_join_order_tree(triple_objs, plans_dict, save_path):
     """
     Visualize all possible join orderings as a tree with costs, highlighting
-    the paths taken by gradient, greedy, and DP optimizers.
+    the paths taken by the optimizers provided in plans_dict.
     
     Args:
         triple_objs: List of Triple objects
-        gradient_plan: Query object from gradient optimization (or None)
-        greedy_plan: Query object from greedy optimization (or None)
-        dp_plan: Query object from DP optimization (or None)
+        plans_dict: Dict[str, Query|None] mapping method name -> Query plan (or None)
         save_path: Path to save the visualization (without extension)
     """
     n = len(triple_objs)
@@ -251,10 +249,42 @@ def visualize_join_order_tree(triple_objs, gradient_plan, greedy_plan, dp_plan, 
         print(f"Skipping visualization: {n} triples exceeds limit of 5")
         return
     
-    # Extract join orders from each plan
-    gradient_order = extract_join_order(gradient_plan, triple_objs)
-    greedy_order = extract_join_order(greedy_plan, triple_objs)
-    dp_order = extract_join_order(dp_plan, triple_objs)
+    METHOD_DISPLAY = {
+        "exhaustive": "Exhaustive",
+        "dp": "DP",
+        "gradient": "Gradient",
+        "II": "Iterative Improvement",
+        "greedy": "Greedy",
+        "GEQO": "Genetic Search",
+        "random": "Random",
+        "NeuralSort": "Neural Sort",
+        "CMA": "CMA",
+    }
+
+    # Colors for highlighted paths per method (keys match result JSON keys)
+    METHOD_COLORS = {
+        "gradient": "#3498db",  # Blue
+        "greedy": "#2ecc71",  # Green
+        "dp": "#e74c3c",  # Red
+        "II": "#9b59b6",  # Purple
+        "GEQO": "#f39c12",  # Orange
+        "NeuralSort": "#1abc9c",  # Teal
+        "CMA": "#e91e63",  # Pink
+        "random": "#607d8b",  # Gray-blue
+        "exhaustive": "#000000",  # Black
+    }
+    
+    # Extract join orders from each plan once
+    method_orders = {}
+    if plans_dict:
+        for method, plan in plans_dict.items():
+            if plan is None:
+                continue
+            try:
+                method_orders[method] = extract_join_order(plan, triple_objs)
+            except Exception:
+                # If extraction fails for a method, just skip highlighting for it
+                continue
     
     # Compute costs for all permutations
     costs = compute_all_join_costs(triple_objs)
@@ -356,12 +386,9 @@ def visualize_join_order_tree(triple_objs, gradient_plan, greedy_plan, dp_plan, 
                 
                 # Determine edge color based on highlighted paths
                 colors = []
-                if edge_on_path(parent, child, gradient_order):
-                    colors.append('#3498db')  # Blue for gradient
-                if edge_on_path(parent, child, greedy_order):
-                    colors.append('#2ecc71')  # Green for greedy
-                if edge_on_path(parent, child, dp_order):
-                    colors.append('#e74c3c')  # Red for DP
+                for method, order in method_orders.items():
+                    if edge_on_path(parent, child, order):
+                        colors.append(METHOD_COLORS.get(method, "#999999"))
                 
                 if colors:
                     # Use colon-separated colors for multiple paths
@@ -386,12 +413,9 @@ def visualize_join_order_tree(triple_objs, gradient_plan, greedy_plan, dp_plan, 
                 
                 # Determine edge color
                 colors = []
-                if edge_on_path(parent, child, gradient_order):
-                    colors.append('#3498db')  # Blue
-                if edge_on_path(parent, child, greedy_order):
-                    colors.append('#2ecc71')  # Green
-                if edge_on_path(parent, child, dp_order):
-                    colors.append('#e74c3c')  # Red
+                for method, order in method_orders.items():
+                    if edge_on_path(parent, child, order):
+                        colors.append(METHOD_COLORS.get(method, "#999999"))
                 
                 if colors:
                     edge_color = ':'.join(colors)
@@ -402,19 +426,191 @@ def visualize_join_order_tree(triple_objs, gradient_plan, greedy_plan, dp_plan, 
     # Add legend
     with graph.subgraph(name='cluster_legend') as legend:
         legend.attr(label='Method', style='rounded', color='gray')
-        legend.node('legend_gradient', 'Gradient', fillcolor='#3498db', fontcolor='white')
-        legend.node('legend_greedy', 'Greedy', fillcolor='#2ecc71', fontcolor='white')
-        legend.node('legend_dp', 'DP', fillcolor='#e74c3c', fontcolor='white')
-        legend.edge('legend_gradient', 'legend_greedy', style='invis')
-        legend.edge('legend_greedy', 'legend_dp', style='invis')
+        legend_node_ids = []
+        for method in method_orders.keys():
+            color = METHOD_COLORS.get(method, "#999999")
+            node_id = f"legend_{method}"
+            legend.node(node_id, METHOD_DISPLAY.get(method, method), fillcolor=color, fontcolor='white')
+            legend_node_ids.append(node_id)
+        
+        # Keep legend nodes aligned
+        for a, b in zip(legend_node_ids, legend_node_ids[1:]):
+            legend.edge(a, b, style='invis')
     
     # Render the graph
     try:
-        graph.render(save_path, format='png', cleanup=True)
+        graph.render(save_path, format='svg', cleanup=True)
         print(f"Saved join order tree visualization to: {save_path}.png")
     except Exception as e:
         print(f"Error rendering join order tree: {e}")
     
+    return graph
+
+
+def visualize_all_plans(plans_dict, costs_dict, save_path, triple_objs=None):
+    """
+    Create a single Graphviz figure that shows each method's join tree in its own
+    subgraph cluster, with predicted/true costs displayed above the tree.
+
+    Args:
+        plans_dict: Dict[str, Query|None] mapping method key -> Query plan (or None)
+        costs_dict: Dict[str, Dict[str, float|None]] mapping method key -> {'predicted_cost': .., 'real_cost': ..}
+        save_path: Path to save the visualization (without extension)
+        triple_objs: Optional list of original Triple objects; if provided, leaves will
+                    be labeled as t{idx} for stable cross-method comparison.
+    """
+    if not plans_dict:
+        return None
+
+    METHOD_DISPLAY = {
+        "exhaustive": "Exhaustive",
+        "dp": "DP",
+        "gradient": "Gradient",
+        "II": "Iterative Improvement",
+        "greedy": "Greedy",
+        "GEQO": "Genetic Search",
+        "random": "Random",
+        "NeuralSort": "Neural Sort",
+        "CMA": "CMA",
+    }
+
+    METHOD_ORDER = [
+        "exhaustive",
+        "dp",
+        "gradient",
+        "II",
+        "greedy",
+        "GEQO",
+        "random",
+        "NeuralSort",
+        "CMA",
+    ]
+
+    # Map triple string -> index for stable leaf labels (optional)
+    triple_index_by_str = {}
+    if triple_objs:
+        for i, t in enumerate(triple_objs):
+            triple_index_by_str[str(t)] = i
+
+    def _format_cost(v):
+        if v is None:
+            return "n/a"
+        try:
+            if v == float("inf"):
+                return "∞"
+        except Exception:
+            pass
+        try:
+            if abs(v) >= 1e6:
+                return f"{v:.2e}"
+            if abs(v) >= 1000:
+                return f"{v:.0f}"
+            return f"{v:.3g}"
+        except Exception:
+            return str(v)
+
+    def _triple_label(triple):
+        try:
+            label = triple.where_body()
+        except Exception:
+            # Fallback: show raw triple pattern
+            try:
+                label = f"{triple.s} {triple.p} {triple.o}."
+            except Exception:
+                label = str(triple)
+        
+        # Escape double quotes for Graphviz
+        if '"' in label:
+            label = label.replace('"', '\\"')
+        return label
+
+    def _add_plan_node(node, g, prefix, next_id):
+        """
+        Add a plan subtree rooted at `node` into graph/subgraph `g`.
+        Returns: (node_id_str, next_id_int)
+        """
+        current_id = f"{prefix}_{next_id}"
+        next_id += 1
+
+        if isinstance(node, Triple):
+            g.node(current_id, label=_triple_label(node), shape="box")
+            return current_id, next_id
+
+        if isinstance(node, Join):
+            g.node(current_id, label="⋈", shape="circle")
+            left_id, next_id = _add_plan_node(node.left, g, prefix, next_id)
+            right_id, next_id = _add_plan_node(node.right, g, prefix, next_id)
+            g.edge(current_id, left_id)
+            g.edge(current_id, right_id)
+            return current_id, next_id
+
+        # Unknown node type (defensive)
+        g.node(current_id, label=str(node), shape="box")
+        return current_id, next_id
+
+    # Create a master digraph with top-to-bottom layout.
+    # We will use a rank=same subgraph for the roots to force horizontal alignment.
+    graph = graphviz.Digraph(
+        "All Join Trees",
+        comment="Join trees per optimization method",
+        graph_attr={
+            "rankdir": "TB",
+            "splines": "line",
+            "nodesep": "1.0",   # Increased spacing between clusters
+            "ranksep": "1.0",   # Increased vertical spacing
+        },
+        node_attr={
+            "style": "rounded,filled",
+            "fillcolor": "white",
+            "fontname": "Helvetica",
+        },
+        edge_attr={"dir": "none"},
+    )
+
+    # Render clusters in stable order; append any unknown keys at the end.
+    ordered_keys = [k for k in METHOD_ORDER if k in plans_dict]
+    ordered_keys += [k for k in plans_dict.keys() if k not in ordered_keys]
+
+    root_ids = []
+    for method_key in ordered_keys:
+        plan = plans_dict.get(method_key)
+        if plan is None or plan.root is None:
+            continue
+
+        costs = (costs_dict or {}).get(method_key, {}) or {}
+        pred = costs.get("predicted_cost")
+        real = costs.get("real_cost")
+        # Add extra newlines to push the tree down and avoid overlap with the label
+        label = (
+            f"{METHOD_DISPLAY.get(method_key, method_key)}\\n"
+            f"pred: {_format_cost(pred)}\\n"
+            f"true: {_format_cost(real)}\\n\\n"
+        )
+
+        cluster_name = f"cluster_{method_key}"
+        with graph.subgraph(name=cluster_name) as c:
+            c.attr(
+                label=label,
+                labelloc="t",
+                style="rounded",
+                color="gray",
+                fontname="Helvetica",
+                margin="20",  # Increase margin to keep content inside the box
+            )
+            # The first node added for each plan is its root.
+            root_id, _ = _add_plan_node(plan.root, c, prefix=method_key, next_id=0)
+            root_ids.append(root_id)
+
+    # Note: We removed 'rank=same' for roots across clusters as it often causes
+    # nodes to "outflow" their cluster boxes in Graphviz.
+    # If they stack vertically, we could add invisible edges between cluster nodes.
+
+    try:
+        graph.render(save_path, format="png", cleanup=True)
+        print(f"Saved all-plans comparison visualization to: {save_path}.png")
+    except Exception as e:
+        print(f"Error rendering all-plans comparison: {e}")
+
     return graph
 
 
@@ -482,6 +678,14 @@ def process_single_query(args):
             "plans": {}
         }
 
+        # Ensure optional plan variables are always defined (used later for visualization)
+        GEQO_plan = None
+        II_plan = None
+        ns_plan = None
+        cma_plan = None
+        II_pred_cost = float('inf')
+        II_real_cost = float('inf')
+
 
         if "GEQO" in optimization_algorithms:
             GEQO_adj, GEQO_pred_cost = GEQO(torch_data, model, optimization_steps, device)
@@ -501,7 +705,6 @@ def process_single_query(args):
             # Run Iterative Improvement
             II_adj, II_pred_cost = IterativeImprovement(torch_data, model, optimization_steps, device)
             II_plan = adjacency_to_query_with_real_triples(II_adj, len(triple_objs), triple_objs)
-            II_real_cost = float('inf')
 
             result["plans"]["II"] = {
                 "predicted_cost": float(II_pred_cost),
@@ -512,7 +715,7 @@ def process_single_query(args):
                 result["plans"]["II"]["real_cost"] = float(II_real_cost)
 
         if "NeuralSort" in optimization_algorithms:
-             # Run NeuralSort optimization
+            # Run NeuralSort optimization
             try:
                 ns_result = NeuralSort(
                     torch_data, model, device,
@@ -526,8 +729,8 @@ def process_single_query(args):
                     ns_adj, ns_triples_num, ns_pred_cost = ns_result
 
                 ns_plan = adjacency_to_query_with_real_triples(ns_adj, len(triple_objs), triple_objs)
-                
-                 # Validate
+
+                # Validate
                 is_valid, validation_msg = validate_plan(ns_plan, triple_objs)
                 if not is_valid:
                     print(f"Warning: Invalid NeuralSort plan for query {query_index}: {validation_msg}")
@@ -536,19 +739,19 @@ def process_single_query(args):
                     ns_real_cost = float('inf')
                 else:
                     if use_true_costs:
-                         ns_real_cost = ns_plan.root.get_cost()
+                        ns_real_cost = ns_plan.root.get_cost()
                 
                 result["plans"]["NeuralSort"] = {
                     "predicted_cost": float(ns_pred_cost),
                     "plan_string": plan_to_string(ns_plan) if ns_plan else None
                 }
                 if use_true_costs and is_valid:
-                     result["plans"]["NeuralSort"]["real_cost"] = float(ns_real_cost)
+                    result["plans"]["NeuralSort"]["real_cost"] = float(ns_real_cost)
             except Exception as e:
                 print(f"Error in NeuralSort for query {query_index}: {e}")
 
         if "CMA" in optimization_algorithms:
-             # Run CMA optimization
+            # Run CMA optimization
             try:
                 cma_result = CMA(
                     torch_data, model, device,
@@ -562,8 +765,8 @@ def process_single_query(args):
                     cma_adj, cma_triples_num, cma_pred_cost = cma_result
 
                 cma_plan = adjacency_to_query_with_real_triples(cma_adj, len(triple_objs), triple_objs)
-                
-                 # Validate
+
+                # Validate
                 is_valid, validation_msg = validate_plan(cma_plan, triple_objs)
                 if not is_valid:
                     print(f"Warning: Invalid CMA plan for query {query_index}: {validation_msg}")
@@ -572,16 +775,16 @@ def process_single_query(args):
                     cma_real_cost = float('inf')
                 else:
                     if use_true_costs:
-                         cma_real_cost = cma_plan.root.get_cost()
+                        cma_real_cost = cma_plan.root.get_cost()
                 
                 result["plans"]["CMA"] = {
                     "predicted_cost": float(cma_pred_cost),
                     "plan_string": plan_to_string(cma_plan) if cma_plan else None
                 }
                 if use_true_costs and is_valid:
-                     result["plans"]["CMA"]["real_cost"] = float(cma_real_cost)
+                    result["plans"]["CMA"]["real_cost"] = float(cma_real_cost)
             except Exception as e:
-                 print(f"Error in CMA for query {query_index}: {e}")
+                print(f"Error in CMA for query {query_index}: {e}")
 
 
         
@@ -717,29 +920,30 @@ def process_single_query(args):
         random_pred_cost = float('inf')
         random_true_cost = float('inf')
 
-        try:
-            # Generate random permutation
-            n_triples = len(triple_objs)
-            perm = torch.randperm(n_triples)
-            
-            # Create adjacency for left-deep tree
-            random_adj = left_deep_adj_from_perm(perm)
-            
-            # Predict cost
-            edge_index = random_adj.nonzero().t().to(device)
-            x = torch_data.x.to(device)
-            
-            log_pred_cost = model(x, edge_index=edge_index).item()
-            random_pred_cost = float(np.exp(log_pred_cost))
-            
-            # Convert to plan
-            random_plan = adjacency_to_query_with_real_triples(random_adj, n_triples, triple_objs)
-            
-            if use_true_costs:
-                random_true_cost = random_plan.root.get_cost()
-        except Exception as e:
-            print(f"Error creating random plan for query {query_index}: {e}")
-            random_true_cost = float('inf')
+        if "Random" in optimization_algorithms:
+            try:
+                # Generate random permutation
+                n_triples = len(triple_objs)
+                perm = torch.randperm(n_triples)
+                
+                # Create adjacency for left-deep tree
+                random_adj = left_deep_adj_from_perm(perm)
+                
+                # Predict cost
+                edge_index = random_adj.nonzero().t().to(device)
+                x = torch_data.x.to(device)
+                
+                log_pred_cost = model(x, edge_index=edge_index).item()
+                random_pred_cost = float(np.exp(log_pred_cost))
+                
+                # Convert to plan
+                random_plan = adjacency_to_query_with_real_triples(random_adj, n_triples, triple_objs)
+                
+                if use_true_costs:
+                    random_true_cost = random_plan.root.get_cost()
+            except Exception as e:
+                print(f"Error creating random plan for query {query_index}: {e}")
+                random_true_cost = float('inf')
         
         # Add results to the result dictionary
         result["plans"]["gradient"] = {
@@ -767,22 +971,53 @@ def process_single_query(args):
             result["gradient_equal_exhaustive"] = plans_are_equivalent(gradient_plan, exhaustive_plan)
         
         # Generate join order tree visualization for small queries with true costs
-        if use_true_costs and len(triple_objs) <= -1:
-            try:
-                # Create visualizations directory if needed
-                viz_dir = os.path.join(save_directory, "join_order_trees")
-                os.makedirs(viz_dir, exist_ok=True)
-                
-                save_path = os.path.join(viz_dir, f"query_{query_index}_join_tree")
+        # Visualizations (per-query folder)
+        try:
+            viz_dir = os.path.join(save_directory, "visualizations", f"query_{query_index}")
+            os.makedirs(viz_dir, exist_ok=True)
+
+            # Map result JSON keys -> plan objects (only keep available, valid plans)
+            plan_by_key = {
+                "gradient": gradient_plan,
+                "greedy": greedy_plan,
+                "random": random_plan,
+                "dp": best_pred_plan,
+                "exhaustive": exhaustive_plan,
+                "II": II_plan,
+                "GEQO": GEQO_plan,
+                "NeuralSort": ns_plan,
+                "CMA": cma_plan,
+            }
+
+            plans_dict = {}
+            costs_dict = {}
+            for k, plan in plan_by_key.items():
+                if plan is None:
+                    continue
+                plans_dict[k] = plan
+                plan_costs = result.get("plans", {}).get(k, {}) or {}
+                costs_dict[k] = {
+                    "predicted_cost": plan_costs.get("predicted_cost"),
+                    "real_cost": plan_costs.get("real_cost"),
+                }
+
+            # 2) Always: comparison view (all sizes)
+            visualize_all_plans(
+                plans_dict=plans_dict,
+                costs_dict=costs_dict,
+                save_path=os.path.join(viz_dir, "all_plans_comparison"),
+                triple_objs=triple_objs,
+            )
+
+            # 1) Only if true costs available and small enough for exhaustive join-order tree
+            if use_true_costs and len(triple_objs) <= 5:
                 visualize_join_order_tree(
-                    triple_objs, 
-                    gradient_plan, 
-                    greedy_plan, 
-                    best_pred_plan,  # DP plan
-                    save_path
+                    triple_objs=triple_objs,
+                    plans_dict=plans_dict,
+                    save_path=os.path.join(viz_dir, "join_order_tree"),
                 )
-            except Exception as e:
-                print(f"Warning: Could not generate join order tree for query {query_index}: {e}")
+        except Exception as e:
+            print(f"Warning: Could not generate visualizations for query {query_index}: {e}")
         
         return result
         
@@ -882,7 +1117,7 @@ if __name__ == "__main__":
     config_wikidata_star = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl",
         "model_path": "/home/tim/query_optimization/training_results/wikidata-star-new/model.pt",
-        "num_queries": 200,
+        "num_queries": 20,
         "optimization_steps": 500, # 2500
         "use_exhaustive": False,
         "use_dp": True,
@@ -890,7 +1125,7 @@ if __name__ == "__main__":
         "use_true_costs": True,
         "save_path": "optimization_results",
         "num_workers": 3,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO"],
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"],
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -920,29 +1155,29 @@ if __name__ == "__main__":
             "return_best": True,
             "min_penalty_threshold": 3,
             "use_lambda_ramping": True,
-            "logit_sampling": "dual-softmax",
+            "logit_sampling": "softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
             "lambda_ramp_exponent": 5.3,
             "lr_warmup_steps": 46,
             "gradient_clip_norm": 3.3,
             "use_lr_scheduling": True,
-            "decoding_method": "greedy",
+            "decoding_method": "beam",
             "use_gumbel_noise": False
         }
     }
 
     config_wikidata_path = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_optimization/queries.pkl",
-        "model_path": "/home/tim/query_optimization/training_results/wikidata-path-new/model.pt",
+        "model_path": "/home/tim/query_optimization/training_results/gnn_20251216_202855/model.pt",
         "num_queries": 20,
         "optimization_steps": 500, #2500
         "use_exhaustive": False,
         "use_dp": True,
-        "use_true_costs": False,
+        "use_true_costs": True,
         "save_path": "optimization_results",
-        "num_workers": None,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"],
+        "num_workers": 8,  # Use all available cores
+        "optimization_algorithms": ["GBJO", "GEQO", "IterativeImprovement"], # ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"]
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -951,7 +1186,7 @@ if __name__ == "__main__":
             "use_jk": False,
             "jk_mode": "cat",
             "use_residual": False,
-            "use_layer_norm": True,
+            "use_layer_norm": False,
             "dropout": 0.0,
         },
         "optimization_params": { # params for GBJO
@@ -997,7 +1232,7 @@ if __name__ == "__main__":
         "use_true_costs": True,
         "save_path": "optimization_results",
         "num_workers": 6,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"],
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"],
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -1027,14 +1262,14 @@ if __name__ == "__main__":
             "return_best": True,
             "min_penalty_threshold": 5,
             "use_lambda_ramping": True,
-            "logit_sampling": "dual-softmax",
+            "logit_sampling": "softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
             "lambda_ramp_exponent": 6.5,
             "lr_warmup_steps": 50,
             "gradient_clip_norm": 2,
             "use_lr_scheduling": False,
-            "decoding_method": "greedy",
+            "decoding_method": "beam",
             "use_gumbel_noise": False,
             "use_swa": False,
         }
@@ -1050,7 +1285,7 @@ if __name__ == "__main__":
         "use_dp": True,
         "use_true_costs": True,
         "save_path": "optimization_results",
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"],
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"],
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -1064,7 +1299,7 @@ if __name__ == "__main__":
         },
         "num_workers": 10,  # Use all available cores
         "optimization_params": {
-            "k": 1,  # Number of gradient optimization runs - 5
+            "k": 5,  # Number of gradient optimization runs - 5
             "learning_rate": 1.8, # 1.8
             "lambda_acyclic": 4415.0,
             "lambda_triple_in": 3027.0,
@@ -1096,7 +1331,7 @@ if __name__ == "__main__":
 
     config_wn18rr_star = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/wn18rr/stars/queries.pt",
-        "model_path": "/home/tim/query_optimization/training_results/gnn_20251216_160551/model.pt",
+        "model_path": "/home/tim/query_optimization/training_results/wn18rr-v3/model.pt",
         "num_queries": 20,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "optimization_steps": 500,
@@ -1106,7 +1341,7 @@ if __name__ == "__main__":
         "use_true_costs": True,
         "save_path": "optimization_results",
         "num_workers": 6,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"],
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"],
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -1115,7 +1350,7 @@ if __name__ == "__main__":
             "use_jk": False,
             "jk_mode": "cat",
             "use_residual": False,
-            "use_layer_norm": True,
+            "use_layer_norm": False,
             "dropout": 0.0,
         },
         "optimization_params": { # params for GBJO
@@ -1143,13 +1378,13 @@ if __name__ == "__main__":
             "lr_warmup_steps": 50,
             "gradient_clip_norm": 2,
             "use_lr_scheduling": False,
-            "decoding_method": "greedy",
+            "decoding_method": "beam",
             "use_gumbel_noise": False,
             "use_swa": False,
         }
     }
 
-    config = config_wn18rr_star
+    config = config_lubm_star
     
     # Create unique save directory based on datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1176,7 +1411,7 @@ if __name__ == "__main__":
     
     # Load queries
     sparql_queries = load_sparql_queries(config['queries_file'], config['num_queries'])
-
+    #sparql_queries = [q for q in sparql_queries if len(q.triples) <= 4] # TODO just for now to visulaize
     
     # Filter queries by size if max_query_size is set
     if config.get('max_query_size') is not None:

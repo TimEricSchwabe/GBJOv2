@@ -88,8 +88,11 @@ def GBJO(
     class LogitsModel(torch.nn.Module):
         def __init__(self, n_edges):
             super().__init__()
-            self.edge_logits = torch.nn.Parameter(torch.zeros(n_edges))
-            self.edge_logits_slot2 = torch.nn.Parameter(torch.zeros(n_edges))
+            #self.edge_logits = torch.nn.Parameter(torch.zeros(n_edges))
+            #self.edge_logits_slot2 = torch.nn.Parameter(torch.zeros(n_edges))
+            # or init them using random noise
+            self.edge_logits = torch.nn.Parameter(torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5)))
+            self.edge_logits_slot2 = torch.nn.Parameter(torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5)))
             
     # 2. Initialize model and bind variables
     logits_model = LogitsModel(num_edges).to(device)
@@ -208,6 +211,7 @@ def GBJO(
             masked_logits[join_to_triple_mask] = float('-inf')
             
             # Use Gumbel-Softmax for exactly one outgoing edge per source node
+            # Note: The grouped softmax is necessary because structural constraints (triple→join only, join→join only) create unequal group sizes per source node
             edge_weights = sample_grouped_gumbel_softmax(masked_logits, edge_index[0], tau, use_gumbel_noise)
             # Root (final join) should have *no* outgoing edge
             edge_weights[edge_index[0] == (N_NODES - 1)] = 0.0
@@ -394,7 +398,6 @@ def GBJO(
             print("Using SWA averaged weights for final decoding.")
         edge_logits = swa_model.module.edge_logits
         edge_logits_slot2 = swa_model.module.edge_logits_slot2
-
     # Step 14 in Algorithm 1
     with torch.no_grad():
         if logit_sampling == 'dual-softmax':
@@ -452,9 +455,8 @@ def GBJO(
                 A = torch.zeros((N_NODES, N_NODES), device=device)
                 A[edge_index[0], edge_index[1]] = edge_weights
                 #final_A = project_to_leftdeep(A.cpu().numpy(), exact_threshold=8)
-
                 if decoding_method == 'beam':
-                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=6, use_product=False)
+                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=16, use_product=False)
                     final_A = torch.tensor(final_A, device=device)
                 elif decoding_method == 'greedy':
                     final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=1, use_product=False)
@@ -505,7 +507,7 @@ def GBJO(
                 A = torch.zeros((N_NODES, N_NODES), device=device)
                 A[edge_index[0], edge_index[1]] = edge_weights
                 if decoding_method == 'beam':
-                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=6, use_product=False)
+                    final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=16, use_product=False)
                     final_A = torch.tensor(final_A, device=device)
                 elif decoding_method == 'greedy':
                     final_A = project_leftdeep_greedy_beam(A.cpu().numpy(), beam_width=1, use_product=False)

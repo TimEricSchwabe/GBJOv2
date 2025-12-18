@@ -10,6 +10,7 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 from typing import Dict, Any
 
 # Try to use scienceplots if available
@@ -223,6 +224,7 @@ def plot_lineplots_by_size(df: pd.DataFrame, output_dir: str):
         plt.xlabel('Query Size')
         plt.ylabel('Median True Cost')
         plt.yscale('log')
+        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
         plt.legend()
         plt.margins(x=0.05, y=0.05)
         plt.tight_layout()
@@ -257,6 +259,7 @@ def plot_lineplots_by_size(df: pd.DataFrame, output_dir: str):
         plt.xlabel('Query Size')
         plt.ylabel('Median Predicted Cost')
         plt.yscale('log')
+        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
         plt.legend()
         plt.margins(x=0.05, y=0.05)
         plt.tight_layout()
@@ -348,9 +351,208 @@ def plot_scatter_correlations(df: pd.DataFrame, output_dir: str):
             plt.savefig(os.path.join(output_dir, f'scatter_{label.lower()}_{m1}_{m2}.png'))
             plt.close()
 
+def plot_win_loss_heatmap(df: pd.DataFrame, output_dir: str):
+    """Win/Loss Heatmap comparing algorithms pairwise."""
+    methods = [METHODS_MAP[m] for m in METHODS_TO_PLOT if m in METHODS_MAP]
+    # Filter methods that have data in the dataframe
+    methods = [m for m in methods if f'{m}_real' in df.columns and df[f'{m}_real'].notna().any()]
+    
+    if not methods:
+        print("No data for win/loss heatmap.")
+        return
+
+    # Initialize win matrix with NaN (diagonal will stay NaN, off-diagonal will be filled)
+    win_matrix = pd.DataFrame(np.nan, index=methods, columns=methods)
+    
+    for m1 in methods:
+        for m2 in methods:
+            if m1 == m2:
+                continue
+            
+            c1 = df[f'{m1}_real']
+            c2 = df[f'{m2}_real']
+            
+            # Mask for where both have valid costs
+            mask = c1.notna() & c2.notna()
+            v1 = c1[mask]
+            v2 = c2[mask]
+            
+            if v1.empty:
+                continue
+                
+            # Algorithm A is better than B if cost(A) < cost(B)
+            # and they are NOT within 1% range: abs(cost(A) - cost(B)) / max(cost(A), cost(B)) >= 0.01
+            rel_diff = (v2 - v1).abs() / np.maximum(v1, v2)
+            m1_wins = ((v1 < v2) & (rel_diff >= 0.01)).sum()
+            m2_wins = ((v2 < v1) & (rel_diff >= 0.01)).sum()
+            
+            if m1_wins + m2_wins > 0:
+                win_matrix.loc[m1, m2] = m1_wins / (m1_wins + m2_wins)
+            else:
+                win_matrix.loc[m1, m2] = 0.5 # Equal if all queries are ties
+
+    plt.figure(figsize=(12, 10))
+    
+    try:
+        import seaborn as sns
+        sns.heatmap(win_matrix, annot=True, fmt='.2f', cmap='YlGnBu', cbar_kws={'label': 'Win Rate (Fraction of non-tie queries)'})
+    except ImportError:
+        print("Seaborn not found, using matplotlib fallback")
+        # Fallback to matplotlib imshow
+        im = plt.imshow(win_matrix.values, cmap='YlGnBu')
+        plt.colorbar(im, label='Win Rate (Fraction of non-tie queries)')
+        # Add labels
+        for i in range(len(methods)):
+            for j in range(len(methods)):
+                plt.text(j, i, f"{win_matrix.iloc[i, j]:.2f}", ha="center", va="center", color="black")
+        plt.xticks(np.arange(len(methods)), methods, rotation=45)
+        plt.yticks(np.arange(len(methods)), methods)
+
+    plt.xlabel('Algorithm B (Loser)')
+    plt.ylabel('Algorithm A (Winner)')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'win_loss_heatmap.png'))
+    plt.close()
+
+def plot_optimality_gap(df: pd.DataFrame, output_dir: str):
+    """Optimality gap plot: mean ratio to best cost per query, grouped by query size."""
+    if 'query_size' not in df.columns:
+        print("No query_size column for optimality gap plot.")
+        return
+    
+    methods = [METHODS_MAP[m] for m in METHODS_TO_PLOT if m in METHODS_MAP]
+    # Filter methods that have data
+    real_cols = [f'{m}_real' for m in methods if f'{m}_real' in df.columns and df[f'{m}_real'].notna().any()]
+    methods = [col.replace('_real', '') for col in real_cols]
+    
+    if not methods:
+        print("No data for optimality gap plot.")
+        return
+    
+    # Compute the best (minimum) cost per query across all methods
+    df_costs = df[real_cols].copy()
+    best_cost = df_costs.min(axis=1)
+    
+    # Compute ratio to best for each method (optimality gap)
+    gap_cols = []
+    for m in methods:
+        col = f'{m}_real'
+        gap_col = f'{m}_gap'
+        df[gap_col] = df[col] / best_cost
+        gap_cols.append(gap_col)
+    
+    # Group by query size and compute mean optimality gap
+    grouped = df.groupby('query_size')[gap_cols].mean()
+    
+    # Sort methods by METHODS_TO_PLOT order for consistent legend
+    method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
+    methods_sorted = sorted(methods, key=lambda m: method_ranks.get(m, 99))
+    
+    plt.figure(figsize=(10, 6))
+    has_data = False
+    
+    for m in methods_sorted:
+        gap_col = f'{m}_gap'
+        if gap_col in grouped.columns and grouped[gap_col].notna().any():
+            style = METHOD_STYLES.get(m, {})
+            plt.plot(grouped.index, grouped[gap_col],
+                     label=m,
+                     color=style.get('color'),
+                     marker=style.get('marker'),
+                     markeredgecolor=style.get('markeredgecolor'),
+                     markersize=style.get('markersize'),
+                     linestyle='-')
+            has_data = True
+    
+    if has_data:
+        plt.xlabel('Number of Triple Patterns')
+        plt.ylabel('Mean Optimality Gap (Ratio to Best Cost)')
+        plt.yscale('log')
+        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+        plt.axhline(y=1.0, color='black', linestyle='--', alpha=0.5, label='Optimal (1.0)')
+        plt.legend()
+        plt.margins(x=0.05, y=0.05)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'optimality_gap.pdf'))
+        plt.savefig(os.path.join(output_dir, 'optimality_gap.png'))
+    plt.close()
+    
+    # Clean up temporary columns
+    for gap_col in gap_cols:
+        if gap_col in df.columns:
+            df.drop(columns=[gap_col], inplace=True)
+
+def plot_performance_profile(df: pd.DataFrame, output_dir: str):
+    """Dolan-Moré performance profile plot.
+    
+    x-axis: performance ratio τ (cost / best_cost)
+    y-axis: fraction of queries where method achieves ratio ≤ τ
+    """
+    methods = [METHODS_MAP[m] for m in METHODS_TO_PLOT if m in METHODS_MAP]
+    # Filter methods that have data
+    real_cols = [f'{m}_real' for m in methods if f'{m}_real' in df.columns and df[f'{m}_real'].notna().any()]
+    methods = [col.replace('_real', '') for col in real_cols]
+    
+    if not methods:
+        print("No data for performance profile.")
+        return
+    
+    # Compute the best (minimum) cost per query across all methods
+    df_costs = df[real_cols].copy()
+    best_cost = df_costs.min(axis=1)
+    
+    # Compute performance ratio for each method (cost / best_cost)
+    ratios = {}
+    for m in methods:
+        col = f'{m}_real'
+        ratio = df[col] / best_cost
+        # Drop NaN values for this method
+        ratios[m] = ratio.dropna().values
+    
+    # Sort methods by METHODS_TO_PLOT order for consistent legend
+    method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
+    methods_sorted = sorted(methods, key=lambda m: method_ranks.get(m, 99))
+    
+    plt.figure(figsize=(10, 6))
+    
+    # Determine x-axis range (from 1.0 to max ratio across all methods)
+    all_ratios = np.concatenate([ratios[m] for m in methods if len(ratios[m]) > 0])
+    max_ratio = min(np.percentile(all_ratios, 99), 100)  # Cap at 99th percentile or 100
+    
+    # Create x values for plotting (performance ratio τ)
+    x_vals = np.linspace(1.0, max_ratio, 500)
+    
+    for m in methods_sorted:
+        if len(ratios[m]) == 0:
+            continue
+        
+        style = METHOD_STYLES.get(m, {})
+        n_queries = len(ratios[m])
+        
+        # Compute CDF: fraction of queries where ratio <= τ
+        y_vals = np.array([np.sum(ratios[m] <= tau) / n_queries for tau in x_vals])
+        
+        plt.plot(x_vals, y_vals,
+                 label=m,
+                 color=style.get('color'),
+                 linestyle='-',
+                 linewidth=2)
+    
+    plt.xlabel('Performance Ratio τ (Cost / Best Cost)')
+    plt.ylabel('Fraction of Queries with Ratio ≤ τ')
+    plt.title('Dolan-Moré Performance Profile')
+    plt.xlim(1.0, max_ratio)
+    plt.ylim(0, 1.05)
+    plt.legend(loc='lower right')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'performance_profile.pdf'))
+    plt.savefig(os.path.join(output_dir, 'performance_profile.png'))
+    plt.close()
+
 def main():
     parser = argparse.ArgumentParser(description="Plot optimization results.")
-    parser.add_argument("results_dir", nargs='?', default="optimization_results/run_20251216_105158", 
+    parser.add_argument("results_dir", nargs='?', default="optimization_results/wikidata-star-new", 
                         help="Directory containing detailed_results.json")
     args = parser.parse_args()
 
@@ -375,6 +577,9 @@ def main():
     plot_lineplots_by_size(df, output_dir)
     plot_boxplot_per_size(df, output_dir)
     plot_scatter_correlations(df, output_dir)
+    plot_win_loss_heatmap(df, output_dir)
+    plot_optimality_gap(df, output_dir)
+    plot_performance_profile(df, output_dir)
     
     print(f"Done. Plots saved to {output_dir}")
 

@@ -5,6 +5,9 @@ import numpy as np
 import os
 import sys
 
+from matplotlib.colors import LinearSegmentedColormap
+import numpy as np
+
 # Add the parent directory to Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(os.path.dirname(__file__))
@@ -107,12 +110,14 @@ def visualize_cost_landscape_3d(query_file, model_path, device='cpu', num_steps=
         penalty_config: Dict with penalty weights (lambda values)
     """
     # Load model
-    model = CostGNNv2(node_feature_dim=307, hidden_dim=512).to(device)
+    #model = CostGNNv2(node_feature_dim=307, hidden_dim=512).to(device)
+    model = CostGNNv3(node_feature_dim=307, hidden_dim=128, n_layers=6, use_jk=False, jk_mode='cat', use_residual=False, use_layer_norm=True, dropout=0.0).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     
     # Load query (assuming single query with 3 triples)
-    queries = load_sparql_queries(query_file, 1)
+    queries = load_sparql_queries(query_file, 1000)
+    queries = [q for q in queries if len(q.triples) == 3]
     query_data = queries[0].torch_data[0]
     
     # Create adjacency matrices for three plans
@@ -277,9 +282,16 @@ def visualize_cost_landscape_3d(query_file, model_path, device='cpu', num_steps=
     
     # Create contour plot
     fig_contour, ax_contour = plt.subplots(figsize=(10, 8))
+
+        # Light version → Base color → Dark version
+    dark = '#a9d6e5' # white
+    base = '#468faf'
+    light = '#012a4a'
+
+    cmap = LinearSegmentedColormap.from_list('custom_intensity', [light, base, dark])
     
     # Filled contour plot
-    contour_filled = ax_contour.contourf(Alpha, Beta, Cost, levels=40, cmap='viridis')
+    contour_filled = ax_contour.contourf(Alpha, Beta, Cost, levels=40, cmap=cmap)
     
     # Add contour lines
     contour_lines = ax_contour.contour(Alpha, Beta, Cost, levels=20, colors='white', alpha=0.3, linewidths=0.5)
@@ -324,7 +336,7 @@ def visualize_cost_landscape_3d(query_file, model_path, device='cpu', num_steps=
     fig_clean, ax_clean = plt.subplots(figsize=(10, 8))
     
     # Filled contour plot only
-    ax_clean.contourf(Alpha, Beta, Cost, levels=30, cmap='viridis')
+    ax_clean.contourf(Alpha, Beta, Cost, levels=30, cmap=cmap)
     
     # Add subtle gray contour lines
     ax_clean.contour(Alpha, Beta, Cost, levels=30, colors='#000000', alpha=1, linewidths=0.5)
@@ -942,14 +954,15 @@ if __name__ == "__main__":
         }
     }
     
-    query_file = "/home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl"
-    #model_path = "/home/tim/query_optimization/training_results/lubm-path-nice-v3-6-layer/model.pt"
-    model_path = "/home/tim/query_optimization/training_results/lubm-path-ranking-loss/model.pt"
+    query_file = "/home/tim/query_optimization/datasets/plans/wn18rr/stars/queries.pt"
+    model_path = "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/model.pt"
+    #model_path = "/home/tim/query_optimization/datasets/models/lubm/path_model.pt"
+    #model_path = "/home/tim/query_optimization/training_results/lubm-path-ranking-loss/model.pt"
     
     # Visualization options
-    show_penalty_landscape = True  # Toggle to include penalty in landscape
+    show_penalty_landscape = False  # Toggle to include penalty in landscape
     
     # Choose which visualization to run:
     #visualize_cost_transition(query_file, model_path)  # 2D version
-    #visualize_cost_landscape_3d(query_file, model_path, include_penalty=show_penalty_landscape)  # 3D version
-    visualize_optimization_trajectory_3d(query_file, model_path, config, include_penalty=show_penalty_landscape, clean_plot=True)  # 3D with trajectory
+    visualize_cost_landscape_3d(query_file, model_path, include_penalty=show_penalty_landscape)  # 3D version
+    #visualize_optimization_trajectory_3d(query_file, model_path, config, include_penalty=show_penalty_landscape, clean_plot=True)  # 3D with trajectory

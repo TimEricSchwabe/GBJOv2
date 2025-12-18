@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from typing import Union, Optional, Callable
 
@@ -23,24 +24,39 @@ import pickle
 
 QLEVER_ENDPOINT = "http://127.0.0.1:7001/"
 
-_session = requests.Session()
-_retry = Retry(
-    total=1,
-    connect=3,
-    read=3,
-    backoff_factor=0.2,
-    status_forcelist=[500, 502, 503, 504],
-    allowed_methods=["GET"],
-    raise_on_status=False,
-)
-_adapter = HTTPAdapter(max_retries=_retry, pool_connections=10, pool_maxsize=10)
-_session.mount("http://", _adapter)
-_session.mount("https://", _adapter)
+_session = None
+_session_pid = None
 
+def get_session():
+    """Get or create a process-local requests Session."""
+    global _session, _session_pid
+    
+    # Check if session exists and belongs to the current process
+    if _session is None or _session_pid != os.getpid():
+        _session = requests.Session()
+        
+        # Enhanced retry logic for stability
+        _retry = Retry(
+            total=1,             # Increased from 1
+            connect=2,            # Increased from 3
+            read=2,               # Increased from 3
+            backoff_factor=0.5,   # Increased from 0.2
+            status_forcelist=[500, 502, 503, 504, 429],
+            allowed_methods=["GET"],
+            raise_on_status=False,
+        )
+        
+        _adapter = HTTPAdapter(max_retries=_retry, pool_connections=10, pool_maxsize=10)
+        _session.mount("http://", _adapter)
+        _session.mount("https://", _adapter)
+        
+        _session_pid = os.getpid()
+        
+    return _session
 
 def run_count_query(where_body: str,
                     connect_timeout: float = 5.0,
-                    read_timeout: float = 60.0) -> int:
+                    read_timeout: float = 300.0) -> int:
     """
     Run SELECT (COUNT(*) AS ?count) WHERE { ... } on QLever and return the integer count.
     
@@ -63,7 +79,10 @@ def run_count_query(where_body: str,
         }}
     """
     try:
-        resp = _session.get(
+        # Use get_session() instead of the global _session
+        session = get_session() 
+        
+        resp = session.get(
             QLEVER_ENDPOINT,
             params={"query": query, "format": "json"},
             timeout=(connect_timeout, read_timeout),

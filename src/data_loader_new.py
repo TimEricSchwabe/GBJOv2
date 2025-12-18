@@ -74,7 +74,7 @@ class SPARQLQueryDataset(Dataset):
         
         # Combine: must be finite AND cost[i] < cost[j]
         #valid_pairs_mask = is_finite & is_valid_order
-        valid_pairs_mask = is_valid_order & is_positive
+        valid_pairs_mask = is_valid_order & is_positive & is_finite
         
         # Get indices
         valid_pairs = torch.nonzero(valid_pairs_mask)

@@ -70,6 +70,9 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
     # Setup metrics directory and CSV
     metrics_dir = result_dir / 'metrics'
     metrics_dir.mkdir(parents=True, exist_ok=True)
+
+    model_dir = result_dir / 'models'
+    model_dir.mkdir(parents=True, exist_ok=True)
     
     # Create directory for scatter plots
     scatter_dir = metrics_dir / 'scatter_plots'
@@ -188,6 +191,8 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
                 best_performance = current_perf
                 torch.save(model.state_dict(), save_path)
                 print(f"New best model saved to {save_path}")
+            # add model after each epoch
+            torch.save(model.state_dict(), model_dir / f'model_epoch_{epoch_num}.pt')
                 
             print(f'Epoch {epoch_num}, Loss: {total_loss:.4f}, Val Reg Loss: {metrics["reg_loss"]:.4f}, Val Rank Loss: {metrics["rank_loss"]:.4f}, Acc: {metrics["pairwise_acc"]:.4f}')
 
@@ -379,7 +384,7 @@ if __name__ == "__main__":
         'use_jk': False,
         'jk_mode': 'cat',
         'use_residual': False,
-        'use_layer_norm': True,
+        'use_layer_norm': False,
         'dropout': 0.0,
         'learning_rate': 0.0001,
         'batch_size': 64, # Batch size of QUERIES (so 32*2 = 64 plans per batch)

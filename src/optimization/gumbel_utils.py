@@ -1,5 +1,6 @@
 
 import torch
+from torch_geometric.utils import scatter
 
 
 @torch.no_grad()
@@ -53,7 +54,7 @@ def sample_binary_concrete(logits: torch.Tensor, temperature: float) -> torch.Te
 def sample_grouped_gumbel_softmax(edge_logits: torch.Tensor,
                                   src_nodes: torch.Tensor,
                                   temperature: float,
-                                  use_gumbel_noise: bool = True) -> torch.Tensor:
+                                  use_gumbel_noise: bool = False) -> torch.Tensor:
     """
     Return relaxed one-hot edge weights such that every *source* node
     emits exactly one outgoing edge (in expectation) using the Gumbel-Softmax
@@ -70,18 +71,22 @@ def sample_grouped_gumbel_softmax(edge_logits: torch.Tensor,
         set of edges that share the same source node.
     """
 
-    device = edge_logits.device
-    edge_weights = torch.empty_like(edge_logits)
-
-    for v in torch.unique(src_nodes):
-        mask = (src_nodes == v)
-        logits_group = edge_logits[mask]
-        if use_gumbel_noise:
-            g = sample_gumbel(logits_group.shape, device=device)
-            edge_weights[mask] = torch.softmax((logits_group + g) / temperature, dim=0)
-        else:
-            edge_weights[mask] = torch.softmax(logits_group / temperature, dim=0)
-
-
-
-    return edge_weights 
+    
+    if use_gumbel_noise:
+        g = sample_gumbel(edge_logits.shape, device=edge_logits.device)
+        scaled_logits = (edge_logits + g) / temperature
+    else:
+        scaled_logits = edge_logits / temperature
+    
+    # Compute max per group for numerical stability (log-sum-exp trick)
+    max_per_group = scatter(scaled_logits, src_nodes, dim=0, reduce='max')
+    shifted_logits = scaled_logits - max_per_group[src_nodes]
+    
+    # Compute exp and sum per group
+    exp_logits = torch.exp(shifted_logits)
+    sum_per_group = scatter(exp_logits, src_nodes, dim=0, reduce='sum')
+    
+    # Normalize: softmax = exp(x) / sum(exp(x)) per group
+    edge_weights = exp_logits / sum_per_group[src_nodes]
+    
+    return edge_weights

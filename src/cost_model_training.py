@@ -438,13 +438,13 @@ if __name__ == "__main__":
         # Model parameters
         'model_type': 'CostGNNv3',  # Options: 'CostGNN', 'CostGNNv2', 'CostGNNv3'
         'node_feature_dim': 307,    # Input feature dimension
-        'hidden_dim': 128,          # Hidden layer dimension
+        'hidden_dim': 32,          # Hidden layer dimension
         
         # CostGNNv3 architecture parameters
-        'n_layers': 6,              # Number of GIN message-passing layers
+        'n_layers': 2,              # Number of GIN message-passing layers
         'use_jk': False,            # Whether to use Jumping Knowledge
         'jk_mode': 'cat',           # JK mode: 'cat', 'max', or 'lstm'
-        'use_residual': False,       # Whether to use residual connections
+        'use_residual': True,       # Whether to use residual connections
         'use_layer_norm': True,    # Whether to use layer normalization (disable for counting)
         'dropout': 0.0,             # Dropout probability
         
@@ -460,7 +460,7 @@ if __name__ == "__main__":
         
         # Paths
         'root_dir': '',
-        'dataset_dir': 'datasets/plans/wn18rr/stars',
+        'dataset_dir': '/home/tim/query_optimization/datasets/plans/lubm/star-greedy',
         
         # Other settings
         'enable_training': True,    # Set to False to skip training
@@ -484,7 +484,7 @@ if __name__ == "__main__":
 
         # Filter out plans with infinite cost
         initial_len = len(dataset)
-        indices_to_keep = [i for i, data in enumerate(dataset.data_list) if not torch.isinf(data.y).any()]
+        indices_to_keep = [i for i, data in enumerate(dataset.data_list) if not torch.isinf(data.y).any() and data.y > 0]
         
         if len(indices_to_keep) < initial_len:
             dataset.data_list = [dataset.data_list[i] for i in indices_to_keep]

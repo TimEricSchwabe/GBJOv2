@@ -307,7 +307,7 @@ class CostGNNv3(nn.Module):
                 nn.GELU(),
                 nn.Linear(hidden_dim, hidden_dim)
             )
-            self.convs.append(GINConv(mlp))
+            self.convs.append(GINConv(mlp, aggr='add'))
             
             if use_layer_norm:
                 self.layer_norms.append(nn.LayerNorm(hidden_dim))
