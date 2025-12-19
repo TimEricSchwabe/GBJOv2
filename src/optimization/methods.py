@@ -109,6 +109,8 @@ def GBJO(
     else:
         optimiser = optim.RAdam([edge_logits], lr=learning_rate)
         optimiser = optim_extra.Lookahead(optimiser, k=5, alpha=0.5)
+        # or SGD with momentum
+        #optimiser = optim.SGD([edge_logits], lr=learning_rate, momentum=0.9)
 
     # 3. SWA Setup
     if use_swa:

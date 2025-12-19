@@ -116,7 +116,7 @@ def visualize_cost_landscape_3d(query_file, model_path, device='cpu', num_steps=
     model.eval()
     
     # Load query (assuming single query with 3 triples)
-    queries = load_sparql_queries(query_file, 1000)
+    queries = load_sparql_queries(query_file, 100)
     queries = [q for q in queries if len(q.triples) == 3]
     query_data = queries[0].torch_data[0]
     
@@ -193,13 +193,14 @@ def visualize_cost_landscape_3d(query_file, model_path, device='cpu', num_steps=
 
         # Print all the penalties for debugging
         if include_penalty:
-            print(f"P_acyclic: {P_acyclic.item():.4f}")
-            print(f"P_triple_in: {P_triple_in.item():.4f}")
-            print(f"P_triple_out: {P_triple_out.item():.4f}")
-            print(f"P_join_in: {P_join_in.item():.4f}")
-            print(f"P_join_out: {P_join_out.item():.4f}")
-            print(f"P_left_linear: {P_left_linear.item():.4f}")
-            print(f"P_entropy: {P_entropy.item():.4f}")
+            pass
+            #print(f"P_acyclic: {P_acyclic.item():.4f}")
+            #print(f"P_triple_in: {P_triple_in.item():.4f}")
+            #print(f"P_triple_out: {P_triple_out.item():.4f}")
+            #print(f"P_join_in: {P_join_in.item():.4f}")
+            #print(f"P_join_out: {P_join_out.item():.4f}")
+            #print(f"P_left_linear: {P_left_linear.item():.4f}")
+            #print(f"P_entropy: {P_entropy.item():.4f}")
         
         return total_penalty
     
@@ -230,7 +231,7 @@ def visualize_cost_landscape_3d(query_file, model_path, device='cpu', num_steps=
                 
                 if include_penalty:
                     penalty = compute_penalty(A_interp.to(device), edge_weights)
-                    Cost[j, i] = cost.item() + 0.0001 * penalty.item()
+                    Cost[j, i] = cost.item() + 0.001 * penalty.item()
                 else:
                     Cost[j, i] = cost.item()
     
@@ -291,7 +292,7 @@ def visualize_cost_landscape_3d(query_file, model_path, device='cpu', num_steps=
     cmap = LinearSegmentedColormap.from_list('custom_intensity', [light, base, dark])
     
     # Filled contour plot
-    contour_filled = ax_contour.contourf(Alpha, Beta, Cost, levels=40, cmap=cmap)
+    contour_filled = ax_contour.contourf(Alpha, Beta, Cost, levels=40, cmap="viridis")
     
     # Add contour lines
     contour_lines = ax_contour.contour(Alpha, Beta, Cost, levels=20, colors='white', alpha=0.3, linewidths=0.5)
@@ -336,7 +337,7 @@ def visualize_cost_landscape_3d(query_file, model_path, device='cpu', num_steps=
     fig_clean, ax_clean = plt.subplots(figsize=(10, 8))
     
     # Filled contour plot only
-    ax_clean.contourf(Alpha, Beta, Cost, levels=30, cmap=cmap)
+    ax_clean.contourf(Alpha, Beta, Cost, levels=30, cmap="viridis")
     
     # Add subtle gray contour lines
     ax_clean.contour(Alpha, Beta, Cost, levels=30, colors='#000000', alpha=1, linewidths=0.5)
@@ -355,6 +356,116 @@ def visualize_cost_landscape_3d(query_file, model_path, device='cpu', num_steps=
     plt.show()
     
     print(f"Clean contour plot saved as '{clean_contour_filename}'")
+    
+    # Create contour plot with quiver (gradient field)
+    fig_quiver, ax_quiver = plt.subplots(figsize=(10, 8))
+    
+    # Filled contour plot
+    #contour_filled_q = ax_quiver.contourf(Alpha, Beta, Cost, levels=40, cmap='viridis')
+    
+    # Add contour lines
+    #contour_lines_q = ax_quiver.contour(Alpha, Beta, Cost, levels=20, colors='white', alpha=0.3, linewidths=0.5)
+    #ax_quiver.clabel(contour_lines_q, inline=True, fontsize=8, fmt='%.1f')
+    
+    # Calculate gradients using numpy
+    # np.gradient returns (dCost/dbeta, dCost/dalpha) for a 2D array
+    # where the first axis is beta (rows) and second axis is alpha (columns)
+    dCost_dbeta, dCost_dalpha = np.gradient(Cost, betas, alphas)
+    
+    # Downsample for cleaner quiver plot (every nth point)
+    step = max(1, num_steps // 15)  # Aim for ~15x15 arrows
+    Alpha_ds = Alpha[::step, ::step]
+    Beta_ds = Beta[::step, ::step]
+    dCost_dalpha_ds = dCost_dalpha[::step, ::step]
+    dCost_dbeta_ds = dCost_dbeta[::step, ::step]
+    
+    # Normalize arrows to unit length for cleaner visualization
+    magnitude = np.sqrt(dCost_dalpha_ds**2 + dCost_dbeta_ds**2)
+    magnitude[magnitude == 0] = 1  # Avoid division by zero
+    u_norm = -dCost_dalpha_ds / magnitude
+    v_norm = -dCost_dbeta_ds / magnitude
+    
+    # Plot quiver with paper-style thin arrows (negative gradient = descent direction)
+    quiver = ax_quiver.quiver(Alpha_ds, Beta_ds, u_norm, v_norm,
+                               color='#333333', alpha=0.85,
+                               scale=25, width=0.003, headwidth=3, headlength=4, headaxislength=3.5)
+    
+    # Mark the three corner plans
+    ax_quiver.scatter([0, 1, 0], [0, 0, 1], c='#d62728', s=60, zorder=5, edgecolors='black', linewidths=0.8)
+    ax_quiver.annotate('1→2→3', (0, 0), textcoords="offset points", xytext=(8, 8), fontsize=10, color='black')
+    ax_quiver.annotate('1→3→2', (1, 0), textcoords="offset points", xytext=(-50, 8), fontsize=10, color='black')
+    ax_quiver.annotate('2→3→1', (0, 1), textcoords="offset points", xytext=(8, -15), fontsize=10, color='black')
+    
+    # Mark minimum point
+    ax_quiver.scatter([min_alpha], [min_beta], c='#ff7f0e', s=100, marker='*', zorder=6, edgecolors='black', linewidths=0.5)
+    ax_quiver.annotate(f'Min: {Cost.min():.2f}', (min_alpha, min_beta), 
+                       textcoords="offset points", xytext=(8, 8), fontsize=9, color='black')
+    
+    # Labels and title
+    ax_quiver.set_xlabel('α → "1 JOIN 3 JOIN 2"', fontsize=12)
+    ax_quiver.set_ylabel('β → "2 JOIN 3 JOIN 1"', fontsize=12)
+    
+    if include_penalty:
+        ax_quiver.set_title('Cost + Penalty Landscape with Gradient Field (Descent Direction)', fontsize=14)
+        quiver_filename = 'cost_penalty_landscape_quiver.pdf'
+    else:
+        ax_quiver.set_title('Cost Landscape with Gradient Field (Descent Direction)', fontsize=14)
+        quiver_filename = 'cost_landscape_quiver.pdf'
+    
+    # Add colorbar for contour
+    #cbar_q = fig_quiver.colorbar(contour_filled_q, ax=ax_quiver)
+    #cbar_q.set_label(landscape_type, fontsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(quiver_filename, dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    print(f"Quiver plot saved as '{quiver_filename}'")
+    
+    # Create streamplot (gradient flow visualization)
+    fig_stream, ax_stream = plt.subplots(figsize=(10, 8))
+    
+    # Optional: add contour background for context
+    contour_bg = ax_stream.contourf(Alpha, Beta, Cost, levels=40, cmap='viridis', alpha=0.7)
+    ax_stream.contour(Alpha, Beta, Cost, levels=20, colors='white', alpha=0.2, linewidths=0.3)
+    
+    # Streamplot uses the full resolution data (not downsampled)
+    # Note: streamplot requires 1D arrays for x, y coordinates
+    stream = ax_stream.streamplot(alphas, betas, -dCost_dalpha, -dCost_dbeta,
+                                   color='#222222', linewidth=0.8, density=1.5,
+                                   arrowstyle='->', arrowsize=1.0)
+    
+    # Mark the three corner plans
+    ax_stream.scatter([0, 1, 0], [0, 0, 1], c='#d62728', s=60, zorder=5, edgecolors='white', linewidths=0.8)
+    ax_stream.annotate('1→2→3', (0, 0), textcoords="offset points", xytext=(8, 8), fontsize=10, color='white')
+    ax_stream.annotate('1→3→2', (1, 0), textcoords="offset points", xytext=(-50, 8), fontsize=10, color='white')
+    ax_stream.annotate('2→3→1', (0, 1), textcoords="offset points", xytext=(8, -15), fontsize=10, color='white')
+    
+    # Mark minimum point
+    ax_stream.scatter([min_alpha], [min_beta], c='#ffcc00', s=120, marker='*', zorder=6, edgecolors='black', linewidths=0.5)
+    ax_stream.annotate(f'Min: {Cost.min():.2f}', (min_alpha, min_beta), 
+                       textcoords="offset points", xytext=(8, 8), fontsize=9, color='white')
+    
+    # Labels and title
+    ax_stream.set_xlabel('α → "1 JOIN 3 JOIN 2"', fontsize=12)
+    ax_stream.set_ylabel('β → "2 JOIN 3 JOIN 1"', fontsize=12)
+    
+    if include_penalty:
+        ax_stream.set_title('Cost + Penalty Landscape with Gradient Streamlines', fontsize=14)
+        stream_filename = 'cost_penalty_landscape_streamplot.pdf'
+    else:
+        ax_stream.set_title('Cost Landscape with Gradient Streamlines', fontsize=14)
+        stream_filename = 'cost_landscape_streamplot.pdf'
+    
+    # Add colorbar
+    cbar_stream = fig_stream.colorbar(contour_bg, ax=ax_stream)
+    cbar_stream.set_label(landscape_type, fontsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(stream_filename, dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    print(f"Streamplot saved as '{stream_filename}'")
 
 
 def optimize_query_with_trajectory_tracking(
@@ -954,13 +1065,13 @@ if __name__ == "__main__":
         }
     }
     
-    query_file = "/home/tim/query_optimization/datasets/plans/wn18rr/stars/queries.pt"
-    model_path = "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/model.pt"
-    #model_path = "/home/tim/query_optimization/datasets/models/lubm/path_model.pt"
-    #model_path = "/home/tim/query_optimization/training_results/lubm-path-ranking-loss/model.pt"
+    query_file = "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl"
+    model_path = "/home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt"
+    #model_path = "/home/tim/query_optimization/meta_optimization_results/run_20251218_173606/best_model.pt"
+    #model_path = "/home/tim/query_optimization/meta_optimization_results/run_20251218_195646/best_model.pt"
     
     # Visualization options
-    show_penalty_landscape = False  # Toggle to include penalty in landscape
+    show_penalty_landscape = True  # Toggle to include penalty in landscape
     
     # Choose which visualization to run:
     #visualize_cost_transition(query_file, model_path)  # 2D version

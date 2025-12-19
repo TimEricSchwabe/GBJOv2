@@ -5,6 +5,10 @@ import sys
 import os
 import matplotlib.pyplot as plt
 import json
+from datetime import datetime
+import random
+from tqdm import tqdm
+
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -13,9 +17,18 @@ sys.path.append(os.path.dirname(__file__))
 
 
 from model import CostGNNv3
-from optimization.gumbel_utils import sample_grouped_gumbel_softmax, _temperature_anneal
+from optimization.gumbel_utils import sample_grouped_gumbel_softmax
 from utils.data_utils import load_sparql_queries
 from src.create_data.create_optimization_data import SPARQLQuery
+
+
+# differentiable temperature annealing
+def _temperature_anneal(init_tau: torch.Tensor, min_tau: float, decay: float, step: int, max_step: int) -> torch.Tensor:
+    """
+    Exponential temperature annealing every step (differentiable version).
+    """
+    annealed = init_tau - (init_tau - min_tau) * (step / max_step)
+    return torch.maximum(annealed, torch.tensor(min_tau))
 
 
 
@@ -101,7 +114,7 @@ class Hyperparams(nn.Module):
     """
     def __init__(self, init_lambda_triple_out=100.0,
      init_lambda_join_in=100.0, init_lambda_join_out=100.0, init_lambda_acyclic=100.0,
-      init_lambda_left_linear=100.0, init_lambda_entropy=100.0, init_eta=1e0) -> None:
+      init_lambda_left_linear=100.0, init_lambda_entropy=100.0, init_eta=1e0, init_tau=5.0) -> None:
         super().__init__()
 
         self._lambda_triple_out = nn.Parameter(torch.tensor(float(init_lambda_triple_out)).clamp(min=-2, max=3000))
@@ -111,6 +124,8 @@ class Hyperparams(nn.Module):
         self._lambda_left_linear = nn.Parameter(torch.tensor(float(init_lambda_left_linear)).clamp(min=-2, max=3000))
         self._lambda_entropy = nn.Parameter(torch.tensor(float(init_lambda_entropy)).clamp(min=-2, max=3000))
         self._eta = nn.Parameter(torch.tensor(float(init_eta)).clamp(min=1e-4, max=2))
+
+        self._init_tau = nn.Parameter(torch.tensor(float(init_tau)).clamp(min=1, max=10))
 
     def lambda_triple_out(self) -> torch.Tensor:
         return F.softplus(self._lambda_triple_out)
@@ -131,7 +146,22 @@ class Hyperparams(nn.Module):
         return F.softplus(self._lambda_entropy)
 
     def eta(self) -> torch.Tensor:
-        return self._eta
+        return F.softplus(self._eta)
+
+    def init_tau(self) -> torch.Tensor:
+        return F.softplus(self._init_tau)
+
+
+def plot_hyperparameter_history(hyperparam_history, save_directory: str) -> None:
+    for name, values in hyperparam_history.items():
+        plt.figure()
+        plt.plot(values)
+        plt.title(f"{name} over epochs")
+        plt.xlabel("Epoch")
+        plt.ylabel(name)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_directory, f"hyperparam_{name}.png"))
+        plt.close()
 
 
 def gbjo(query, C_theta, hyperparams, device="cpu"):
@@ -141,8 +171,7 @@ def gbjo(query, C_theta, hyperparams, device="cpu"):
     returns final soft logits
     """
 
-    N_STEPS = 100
-    tau = 5
+    N_STEPS = 50
     lambda_triple_out = 1.0
     lambda_join_in = 1.0
     lambda_join_out = 1.0
@@ -162,7 +191,7 @@ def gbjo(query, C_theta, hyperparams, device="cpu"):
     logits = torch.zeros(num_edges, requires_grad=True)
 
     for step in range(N_STEPS):
-        tau = _temperature_anneal(5, 1, 0.999, step, N_STEPS)
+        tau = _temperature_anneal(torch.tensor(5.0), 1.0, 0.999, step, N_STEPS)
         learning_rate = hyperparams.eta()
 
         # First, mask out invalid edges in logits
@@ -198,13 +227,16 @@ def gbjo(query, C_theta, hyperparams, device="cpu"):
         )
 
         # backprop cost to logits
+        momentum = 0.9  # momentum coefficient
+        v = torch.zeros_like(logits)  # velocity buffer
+        g = torch.zeros_like(logits)  # gradient buffer
 
         #cost = (cost_pred + total_penalty).mean()
         cost = cost_pred.mean()
         (g,) = torch.autograd.grad(cost, logits, create_graph=True)
 
         # Gradient Descent Update
-        logits = logits - learning_rate * g
+        logits = logits - learning_rate * (momentum * v + g)
 
     return logits
 
@@ -235,7 +267,7 @@ if __name__ == "__main__":
 
     # Model parameters
     MODEL_PATH = "/home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt"
-    QUERY_PATH = "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl"
+    QUERY_PATH = "/home/tim/query_optimization/datasets/plans/lubm/star-greedy/dataset.pt"
     DROPOUT = 0.0
     HIDDEN_DIM = 128
     NODE_FEATURE_DIM = 307
@@ -248,10 +280,21 @@ if __name__ == "__main__":
 
     ACCUMULATION_STEPS = 4  # aka batch size, we accumulate gradients over this many steps
 
+    # Create a dedicated output directory for this run (matches evaluation_parallel.py style)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_directory = os.path.join("meta_optimization_results", f"run_{timestamp}")
+    os.makedirs(save_directory, exist_ok=True)
+    print(f"Saving all training outputs to: {save_directory}")
+
     # Load queries
-    sparql_queries = load_sparql_queries(QUERY_PATH, 100)
-    sparql_queries = [q for q in sparql_queries if len(q.triples) == 3]
-    print("INFO")
+    #sparql_queries = load_sparql_queries(QUERY_PATH, 10)
+    sparql_queries = torch.load(QUERY_PATH, weights_only=False)
+    sparql_queries = sparql_queries['data']
+    random.shuffle(sparql_queries)
+    sparql_queries = sparql_queries[:3000]
+    #sparql_queries = [q for q in sparql_queries if len(q.triples) == 3]
+    # print how many queries are loaded and used
+    print(f"INFO: Loaded {len(sparql_queries)} queries")
     # Define C_theta (cost model to be meta-optimized)
     C_theta = CostGNNv3(node_feature_dim=NODE_FEATURE_DIM, hidden_dim=HIDDEN_DIM, n_layers=N_LAYERS, use_jk=USE_JK, jk_mode=JK_MODE, use_residual=USE_RESIDUAL, use_layer_norm=USE_LAYER_NORM, dropout=DROPOUT).to(device)
     C_theta.load_state_dict(torch.load(MODEL_PATH, map_location=device))
@@ -262,9 +305,57 @@ if __name__ == "__main__":
     # Define hyperparams
     hyperparams = Hyperparams(init_lambda_join_in=1.0)
 
+    # Save training config for reproducibility
+    config = {
+        "timestamp": timestamp,
+        "save_directory": save_directory,
+        "MODEL_PATH": MODEL_PATH,
+        "QUERY_PATH": QUERY_PATH,
+        "device": device,
+        "model_params": {
+            "DROPOUT": DROPOUT,
+            "HIDDEN_DIM": HIDDEN_DIM,
+            "NODE_FEATURE_DIM": NODE_FEATURE_DIM,
+            "N_LAYERS": N_LAYERS,
+            "USE_JK": USE_JK,
+            "JK_MODE": JK_MODE,
+            "USE_RESIDUAL": USE_RESIDUAL,
+            "USE_LAYER_NORM": USE_LAYER_NORM,
+        },
+        "training_params": {
+            "ACCUMULATION_STEPS": ACCUMULATION_STEPS,
+            "EPOCHS": 100,
+            "outer_optimizer": "AdamW",
+            "lr": 1e-2,
+            "weight_decay": 1e-2,
+        },
+        "hyperparams_init": {
+            "init_lambda_triple_out": 100.0,
+            "init_lambda_join_in": 1.0,
+            "init_lambda_join_out": 100.0,
+            "init_lambda_acyclic": 100.0,
+            "init_lambda_left_linear": 100.0,
+            "init_lambda_entropy": 100.0,
+            "init_eta": 1.0,
+            "init_tau": 5.0,
+        },
+    }
+    with open(os.path.join(save_directory, "config.json"), "w") as f:
+        json.dump(config, f, indent=2)
+
+    hyperparam_history = {
+        "lambda_triple_out": [],
+        "lambda_join_in": [],
+        "lambda_join_out": [],
+        "lambda_acyclic": [],
+        "lambda_left_linear": [],
+        "lambda_entropy": [],
+        "eta": [],
+        "init_tau": [],
+    }
 
     # define outer optimizer for psi_theta (updates C_theta params and hyperparams)
-    opt_theta = torch.optim.AdamW(list(C_theta.parameters()) + list(hyperparams.parameters()), lr=1e-4, weight_decay=1e-2)
+    opt_theta = torch.optim.AdamW(list(C_theta.parameters()) + list(hyperparams.parameters()), lr=1e-3, weight_decay=1e-2)
     #opt_theta = torch.optim.AdamW(hyperparams.parameters(), lr=1e-1, weight_decay=1e-2)
 
 
@@ -289,9 +380,9 @@ if __name__ == "__main__":
         total_penalties = 0
         total_loss = 0
         opt_theta.zero_grad(set_to_none=True)
-        for idx, query in enumerate(sparql_queries):
+        for idx, query in enumerate(tqdm(sparql_queries, desc=f"Epoch {i+1}/{EPOCHS}")):
             #query = sparql_queries[0]
-            query = query.torch_data[0]
+            #query = query.torch_data[0]
             # TODO add gaussian fingerprints
             query = add_fingerprints_to_query_data(query, fingerprint_dim=64)
 
@@ -336,6 +427,8 @@ if __name__ == "__main__":
 
             L_outer = (L_outer + total_penalty) / ACCUMULATION_STEPS
 
+            print(f"INFO: L_outer: {L_outer.item()}, total_penalty: {total_penalty.item()}")
+
 
             # Supervised Anchor of C_theta on true cost
             pass
@@ -354,17 +447,28 @@ if __name__ == "__main__":
             total_loss += L_outer.item()
 
         #### Reporting at the end of the epoch ####
+        for name in hyperparam_history.keys():
+            hyperparam_history[name].append(getattr(hyperparams, name)().item())
+
         average_loss_per_epoch.append(model_loss / len(sparql_queries))
         average_total_penalty_per_epoch.append(total_penalties / len(sparql_queries))
         plt.plot(average_loss_per_epoch, label='Average Loss')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_directory, 'loss_plot.png'))
+        plt.close()
+        
         plt.plot(average_total_penalty_per_epoch, label='Average Total Penalty')
         plt.legend()
-        plt.savefig('meta_optimization_results.png')
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_directory, 'penalty_plot.png'))
         plt.close()
+        plot_hyperparameter_history(hyperparam_history, save_directory)
+
         if total_loss < best_loss:
             best_loss = total_loss
             # Save the model
-            torch.save(C_theta.state_dict(), f'MetaOptimization_Best_Model.pt')
+            torch.save(C_theta.state_dict(), os.path.join(save_directory, 'best_model.pt'))
             # save hyperparams to json
             hyperparams_dict = {
                 name: getattr(hyperparams, name)().item()
@@ -373,6 +477,6 @@ if __name__ == "__main__":
                 and callable(getattr(hyperparams, name))
                 and name not in dir(nn.Module)
             }
-            with open('MetaOptimization_Best_Hyperparams.json', 'w') as f:
+            with open(os.path.join(save_directory, 'best_hyperparams.json'), 'w') as f:
                 json.dump(hyperparams_dict, f, indent=4)
 

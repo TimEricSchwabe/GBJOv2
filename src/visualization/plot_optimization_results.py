@@ -543,6 +543,7 @@ def plot_performance_profile(df: pd.DataFrame, output_dir: str):
     plt.title('Dolan-Moré Performance Profile')
     plt.xlim(1.0, max_ratio)
     plt.ylim(0, 1.05)
+    plt.xscale('log')
     plt.legend(loc='lower right')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -552,7 +553,7 @@ def plot_performance_profile(df: pd.DataFrame, output_dir: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Plot optimization results.")
-    parser.add_argument("results_dir", nargs='?', default="optimization_results/wikidata-star-new", 
+    parser.add_argument("results_dir", nargs='?', default="optimization_results/run_20251219_110756", 
                         help="Directory containing detailed_results.json")
     args = parser.parse_args()
 

@@ -289,4 +289,35 @@ def load_sparql_queries(queries_file: str, num_queries, seed=42):
     return sparql_queries
 
 
+def filter_queries_by_max_uri_atoms(sparql_queries, max_uri_atoms=2):
+    """
+    Filter out queries where any triple has more than max_uri_atoms URIs.
+    
+    A triple is a list of 3 atoms: [subject, predicate, object].
+    Each atom is either a variable (starts with '?') or a URI (enclosed in '<>').
+    
+    Args:
+        sparql_queries: List of SPARQLQuery objects
+        max_uri_atoms: Maximum number of URI-instantiated atoms allowed per triple (2 or 3)
+        
+    Returns:
+        List of SPARQLQuery objects where no triple exceeds max_uri_atoms URIs
+    """
+
+    def count_uri_atoms(triple):
+        """Count how many atoms in a triple are URIs (not variables)."""
+        return sum(1 for atom in triple if atom.startswith('<'))
+    
+    def query_is_valid(query):
+        """Check if all triples in the query have at most max_uri_atoms URIs."""
+        for triple in query.triples:
+            if count_uri_atoms(triple) > max_uri_atoms:
+                return False
+        return True
+    
+    filtered = [q for q in sparql_queries if query_is_valid(q)]
+    print(f"Filtered queries by max {max_uri_atoms} URI atoms per triple: {len(filtered)}/{len(sparql_queries)} retained")
+    return filtered
+
+
 

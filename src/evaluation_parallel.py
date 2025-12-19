@@ -57,18 +57,12 @@ from utils.data_utils import (
     plan_to_string,
     plans_are_equivalent,
     load_sparql_queries,
+    filter_queries_by_max_uri_atoms,
     left_deep_adj_from_perm
 )
 
 # Import plotting functions
-from visualization.plot_optimization_results import (
-    load_data, 
-    plot_overall_boxplot, 
-    plot_mean_costs_bar, 
-    plot_lineplots_by_size, 
-    plot_boxplot_per_size, 
-    plot_scatter_correlations
-)
+from visualization.plot_optimization_results import *
 
 # Add module compatibility for old pickle files
 import sys
@@ -1222,7 +1216,7 @@ if __name__ == "__main__":
 
     config_lubm_star = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
-        "model_path": "/home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt",
+        "model_path": "/home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt", # /home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt
         "num_queries": 20,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "optimization_steps": 500,
@@ -1247,14 +1241,14 @@ if __name__ == "__main__":
         "optimization_params": { # params for GBJO
             "k": 1,  # Number of gradient optimization runs
             "learning_rate": 1.7, # 1.7
-            "lambda_acyclic": 3081.0,
-            "lambda_triple_in": 3714.0,
-            "lambda_triple_out": 135.0,
-            "lambda_join_in": 1742.0,
-            "lambda_join_out": 1558.0,
+            "lambda_acyclic": 3081.0, # 3081.0
+            "lambda_triple_in": 3714.0, # 3714.0
+            "lambda_triple_out": 135.0, # 135.0
+            "lambda_join_in": 1742.0, # 1742.0
+            "lambda_join_out": 1558.0, # 1558.0
             "lambda_entropy": 0.0,
             "lambda_total_penalty": 2.6, # 2.6
-            "lambda_left_linear": 2300.0,
+            "lambda_left_linear": 2300.0, # 2300.0
             "init_tau": 4.5,
             "min_tau": 1.0,
             "tau_decay": 0.963,
@@ -1299,7 +1293,7 @@ if __name__ == "__main__":
         },
         "num_workers": 10,  # Use all available cores
         "optimization_params": {
-            "k": 5,  # Number of gradient optimization runs - 5
+            "k": 1,  # Number of gradient optimization runs - 5
             "learning_rate": 1.8, # 1.8
             "lambda_acyclic": 4415.0,
             "lambda_triple_in": 3027.0,
@@ -1411,7 +1405,9 @@ if __name__ == "__main__":
     
     # Load queries
     sparql_queries = load_sparql_queries(config['queries_file'], config['num_queries'])
-    #sparql_queries = [q for q in sparql_queries if len(q.triples) <= 4] # TODO just for now to visulaize
+    
+    # Filter queries by max URI atoms per triple if configured
+    sparql_queries = filter_queries_by_max_uri_atoms(sparql_queries, max_uri_atoms=2)
     
     # Filter queries by size if max_query_size is set
     if config.get('max_query_size') is not None:
@@ -1479,6 +1475,9 @@ if __name__ == "__main__":
         plot_lineplots_by_size(stats_df, plots_dir)
         plot_boxplot_per_size(stats_df, plots_dir)
         plot_scatter_correlations(stats_df, plots_dir)
+        plot_win_loss_heatmap(stats_df, plots_dir)
+        plot_optimality_gap(stats_df, plots_dir)
+        plot_performance_profile(stats_df, plots_dir)
         
         print(f"Plots saved to: {plots_dir}")
     except Exception as e:
