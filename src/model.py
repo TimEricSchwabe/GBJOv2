@@ -307,7 +307,7 @@ class CostGNNv3(nn.Module):
                 nn.GELU(),
                 nn.Linear(hidden_dim, hidden_dim)
             )
-            self.convs.append(GINConv(mlp, aggr='add'))
+            self.convs.append(GINConv(mlp, aggr='add')) #add or mean
             
             if use_layer_norm:
                 self.layer_norms.append(nn.LayerNorm(hidden_dim))
@@ -411,10 +411,8 @@ class CostGNNv3(nn.Module):
             # Activation
             x = F.gelu(x)
 
-            # Residual connection with ReZero scaling
-            # layer_scales[i] starts at 0, so conv output is ignored initially
+
             if self.use_residual:
-                #x = residual + self.layer_scales[i] * x
                 x = residual + x
             # Dropout (skip on last layer if not using JK)
             if i < self.n_layers - 1:

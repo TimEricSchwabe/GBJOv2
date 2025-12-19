@@ -2,6 +2,7 @@
 """
 Plot optimization results from saved JSON data using Pandas.
 Refactored for conciseness and clarity.
+Styled for IJCAI paper submission.
 """
 
 import json
@@ -10,20 +11,74 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 from matplotlib.ticker import MaxNLocator
 from typing import Dict, Any
 
-# Try to use scienceplots if available
-try:
-    import scienceplots
-    plt.style.use('science')
-except ImportError:
-    # Fallback to a clean style
-    try:
-        import seaborn as sns
-        sns.set_style("whitegrid")
-    except ImportError:
-        plt.style.use('seaborn-v0_8-whitegrid')
+# =============================================================================
+# IJCAI Paper Formatting Constants
+# =============================================================================
+SINGLE_COL_WIDTH = 3.25  # inches (IJCAI single column)
+DOUBLE_COL_WIDTH = 6.75  # inches (IJCAI double column)
+FIGSIZE_SINGLE = (SINGLE_COL_WIDTH, 2.4)
+FIGSIZE_DOUBLE = (DOUBLE_COL_WIDTH, 2.4)
+FIGSIZE_SQUARE = (SINGLE_COL_WIDTH, SINGLE_COL_WIDTH)
+
+# Save kwargs for high-quality PDF output
+SAVE_KWARGS = {'dpi': 300, 'bbox_inches': 'tight', 'pad_inches': 0.02}
+
+# =============================================================================
+# Configure matplotlib for academic papers
+# =============================================================================
+def setup_paper_style():
+    """Configure matplotlib rcParams for IJCAI paper submission."""
+    plt.rcParams.update({
+        # Text rendering - try LaTeX first, fallback to mathtext
+        'text.usetex': False,  # Set True if LaTeX is installed
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
+        'mathtext.fontset': 'stix',
+        
+        # Font sizes appropriate for print at column width
+        'font.size': 8,
+        'axes.labelsize': 9,
+        'axes.titlesize': 9,
+        'legend.fontsize': 7,
+        'xtick.labelsize': 7,
+        'ytick.labelsize': 7,
+        
+        # Line and marker sizes for visibility in print
+        'lines.linewidth': 1.2,
+        'lines.markersize': 4,
+        'axes.linewidth': 0.6,
+        
+        # Grid styling (subtle)
+        'grid.linewidth': 0.3,
+        'grid.alpha': 0.4,
+        
+        # Legend styling - compact for paper figures
+        'legend.framealpha': 0.9,
+        'legend.edgecolor': '0.8',
+        'legend.borderpad': 0.2,
+        'legend.handlelength': 1.0,
+        'legend.labelspacing': 0.2,
+        'legend.columnspacing': 0.5,
+        'legend.handletextpad': 0.3,
+        
+        # Figure settings
+        'figure.dpi': 150,
+        'savefig.dpi': 300,
+        'savefig.format': 'pdf',
+        
+        # Axes
+        'axes.spines.top': False,
+        'axes.spines.right': False,
+        'axes.grid': True,
+        'axes.axisbelow': True,
+    })
+
+# Apply paper style on import
+setup_paper_style()
 
 # Map JSON keys to Display Names
 METHODS_MAP = {
@@ -51,17 +106,18 @@ METHODS_TO_PLOT = [
     'CMA'
 ]
 
-# Define consistent styles to match original plots exactly
+# Colorblind-friendly palette (Wong, 2011 / IBM Design)
+# Designed to be distinguishable in both color and grayscale printing
 METHOD_STYLES = {
-    'Gradient': {'color': 'blue', 'marker': 'o', 'markeredgecolor': 'white', 'markersize': 5},
-    'Greedy': {'color': 'green', 'marker': 's', 'markeredgecolor': 'white', 'markersize': 5},
-    'DP': {'color': 'purple', 'marker': 'd', 'markeredgecolor': 'white', 'markersize': 5},
-    'Random': {'color': 'red', 'marker': '^', 'markeredgecolor': 'white', 'markersize': 5},
-    'Exhaustive': {'color': 'orange', 'marker': 'x', 'markeredgecolor': 'white', 'markersize': 5},
-    'Iterative Improvement': {'color': 'brown', 'marker': 'P', 'markeredgecolor': 'white', 'markersize': 6},
-    'Genetic Search': {'color': 'cyan', 'marker': '*', 'markeredgecolor': 'black', 'markersize': 8},
-    'Neural Sort': {'color': 'yellow', 'marker': 'v', 'markeredgecolor': 'white', 'markersize': 5},
-    'CMA': {'color': 'pink', 'marker': 'h', 'markeredgecolor': 'white', 'markersize': 5}
+    'Exhaustive': {'color': '#E69F00', 'marker': 'o', 'linestyle': '-'},       # Orange
+    'DP': {'color': '#56B4E9', 'marker': 's', 'linestyle': '--'},              # Sky Blue  
+    'Gradient': {'color': '#0072B2', 'marker': '^', 'linestyle': '-'},         # Bluish Green
+    'Iterative Improvement': {'color': '#F0E442', 'marker': 'D', 'linestyle': ':'},  # Yellow
+    'Greedy': {'color': '#009E73', 'marker': 'v', 'linestyle': '-.'},          # Blue
+    'Genetic Search': {'color': '#D55E00', 'marker': 'P', 'linestyle': '-'},   # Vermillion
+    'Random': {'color': '#CC79A7', 'marker': 'X', 'linestyle': '--'},          # Reddish Purple
+    'Neural Sort': {'color': '#666666', 'marker': 'h', 'linestyle': ':'},      # Dark Gray
+    'CMA': {'color': '#000000', 'marker': '*', 'linestyle': '-.'},             # Black
 }
 
 def load_data(results_dir: str) -> pd.DataFrame:
@@ -129,15 +185,39 @@ def plot_overall_boxplot(df: pd.DataFrame, output_dir: str):
         print("No data for boxplot.")
         return
 
-    plt.figure(figsize=(14, 8))
+    fig, ax = plt.subplots(figsize=FIGSIZE_DOUBLE)
     # Using Pandas boxplot wrapper
-    df[cols].boxplot(rot=45)
-    plt.yscale('log')
-    plt.title('Overall Cost Distribution (Log Scale)')
-    plt.ylabel('Cost')
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'overall_boxplot.png'))
-    plt.close()
+    # Remove outliers (showfliers=False) and return dict to access artists
+    bp = df[cols].boxplot(rot=45, ax=ax, showfliers=False, return_type='dict')
+    ax.set_yscale('log')
+    ax.set_ylabel('Cost')
+
+    # Add method names vertically above each box
+    for i, col in enumerate(cols):
+        # Determine method name
+        parts = col.split('_')
+        method = parts[0]
+        
+        # Upper whisker for box i is at index 2*i + 1
+        if 2 * i + 1 < len(bp['whiskers']):
+            top_whisker = bp['whiskers'][2 * i + 1]
+            y_data = top_whisker.get_ydata()
+            
+            if len(y_data) > 0:
+                y_max = np.max(y_data)
+                
+                # Use method color
+                style = METHOD_STYLES.get(method, {})
+                color = style.get('color', 'black')
+                
+                # Place text above the whisker
+                # Multiply by 1.15 for a small gap in log scale
+                ax.text(i + 1, y_max * 1.15, method, 
+                        rotation=90, ha='center', va='bottom', 
+                        fontsize=6, color=color, clip_on=False)
+
+    fig.savefig(os.path.join(output_dir, 'overall_boxplot.pdf'), **SAVE_KWARGS)
+    plt.close(fig)
 
 def plot_mean_costs_bar(df: pd.DataFrame, output_dir: str):
     """Mean costs bar plot (true and predicted)"""
@@ -167,28 +247,20 @@ def plot_mean_costs_bar(df: pd.DataFrame, output_dir: str):
     x = np.arange(len(methods))
     width = 0.35
     
-    plt.figure(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=FIGSIZE_DOUBLE)
     
-    # Use consistent colors if possible
-    real_colors = [METHOD_STYLES.get(m, {}).get('color', None) for m in methods]
-    pred_colors = [METHOD_STYLES.get(m, {}).get('color', None) for m in methods] # Use same color for pred but maybe lighter? 
-    # For now, stick to standard bar plot logic (grouping Real vs Pred), but maybe matching the method colors is better?
-    # Original plot: Single bar per method? No, original had comparison. 
-    # Let's stick to simple comparison: Blue for Real, Orange for Pred? Or stick to user request "mean costs bar plot".
-    # I'll stick to a simple grouped bar plot.
+    # Use colorblind-friendly colors for True vs Predicted
+    ax.bar(x - width/2, real_means, width, label='True Cost', color='#0072B2', alpha=0.85)
+    ax.bar(x + width/2, pred_means, width, label='Predicted Cost', color='#E69F00', alpha=0.85)
     
-    plt.bar(x - width/2, real_means, width, label='True Cost', alpha=0.8)
-    plt.bar(x + width/2, pred_means, width, label='Predicted Cost', alpha=0.8)
+    ax.set_ylabel('Mean Cost')
+    ax.set_xticks(x)
+    ax.set_xticklabels(methods, rotation=45, ha='right')
+    ax.legend(loc='best', fontsize=6, frameon=True, handlelength=0.8)
+    ax.set_yscale('log')
     
-    plt.ylabel('Mean Cost')
-    plt.title('Mean Costs by Method')
-    plt.xticks(x, methods)
-    plt.legend()
-    plt.yscale('log') 
-    plt.grid(axis='y', alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'mean_costs_barplot.png'))
-    plt.close()
+    fig.savefig(os.path.join(output_dir, 'mean_costs_barplot.pdf'), **SAVE_KWARGS)
+    plt.close(fig)
 
 def plot_lineplots_by_size(df: pd.DataFrame, output_dir: str):
     """True and predicted lineplots per query size (mean cost)"""
@@ -197,13 +269,14 @@ def plot_lineplots_by_size(df: pd.DataFrame, output_dir: str):
 
     grouped = df.groupby('query_size').median()
     
+    # Sort columns to ensure consistent legend order
+    method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
+    
     # 1. True Costs
-    plt.figure(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
     real_cols = [c for c in grouped.columns if '_real' in c]
     has_data = False
     
-    # Sort columns to ensure consistent legend order
-    method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
     real_cols.sort(key=lambda c: method_ranks.get(c.replace('_real', ''), 99))
     
     for col in real_cols:
@@ -211,34 +284,32 @@ def plot_lineplots_by_size(df: pd.DataFrame, output_dir: str):
             method = col.replace('_real', '')
             style = METHOD_STYLES.get(method, {})
             
-            plt.plot(grouped.index, grouped[col], 
-                     label=method,
-                     color=style.get('color'),
-                     marker=style.get('marker'),
-                     markeredgecolor=style.get('markeredgecolor'),
-                     markersize=style.get('markersize'),
-                     linestyle='-') # Solid line for true costs
+            ax.plot(grouped.index, grouped[col], 
+                    label=method,
+                    color=style.get('color'),
+                    marker=style.get('marker'),
+                    linestyle=style.get('linestyle', '-'),
+                    markeredgecolor='white',
+                    markeredgewidth=0.3)
             has_data = True
             
     if has_data:
-        plt.xlabel('Query Size')
-        plt.ylabel('Median True Cost')
-        plt.yscale('log')
-        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
-        plt.legend()
-        plt.margins(x=0.05, y=0.05)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'lineplot_true_costs.pdf'))
-        plt.savefig(os.path.join(output_dir, 'lineplot_true_costs.png'))
-    plt.close()
+        ax.set_xlabel('Query Size (Triple Patterns)')
+        ax.set_ylabel('Median True Cost')
+        ax.set_yscale('log')
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        # Compact legend outside plot or in best location
+        ax.legend(loc='best', ncol=3, fontsize=5, frameon=True, 
+                  handlelength=0.8, columnspacing=0.4)
+        ax.margins(x=0.05, y=0.1)
+        fig.savefig(os.path.join(output_dir, 'lineplot_true_costs.pdf'), **SAVE_KWARGS)
+    plt.close(fig)
 
     # 2. Predicted Costs
-    plt.figure(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
     pred_cols = [c for c in grouped.columns if '_pred' in c]
     has_data = False
     
-    # Sort columns
-    method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
     pred_cols.sort(key=lambda c: method_ranks.get(c.replace('_pred', ''), 99))
     
     for col in pred_cols:
@@ -246,25 +317,25 @@ def plot_lineplots_by_size(df: pd.DataFrame, output_dir: str):
             method = col.replace('_pred', '')
             style = METHOD_STYLES.get(method, {})
             
-            plt.plot(grouped.index, grouped[col], 
-                     label=method,
-                     color=style.get('color'),
-                     marker=style.get('marker'),
-                     markeredgecolor=style.get('markeredgecolor'),
-                     markersize=style.get('markersize'),
-                     linestyle='--') # Dashed line for predicted costs
+            ax.plot(grouped.index, grouped[col], 
+                    label=method,
+                    color=style.get('color'),
+                    marker=style.get('marker'),
+                    linestyle=style.get('linestyle', '-'),
+                    markeredgecolor='white',
+                    markeredgewidth=0.3)
             has_data = True
             
     if has_data:
-        plt.xlabel('Query Size')
-        plt.ylabel('Median Predicted Cost')
-        plt.yscale('log')
-        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
-        plt.legend()
-        plt.margins(x=0.05, y=0.05)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'lineplot_predicted_costs.png'))
-    plt.close()
+        ax.set_xlabel('Query Size (Triple Patterns)')
+        ax.set_ylabel('Median Predicted Cost')
+        ax.set_yscale('log')
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.legend(loc='best', ncol=3, fontsize=5, frameon=True,
+                  handlelength=0.8, columnspacing=0.4)
+        ax.margins(x=0.05, y=0.1)
+        fig.savefig(os.path.join(output_dir, 'lineplot_predicted_costs.pdf'), **SAVE_KWARGS)
+    plt.close(fig)
 
 def plot_boxplot_per_size(df: pd.DataFrame, output_dir: str):
     """Boxplot per query size (true cost)"""
@@ -279,27 +350,70 @@ def plot_boxplot_per_size(df: pd.DataFrame, output_dir: str):
     if melted.empty:
         return
 
-    plt.figure(figsize=(12, 8))
+    fig, ax = plt.subplots(figsize=FIGSIZE_DOUBLE)
     
     try:
         import seaborn as sns
-        # Create a palette dictionary
-        palette = {m: METHOD_STYLES.get(m, {}).get('color') for m in melted['Method'].unique()}
-        # Remove None values if any method is missing from style
-        palette = {k: v for k, v in palette.items() if v}
+        # Create a palette dictionary using colorblind-friendly colors
+        # Ensure consistent order based on METHODS_TO_PLOT
+        method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
+        unique_methods = melted['Method'].unique()
+        hue_order = sorted(unique_methods, key=lambda m: method_ranks.get(m, 99))
         
-        sns.boxplot(data=melted, x='query_size', y='Cost', hue='Method', palette=palette)
+        palette = {m: METHOD_STYLES.get(m, {}).get('color') for m in hue_order}
+        
+        sns.boxplot(data=melted, x='query_size', y='Cost', hue='Method', 
+                    palette=palette, hue_order=hue_order, ax=ax,
+                    linewidth=0.6, showfliers=False)
+        
+        # Add labels vertically above whiskers
+        unique_sizes = sorted(melted['query_size'].unique())
+        num_hues = len(hue_order)
+        width = 0.8 # Default seaborn width for boxplot
+        hue_width = width / num_hues
+        
+        for i, size in enumerate(unique_sizes):
+            for j, method in enumerate(hue_order):
+                subset = melted[(melted['query_size'] == size) & (melted['Method'] == method)]
+                if subset.empty:
+                    continue
+                
+                costs = subset['Cost']
+                if costs.empty:
+                    continue
+                    
+                # Calculate upper whisker manually to match matplotlib/seaborn standard
+                q1 = costs.quantile(0.25)
+                q3 = costs.quantile(0.75)
+                iqr = q3 - q1
+                upper_lim = q3 + 1.5 * iqr
+                # The whisker extends to the farthest point within the limit
+                whisker_val = costs[costs <= upper_lim].max()
+                if pd.isna(whisker_val):
+                     whisker_val = costs.max()
+                
+                # Calculate x position
+                # x-tick is at i
+                x_pos = i + (j - num_hues/2 + 0.5) * hue_width
+                
+                style = METHOD_STYLES.get(method, {})
+                color = style.get('color', 'black')
+                
+                ax.text(x_pos, whisker_val * 1.25, method,
+                        rotation=90, ha='center', va='bottom',
+                        fontsize=5, color=color)
+
+        ax.legend(loc='best', ncol=3, fontsize=5, frameon=True,
+                  handlelength=0.8, columnspacing=0.4)
     except ImportError:
-        # Fallback
-        melted.boxplot(column='Cost', by=['query_size', 'Method'], rot=45)
+        melted.boxplot(column='Cost', by=['query_size', 'Method'], rot=45, ax=ax, showfliers=False)
         
-    plt.yscale('log')
-    plt.title('Real Cost Distribution by Query Size')
-    plt.ylabel('Real Cost')
-    plt.xlabel('Query Size')
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'boxplot_per_size_true.png'))
-    plt.close()
+    ax.set_yscale('log')
+    ax.set_ylabel('True Cost')
+    ax.set_xlabel('Query Size (Triple Patterns)')
+    
+    fig.savefig(os.path.join(output_dir, 'boxplot_per_size_true.pdf'), **SAVE_KWARGS)
+    plt.close(fig)
 
 def plot_scatter_correlations(df: pd.DataFrame, output_dir: str):
     """Scatter plots: Gradient-Greedy, Gradient-DP, DP-Greedy (True and Predicted)"""
@@ -322,34 +436,33 @@ def plot_scatter_correlations(df: pd.DataFrame, output_dir: str):
             if data.empty:
                 continue
                 
-            plt.figure(figsize=(8, 8))
+            fig, ax = plt.subplots(figsize=FIGSIZE_SQUARE)
             
-            # Use specific colors for scatters if desired, but pairs have two methods.
-            # Original used blue for Grad-Greedy, Orange for Grad-DP.
-            color = 'blue'
+            # Use colorblind-friendly colors
+            color = '#0072B2'  # Blue
             if 'DP' in (m1, m2):
-                color = 'orange'
+                color = '#D55E00'  # Vermillion
             
-            plt.scatter(data[col1], data[col2], alpha=0.6, edgecolors='k', s=50, c=color)
+            ax.scatter(data[col1], data[col2], alpha=0.6, edgecolors='k', 
+                       s=15, c=color, linewidths=0.3)
             
             # Diagonal line (x=y)
             if data[col1].min() > 0 and data[col2].min() > 0:
                 min_val = min(data[col1].min(), data[col2].min()) * 0.9
                 max_val = max(data[col1].max(), data[col2].max()) * 1.1
-                plt.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.7, label='x=y')
-                plt.xlim(min_val, max_val)
-                plt.ylim(min_val, max_val)
+                ax.plot([min_val, max_val], [min_val, max_val], 'k--', alpha=0.7, 
+                        linewidth=0.8, label='$x=y$')
+                ax.set_xlim(min_val, max_val)
+                ax.set_ylim(min_val, max_val)
             
-            plt.xlabel(f'{m1} Cost')
-            plt.ylabel(f'{m2} Cost')
-            plt.title(f'{label}: {m1} vs {m2}')
-            plt.yscale('log')
-            plt.xscale('log')
-            plt.grid(True, alpha=0.3)
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(os.path.join(output_dir, f'scatter_{label.lower()}_{m1}_{m2}.png'))
-            plt.close()
+            ax.set_xlabel(f'{m1} Cost')
+            ax.set_ylabel(f'{m2} Cost')
+            ax.set_yscale('log')
+            ax.set_xscale('log')
+            ax.legend(loc='lower right', fontsize=5, frameon=True, handlelength=0.8)
+            
+            fig.savefig(os.path.join(output_dir, f'scatter_{label.lower()}_{m1}_{m2}.pdf'), **SAVE_KWARGS)
+            plt.close(fig)
 
 def plot_win_loss_heatmap(df: pd.DataFrame, output_dir: str):
     """Win/Loss Heatmap comparing algorithms pairwise."""
@@ -389,30 +502,38 @@ def plot_win_loss_heatmap(df: pd.DataFrame, output_dir: str):
             if m1_wins + m2_wins > 0:
                 win_matrix.loc[m1, m2] = m1_wins / (m1_wins + m2_wins)
             else:
-                win_matrix.loc[m1, m2] = 0.5 # Equal if all queries are ties
+                win_matrix.loc[m1, m2] = 0.5  # Equal if all queries are ties
 
-    plt.figure(figsize=(12, 10))
+    # Determine figure size based on number of methods
+    n_methods = len(methods)
+    fig_width = min(DOUBLE_COL_WIDTH, SINGLE_COL_WIDTH + n_methods * 0.3)
+    fig, ax = plt.subplots(figsize=(fig_width, fig_width * 0.85))
     
     try:
         import seaborn as sns
-        sns.heatmap(win_matrix, annot=True, fmt='.2f', cmap='YlGnBu', cbar_kws={'label': 'Win Rate (Fraction of non-tie queries)'})
+        sns.heatmap(win_matrix, annot=True, fmt='.2f', cmap='YlGnBu', 
+                    cbar_kws={'label': 'Win Rate', 'shrink': 0.8},
+                    ax=ax, annot_kws={'size': 6}, linewidths=0.5)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
+        ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
     except ImportError:
         print("Seaborn not found, using matplotlib fallback")
-        # Fallback to matplotlib imshow
-        im = plt.imshow(win_matrix.values, cmap='YlGnBu')
-        plt.colorbar(im, label='Win Rate (Fraction of non-tie queries)')
-        # Add labels
+        im = ax.imshow(win_matrix.values, cmap='YlGnBu')
+        plt.colorbar(im, ax=ax, label='Win Rate', shrink=0.8)
         for i in range(len(methods)):
             for j in range(len(methods)):
-                plt.text(j, i, f"{win_matrix.iloc[i, j]:.2f}", ha="center", va="center", color="black")
-        plt.xticks(np.arange(len(methods)), methods, rotation=45)
-        plt.yticks(np.arange(len(methods)), methods)
+                ax.text(j, i, f"{win_matrix.iloc[i, j]:.2f}", ha="center", va="center", 
+                        color="black", fontsize=6)
+        ax.set_xticks(np.arange(len(methods)))
+        ax.set_yticks(np.arange(len(methods)))
+        ax.set_xticklabels(methods, rotation=45, ha='right')
+        ax.set_yticklabels(methods)
 
-    plt.xlabel('Algorithm B (Loser)')
-    plt.ylabel('Algorithm A (Winner)')
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'win_loss_heatmap.png'))
-    plt.close()
+    ax.set_xlabel('Algorithm B')
+    ax.set_ylabel('Algorithm A')
+    
+    fig.savefig(os.path.join(output_dir, 'win_loss_heatmap.pdf'), **SAVE_KWARGS)
+    plt.close(fig)
 
 def plot_optimality_gap(df: pd.DataFrame, output_dir: str):
     """Optimality gap plot: mean ratio to best cost per query, grouped by query size."""
@@ -448,34 +569,33 @@ def plot_optimality_gap(df: pd.DataFrame, output_dir: str):
     method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
     methods_sorted = sorted(methods, key=lambda m: method_ranks.get(m, 99))
     
-    plt.figure(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
     has_data = False
     
     for m in methods_sorted:
         gap_col = f'{m}_gap'
         if gap_col in grouped.columns and grouped[gap_col].notna().any():
             style = METHOD_STYLES.get(m, {})
-            plt.plot(grouped.index, grouped[gap_col],
-                     label=m,
-                     color=style.get('color'),
-                     marker=style.get('marker'),
-                     markeredgecolor=style.get('markeredgecolor'),
-                     markersize=style.get('markersize'),
-                     linestyle='-')
+            ax.plot(grouped.index, grouped[gap_col],
+                    label=m,
+                    color=style.get('color'),
+                    marker=style.get('marker'),
+                    linestyle=style.get('linestyle', '-'),
+                    markeredgecolor='white',
+                    markeredgewidth=0.3)
             has_data = True
     
     if has_data:
-        plt.xlabel('Number of Triple Patterns')
-        plt.ylabel('Mean Optimality Gap (Ratio to Best Cost)')
-        plt.yscale('log')
-        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
-        plt.axhline(y=1.0, color='black', linestyle='--', alpha=0.5, label='Optimal (1.0)')
-        plt.legend()
-        plt.margins(x=0.05, y=0.05)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'optimality_gap.pdf'))
-        plt.savefig(os.path.join(output_dir, 'optimality_gap.png'))
-    plt.close()
+        ax.set_xlabel('Number of Triple Patterns')
+        ax.set_ylabel('Mean Optimality Gap')
+        ax.set_yscale('log')
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.axhline(y=1.0, color='black', linestyle='--', alpha=0.5, linewidth=0.8, label='Optimal')
+        ax.legend(loc='best', ncol=3, fontsize=5, frameon=True,
+                  handlelength=0.8, columnspacing=0.4)
+        ax.margins(x=0.05, y=0.1)
+        fig.savefig(os.path.join(output_dir, 'optimality_gap.pdf'), **SAVE_KWARGS)
+    plt.close(fig)
     
     # Clean up temporary columns
     for gap_col in gap_cols:
@@ -513,7 +633,7 @@ def plot_performance_profile(df: pd.DataFrame, output_dir: str):
     method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
     methods_sorted = sorted(methods, key=lambda m: method_ranks.get(m, 99))
     
-    plt.figure(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
     
     # Determine x-axis range (from 1.0 to max ratio across all methods)
     all_ratios = np.concatenate([ratios[m] for m in methods if len(ratios[m]) > 0])
@@ -532,28 +652,27 @@ def plot_performance_profile(df: pd.DataFrame, output_dir: str):
         # Compute CDF: fraction of queries where ratio <= τ
         y_vals = np.array([np.sum(ratios[m] <= tau) / n_queries for tau in x_vals])
         
-        plt.plot(x_vals, y_vals,
-                 label=m,
-                 color=style.get('color'),
-                 linestyle='-',
-                 linewidth=2)
+        ax.plot(x_vals, y_vals,
+                label=m,
+                color=style.get('color'),
+                linestyle=style.get('linestyle', '-'),
+                linewidth=1.2)
     
-    plt.xlabel('Performance Ratio τ (Cost / Best Cost)')
-    plt.ylabel('Fraction of Queries with Ratio ≤ τ')
-    plt.title('Dolan-Moré Performance Profile')
-    plt.xlim(1.0, max_ratio)
-    plt.ylim(0, 1.05)
-    plt.xscale('log')
-    plt.legend(loc='lower right')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'performance_profile.pdf'))
-    plt.savefig(os.path.join(output_dir, 'performance_profile.png'))
-    plt.close()
+    ax.set_xlabel(r'Performance Ratio $\tau$')
+    ax.set_ylabel(r'$P(\mathrm{ratio} \leq \tau)$')
+    ax.set_xlim(1.0, max_ratio)
+    ax.set_ylim(0, 1.02)
+    ax.set_xscale('log')
+    # Place legend outside the plot area to avoid overlap
+    ax.legend(loc='lower right', ncol=3, fontsize=5, frameon=True,
+              handlelength=0.8, columnspacing=0.4, bbox_to_anchor=(0.98, 0.02))
+    
+    fig.savefig(os.path.join(output_dir, 'performance_profile.pdf'), **SAVE_KWARGS)
+    plt.close(fig)
 
 def main():
     parser = argparse.ArgumentParser(description="Plot optimization results.")
-    parser.add_argument("results_dir", nargs='?', default="optimization_results/run_20251219_110756", 
+    parser.add_argument("results_dir", nargs='?', default="optimization_results/LUBM-PATH", 
                         help="Directory containing detailed_results.json")
     args = parser.parse_args()
 

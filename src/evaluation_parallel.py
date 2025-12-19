@@ -967,49 +967,50 @@ def process_single_query(args):
         # Generate join order tree visualization for small queries with true costs
         # Visualizations (per-query folder)
         try:
-            viz_dir = os.path.join(save_directory, "visualizations", f"query_{query_index}")
-            os.makedirs(viz_dir, exist_ok=True)
+            if False:
+                viz_dir = os.path.join(save_directory, "visualizations", f"query_{query_index}")
+                os.makedirs(viz_dir, exist_ok=True)
 
-            # Map result JSON keys -> plan objects (only keep available, valid plans)
-            plan_by_key = {
-                "gradient": gradient_plan,
-                "greedy": greedy_plan,
-                "random": random_plan,
-                "dp": best_pred_plan,
-                "exhaustive": exhaustive_plan,
-                "II": II_plan,
-                "GEQO": GEQO_plan,
-                "NeuralSort": ns_plan,
-                "CMA": cma_plan,
-            }
-
-            plans_dict = {}
-            costs_dict = {}
-            for k, plan in plan_by_key.items():
-                if plan is None:
-                    continue
-                plans_dict[k] = plan
-                plan_costs = result.get("plans", {}).get(k, {}) or {}
-                costs_dict[k] = {
-                    "predicted_cost": plan_costs.get("predicted_cost"),
-                    "real_cost": plan_costs.get("real_cost"),
+                # Map result JSON keys -> plan objects (only keep available, valid plans)
+                plan_by_key = {
+                    "gradient": gradient_plan,
+                    "greedy": greedy_plan,
+                    "random": random_plan,
+                    "dp": best_pred_plan,
+                    "exhaustive": exhaustive_plan,
+                    "II": II_plan,
+                    "GEQO": GEQO_plan,
+                    "NeuralSort": ns_plan,
+                    "CMA": cma_plan,
                 }
 
-            # 2) Always: comparison view (all sizes)
-            visualize_all_plans(
-                plans_dict=plans_dict,
-                costs_dict=costs_dict,
-                save_path=os.path.join(viz_dir, "all_plans_comparison"),
-                triple_objs=triple_objs,
-            )
+                plans_dict = {}
+                costs_dict = {}
+                for k, plan in plan_by_key.items():
+                    if plan is None:
+                        continue
+                    plans_dict[k] = plan
+                    plan_costs = result.get("plans", {}).get(k, {}) or {}
+                    costs_dict[k] = {
+                        "predicted_cost": plan_costs.get("predicted_cost"),
+                        "real_cost": plan_costs.get("real_cost"),
+                    }
 
-            # 1) Only if true costs available and small enough for exhaustive join-order tree
-            if use_true_costs and len(triple_objs) <= 5:
-                visualize_join_order_tree(
-                    triple_objs=triple_objs,
+                # 2) Always: comparison view (all sizes)
+                visualize_all_plans(
                     plans_dict=plans_dict,
-                    save_path=os.path.join(viz_dir, "join_order_tree"),
+                    costs_dict=costs_dict,
+                    save_path=os.path.join(viz_dir, "all_plans_comparison"),
+                    triple_objs=triple_objs,
                 )
+
+                # 1) Only if true costs available and small enough for exhaustive join-order tree
+                if use_true_costs and len(triple_objs) <= 5:
+                    visualize_join_order_tree(
+                        triple_objs=triple_objs,
+                        plans_dict=plans_dict,
+                        save_path=os.path.join(viz_dir, "join_order_tree"),
+                    )
         except Exception as e:
             print(f"Warning: Could not generate visualizations for query {query_index}: {e}")
         
@@ -1216,7 +1217,7 @@ if __name__ == "__main__":
 
     config_lubm_star = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
-        "model_path": "/home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt", # /home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt
+        "model_path": "/home/tim/query_optimization/meta_optimization_results/run_20251219_142626/best_model.pt", # /home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt
         "num_queries": 20,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "optimization_steps": 500,
@@ -1272,7 +1273,7 @@ if __name__ == "__main__":
     config_lubm_path = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl",
         "model_path": "/home/tim/query_optimization/training_results/lubm-path-nice-v3-6-layer/model.pt",
-        "num_queries": 20,
+        "num_queries": 70,
         "optimization_steps": 500,
         "use_exhaustive": False,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)

@@ -438,14 +438,14 @@ if __name__ == "__main__":
         # Model parameters
         'model_type': 'CostGNNv3',  # Options: 'CostGNN', 'CostGNNv2', 'CostGNNv3'
         'node_feature_dim': 307,    # Input feature dimension
-        'hidden_dim': 32,          # Hidden layer dimension
+        'hidden_dim': 128,          # Hidden layer dimension
         
         # CostGNNv3 architecture parameters
-        'n_layers': 2,              # Number of GIN message-passing layers
+        'n_layers': 6,              # Number of GIN message-passing layers
         'use_jk': False,            # Whether to use Jumping Knowledge
         'jk_mode': 'cat',           # JK mode: 'cat', 'max', or 'lstm'
-        'use_residual': True,       # Whether to use residual connections
-        'use_layer_norm': True,    # Whether to use layer normalization (disable for counting)
+        'use_residual': False,       # Whether to use residual connections
+        'use_layer_norm': False,    # Whether to use layer normalization (disable for counting)
         'dropout': 0.0,             # Dropout probability
         
         # Training parameters
@@ -460,7 +460,7 @@ if __name__ == "__main__":
         
         # Paths
         'root_dir': '',
-        'dataset_dir': '/home/tim/query_optimization/datasets/plans/lubm/star-greedy',
+        'dataset_dir': '/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_training/new',
         
         # Other settings
         'enable_training': True,    # Set to False to skip training
