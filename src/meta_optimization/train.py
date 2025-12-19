@@ -112,9 +112,9 @@ class Hyperparams(nn.Module):
     The hyperparams of C_theta that are to be meta-optimized. 
     Appropriately constrained to sensible domain
     """
-    def __init__(self, init_lambda_triple_out=100.0,
-     init_lambda_join_in=100.0, init_lambda_join_out=100.0, init_lambda_acyclic=100.0,
-      init_lambda_left_linear=100.0, init_lambda_entropy=100.0, init_eta=1e0, init_tau=5.0) -> None:
+    def __init__(self, init_lambda_triple_out=1.0,
+     init_lambda_join_in=1.0, init_lambda_join_out=1.0, init_lambda_acyclic=1.0,
+      init_lambda_left_linear=1.0, init_lambda_entropy=1.0, init_eta=1e0, init_tau=5.0) -> None:
         super().__init__()
 
         self._lambda_triple_out = nn.Parameter(torch.tensor(float(init_lambda_triple_out)))
@@ -128,25 +128,33 @@ class Hyperparams(nn.Module):
         self._init_tau = nn.Parameter(torch.tensor(float(init_tau)))
 
     def lambda_triple_out(self) -> torch.Tensor:
-        return F.softplus(self._lambda_triple_out).clamp(min=0, max=500)
+        lambda_min, lambda_max = 0, 500
+        return lambda_min + F.softplus(self._lambda_triple_out).clamp(min=0, max=500)
 
     def lambda_join_in(self) -> torch.Tensor:
-        return F.softplus(self._lambda_join_in).clamp(min=0, max=500)
+        lambda_min, lambda_max = 0, 500
+        return lambda_min + F.softplus(self._lambda_join_in).clamp(min=0, max=500)
 
     def lambda_join_out(self) -> torch.Tensor:
-        return F.softplus(self._lambda_join_out).clamp(min=0, max=500)
+        lambda_min, lambda_max = 0, 500
+        return lambda_min + F.softplus(self._lambda_join_out).clamp(min=0, max=500)
 
     def lambda_acyclic(self) -> torch.Tensor:
-        return F.softplus(self._lambda_acyclic).clamp(min=0, max=500)
+        lambda_min, lambda_max = 0, 500
+        return lambda_min + F.softplus(self._lambda_acyclic).clamp(min=0, max=500)
 
     def lambda_left_linear(self) -> torch.Tensor:
-        return F.softplus(self._lambda_left_linear).clamp(min=0, max=500)
+        lambda_min, lambda_max = 0, 500
+        return lambda_min + F.softplus(self._lambda_left_linear).clamp(min=0, max=500)
 
     def lambda_entropy(self) -> torch.Tensor:
-        return F.softplus(self._lambda_entropy).clamp(min=0, max=500)
+        lambda_min, lambda_max = 0, 500
+        return lambda_min + F.softplus(self._lambda_entropy).clamp(min=0, max=500)
 
     def eta(self) -> torch.Tensor:
-        return F.softplus(self._eta).clamp(min=1e-4, max=2)
+        eta_min, eta_max = 1e-4, 2
+        return eta_min + (eta_max - eta_min) * F.sigmoid(self._eta)
+        #return F.softplus(self._eta).clamp(min=1e-4, max=2)
 
     def init_tau(self) -> torch.Tensor:
         return F.softplus(self._init_tau).clamp(min=1, max=10)
@@ -235,6 +243,7 @@ def gbjo(query, C_theta, hyperparams, device="cpu"):
         # Calculate the ramping coefficient for the current step
         frac = min(1.0, step / N_STEPS)
         coefficient =  frac ** 3
+        coefficient = 1 # TODO currently no ramping, adapt if necessary
 
         # backprop cost to logits
         momentum = 0.9  # momentum coefficient
@@ -245,6 +254,7 @@ def gbjo(query, C_theta, hyperparams, device="cpu"):
         (g,) = torch.autograd.grad(cost, logits, create_graph=True)
 
         # Gradient Descent Update
+        v = momentum * v + g
         logits = logits - learning_rate * (momentum * v + g)
 
     return logits
@@ -275,8 +285,8 @@ if __name__ == "__main__":
     pass
 
     # Model parameters
-    MODEL_PATH = "/home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt"
-    QUERY_PATH = "/home/tim/query_optimization/datasets/plans/lubm/star-greedy/dataset.pt"
+    MODEL_PATH = "/home/tim/query_optimization/training_results/lubm-path-nice-v3-6-layer/model.pt"
+    QUERY_PATH = "/home/tim/query_optimization/datasets/plans/lubm/path/plans/new_dataset/dataset.pt"
     DROPOUT = 0.0
     HIDDEN_DIM = 128
     NODE_FEATURE_DIM = 307
@@ -284,7 +294,7 @@ if __name__ == "__main__":
     USE_JK = False
     JK_MODE = 'cat'
     USE_RESIDUAL = False
-    USE_LAYER_NORM = True
+    USE_LAYER_NORM = False
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     ACCUMULATION_STEPS = 1  # aka batch size, we accumulate gradients over this many steps
@@ -365,18 +375,18 @@ if __name__ == "__main__":
 
     # define outer optimizer for psi_theta (updates C_theta params and hyperparams)
     #opt_theta = torch.optim.Adam(list(C_theta.parameters()) + list(hyperparams.parameters()), lr=1e-4)
-    opt_theta = torch.optim.Adam(hyperparams.parameters(), lr=1e-4)
+    #opt_theta = torch.optim.Adam(hyperparams.parameters(), lr=1e-3)
 
     # different lr for hyper and model
-    #optimizer = torch.optim.AdamW(
-    #[
-    #    # Control knobs
-    #    {"params": hyperparams.parameters(), "lr": 1e-4, "weight_decay": 0.0},
-    #    # Cost model
-    #    {"params": C_theta.parameters(), "lr": 1e-4, "weight_decay": 1e-4},
-    #],
-    #eps=1e-8
-#)
+    opt_theta = torch.optim.AdamW(
+    [
+        
+        {"params": hyperparams.parameters(), "lr": 1e-3, "weight_decay": 0.0},
+        # Cost model
+        {"params": C_theta.parameters(), "lr": 1e-3, "weight_decay": 1e-2},
+    ],
+    eps=1e-8
+    )
 
 
     anchor_loss = nn.HuberLoss()
@@ -405,11 +415,15 @@ if __name__ == "__main__":
         total_loss = 0
         total_anchor_loss = 0
         opt_theta.zero_grad(set_to_none=True)
+        single_query = sparql_queries[0]
+        single_query = add_fingerprints_to_query_data(single_query, fingerprint_dim=64) # TODO remove jsut test for overfitting
+
         for idx, query in enumerate(tqdm(sparql_queries, desc=f"Epoch {i+1}/{EPOCHS}")):
             #query = sparql_queries[0]
             #query = query.torch_data[0]
             # TODO add gaussian fingerprints
-            query = add_fingerprints_to_query_data(query, fingerprint_dim=64)
+            #query = add_fingerprints_to_query_data(query, fingerprint_dim=64)
+            query = single_query # TODO remove
 
 
 
@@ -469,8 +483,8 @@ if __name__ == "__main__":
             L_outer.backward()
 
             if (idx + 1) % ACCUMULATION_STEPS == 0 or (idx + 1) == len(sparql_queries):
-                #params = list(C_theta.parameters()) + list(hyperparams.parameters())
-                params = list(hyperparams.parameters())
+                params = list(C_theta.parameters()) + list(hyperparams.parameters())
+                #params = list(hyperparams.parameters())
 
                 grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=1)
                 print(f"INFO: Grad Norm: {grad_norm}")
