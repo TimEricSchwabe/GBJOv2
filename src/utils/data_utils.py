@@ -260,31 +260,104 @@ def plans_are_equivalent(plan1, plan2):
         return False
 
 
-def load_sparql_queries(queries_file: str, num_queries, seed=42):
+def parse_where_body_triple(triple_str):
     """
-    Load all the SPARQL query objects from the given file.
+    Parse a where_body() string like '?s <http://example.org/pred> ?o .' 
+    back into a list of [subject, predicate, object].
     
     Args:
-        queries_file: Path to the file containing saved SPARQLQuery objects
+        triple_str: String in where_body() format
+        
+    Returns:
+        List of [subject, predicate, object]
+    """
+    # Remove trailing period and whitespace
+    triple_str = triple_str.strip()
+    if triple_str.endswith('.'):
+        triple_str = triple_str[:-1].strip()
+    
+    # Split into parts - handle URIs with spaces inside < > brackets
+    parts = []
+    current = ""
+    in_uri = False
+    
+    for char in triple_str:
+        if char == '<':
+            in_uri = True
+            current += char
+        elif char == '>':
+            in_uri = False
+            current += char
+        elif char == ' ' and not in_uri:
+            if current:
+                parts.append(current)
+                current = ""
+        else:
+            current += char
+    
+    if current:
+        parts.append(current)
+    
+    if len(parts) >= 3:
+        return parts[:3]  # [subject, predicate, object]
+    else:
+        raise ValueError(f"Could not parse triple: {triple_str}")
+
+
+def load_sparql_queries(queries_file: str, num_queries=None, seed=42):
+    """
+    Load SPARQL queries from a file. Supports both:
+    - .pkl files with list of SPARQLQuery objects
+    - .pt files with {'data': [...], 'triples': [...]} format
+    
+    Args:
+        queries_file: Path to the queries file (.pkl or .pt)
         num_queries: Number of queries to return (None for all)
         seed: Random seed for shuffling (default: 42)
         
     Returns:
-        List of SPARQLQuery objects
+        List of query objects (SPARQLQuery or Data objects with .triples attached)
     """
     try:
         # Try loading with torch.load first (faster, handles tensors better)
-        sparql_queries = torch.load(queries_file, weights_only=False)
+        loaded = torch.load(queries_file, weights_only=False)
     except (RuntimeError, pickle.UnpicklingError, TypeError):
         # Fallback to standard pickle load
         with open(queries_file, 'rb') as f:
-            sparql_queries = pickle.load(f)
+            loaded = pickle.load(f)
+
+    # Handle dataset.pt format (dictionary with 'data' and 'triples' keys)
+    if isinstance(loaded, dict) and 'data' in loaded:
+        data_list = loaded['data']
+        triples_list = loaded.get('triples', [None] * len(data_list))
+        
+        # Attach triples to each data object so downstream code can access query.triples
+        sparql_queries = []
+        for data, triples in zip(data_list, triples_list):
+            # Convert where_body strings to list format if needed
+            if triples is not None:
+                parsed_triples = []
+                for t in triples:
+                    if isinstance(t, str):
+                        # Parse where_body() string format back to [s, p, o] list
+                        parsed_triples.append(parse_where_body_triple(t))
+                    else:
+                        # Already in list format
+                        parsed_triples.append(t)
+                data.triples = parsed_triples
+            else:
+                data.triples = []
+            sparql_queries.append(data)
+    else:
+        # Original format: list of SPARQLQuery objects
+        sparql_queries = loaded
+
+    random.seed(seed)  # Set seed for reproducible shuffling
+    random.shuffle(sparql_queries)
     
     if num_queries is not None:
         print(f"Loaded {num_queries} SPARQL queries from {queries_file}")
-        random.seed(seed)  # Set seed for reproducible shuffling
-        random.shuffle(sparql_queries)
-        return sparql_queries[-num_queries:]
+        return sparql_queries[:num_queries]
     print(f"Loaded {len(sparql_queries)} SPARQL queries from {queries_file}")
     return sparql_queries
 

@@ -14,7 +14,8 @@ import networkx as nx
 
 def plot_optimization_metrics(cost_history, total_penalty_history, acyclic_penalty_history, 
                              triple_in_penalty_history, triple_out_penalty_history,
-                             join_in_penalty_history, join_out_penalty_history, entropy_penalty_history):
+                             join_in_penalty_history, join_out_penalty_history, entropy_penalty_history,
+                             save_directory=None, show_plots=True):
     """
     Plot optimization metrics over iterations.
     
@@ -27,7 +28,12 @@ def plot_optimization_metrics(cost_history, total_penalty_history, acyclic_penal
         join_in_penalty_history: List of join in-degree penalty values
         join_out_penalty_history: List of join out-degree penalty values
         entropy_penalty_history: List of entropy penalty values
+        save_directory: Directory to save plots to (if None, saves to current directory)
+        show_plots: Whether to display plots interactively (default True)
     """
+    if save_directory is not None:
+        os.makedirs(save_directory, exist_ok=True)
+    
     iterations = range(1, len(cost_history) + 1)
     
     # Plot cost and total penalty
@@ -49,8 +55,12 @@ def plot_optimization_metrics(cost_history, total_penalty_history, acyclic_penal
     plt.legend()
     
     plt.tight_layout()
-    plt.savefig('optimization_cost_penalty.png')
-    plt.show()
+    save_path = os.path.join(save_directory, 'optimization_cost_penalty.png') if save_directory else 'optimization_cost_penalty.png'
+    plt.savefig(save_path)
+    if show_plots:
+        plt.show()
+    else:
+        plt.close()
     
     # Plot individual penalties
     plt.figure(figsize=(14, 10))
@@ -104,8 +114,12 @@ def plot_optimization_metrics(cost_history, total_penalty_history, acyclic_penal
     plt.legend()
     
     plt.tight_layout()
-    plt.savefig('optimization_individual_penalties.png')
-    plt.show()
+    save_path = os.path.join(save_directory, 'optimization_individual_penalties.png') if save_directory else 'optimization_individual_penalties.png'
+    plt.savefig(save_path)
+    if show_plots:
+        plt.show()
+    else:
+        plt.close()
 
 
 def plot_statistics(stats, show_plots=True, suffix="", save_directory="."):

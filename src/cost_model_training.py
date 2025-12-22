@@ -57,10 +57,16 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
     val_losses = []
     val_qerrors = []
     val_mses = []
+    train_losses = []
+    train_qerrors = []
+    train_mses = []
     epochs = []
     
     for epoch in range(num_epochs):
         total_loss = 0
+        total_train_qerror = 0
+        total_train_mse = 0
+        num_train_samples = 0
         prev_time = time.time()
         model.train()
         
@@ -70,6 +76,7 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
         for data in pbar:
             # Move data to the specified device
             data = data.to(device)
+            num_train_samples += data.y.size(0)
 
             optimizer.zero_grad(set_to_none=True)
             out = model(data.x, data.edge_index, batch=data.batch)
@@ -83,6 +90,14 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
                 loss = torch.mean(qerrors)
             else:
                 raise ValueError(f"Unsupported loss type: {loss_type}")
+            
+            # Calculate training metrics (MSE and Q-error)
+            with torch.no_grad():
+                pred_y = torch.exp(out)
+                batch_mse = torch.mean((pred_y - data.y) ** 2).item()
+                batch_qerror = torch.mean(calculate_qerror(pred_y, data.y)).item()
+                total_train_mse += batch_mse * data.y.size(0)
+                total_train_qerror += batch_qerror * data.y.size(0)
                 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -92,6 +107,15 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
             # Update progress bar with current loss
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
         
+        # Store training metrics for this epoch
+        avg_train_loss = total_loss / len(train_loader)
+        avg_train_mse = total_train_mse / num_train_samples
+        avg_train_qerror = total_train_qerror / num_train_samples
+        train_losses.append(avg_train_loss)
+        train_mses.append(avg_train_mse)
+        train_qerrors.append(avg_train_qerror)
+        epochs.append(epoch + 1)
+        
         # Validate if validation loader is provided
         perf = 0
         mse_metric = 0
@@ -99,42 +123,44 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
         if val_loader:
             perf, mse_metric, qerror_metric = validate_model(model, criterion, val_loader, device, loss_type=loss_type)
             
-            # Store metrics for plotting
-            epochs.append(epoch + 1)
+            # Store validation metrics for plotting
             val_losses.append(perf)
             val_mses.append(mse_metric)
             val_qerrors.append(qerror_metric)
             
-            # Plot validation metrics
+            # Plot training and validation metrics
             if result_dir:
                 fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
                 
-                ax1.plot(epochs, val_losses)
-                ax1.set_title('Validation Loss')
-                # Log scale for loss
+                ax1.plot(epochs, train_losses, label='Train')
+                ax1.plot(epochs, val_losses, label='Validation')
+                ax1.set_title('Loss')
                 ax1.set_yscale('log')
                 ax1.set_xlabel('Epoch')
                 ax1.set_ylabel('Loss')
+                ax1.legend()
                 ax1.grid(True)
                 
-                ax2.plot(epochs, val_mses)
-                ax2.set_title('Validation MSE')
-                # Log scale for mse
+                ax2.plot(epochs, train_mses, label='Train')
+                ax2.plot(epochs, val_mses, label='Validation')
+                ax2.set_title('MSE')
                 ax2.set_yscale('log')
                 ax2.set_xlabel('Epoch')
                 ax2.set_ylabel('MSE')
+                ax2.legend()
                 ax2.grid(True)
                 
-                ax3.plot(epochs, val_qerrors)
-                ax3.set_title('Validation Q-Error')
-                # Log scale for q-error
+                ax3.plot(epochs, train_qerrors, label='Train')
+                ax3.plot(epochs, val_qerrors, label='Validation')
+                ax3.set_title('Q-Error')
                 ax3.set_yscale('log')
                 ax3.set_xlabel('Epoch')
                 ax3.set_ylabel('Q-Error')
+                ax3.legend()
                 ax3.grid(True)
                 
                 plt.tight_layout()
-                plt.savefig(result_dir / 'validation_metrics.png')
+                plt.savefig(result_dir / 'training_metrics.png')
                 plt.close()
                 
                 # Plot predictions vs truth after each epoch
@@ -146,9 +172,9 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
                 torch.save(model.state_dict(), save_path)
                 print(f"New best model saved to {save_path}")
                 
-        print(f'Epoch {epoch + 1}, Loss: {total_loss:.4f}, Time: {time.time() - prev_time:.2f}s, '
-              f'Val Loss: {perf:.4f}, Best Val Loss: {best_performance:.4f}, '
-              f'MSE: {mse_metric:.4f}, Q-Error: {qerror_metric:.4f}')
+        print(f'Epoch {epoch + 1}, Train Loss: {avg_train_loss:.4f}, Train Q-Error: {avg_train_qerror:.4f}, '
+              f'Val Loss: {perf:.4f}, Val Q-Error: {qerror_metric:.4f}, '
+              f'Best Val Loss: {best_performance:.4f}, Time: {time.time() - prev_time:.2f}s')
 
 
 def validate_model(model, criterion, val_loader, device='cpu', loss_type="mse"):
@@ -441,17 +467,18 @@ if __name__ == "__main__":
         'hidden_dim': 128,          # Hidden layer dimension
         
         # CostGNNv3 architecture parameters
-        'n_layers': 6,              # Number of GIN message-passing layers
+        'n_layers': 12,              # Number of GIN message-passing layers
         'use_jk': False,            # Whether to use Jumping Knowledge
         'jk_mode': 'cat',           # JK mode: 'cat', 'max', or 'lstm'
-        'use_residual': False,       # Whether to use residual connections
+        'use_residual': True,       # Whether to use residual connections
         'use_layer_norm': False,    # Whether to use layer normalization (disable for counting)
         'dropout': 0.0,             # Dropout probability
+        'aggr': 'add',              # Aggregation function for gin layers: 'add' or 'mean'
         
         # Training parameters
         'learning_rate': 0.0001,
         'batch_size': 128,
-        'num_epochs': 1000,
+        'num_epochs': 500,
         'loss_type': 'huber',         # Options: 'mse', 'qerror', 'huber'
         
         # Dataset parameters
@@ -460,7 +487,7 @@ if __name__ == "__main__":
         
         # Paths
         'root_dir': '',
-        'dataset_dir': '/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_training/new',
+        'dataset_dir': '/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new',
         
         # Other settings
         'enable_training': True,    # Set to False to skip training
@@ -539,7 +566,8 @@ if __name__ == "__main__":
             jk_mode=config['jk_mode'],
             use_residual=config['use_residual'],
             use_layer_norm=config['use_layer_norm'],
-            dropout=config['dropout']
+            dropout=config['dropout'],
+            aggr=config['aggr']
         ).to(device)
     else:
         raise ValueError(f"Unknown model type: {config['model_type']}")

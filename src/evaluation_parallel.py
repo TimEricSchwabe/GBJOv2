@@ -647,8 +647,12 @@ def process_single_query(args):
     
     try:
         # Get the torch data from one of the plans
-        plan_idx = 0  # Just use the first plan
-        torch_data = query.torch_data[plan_idx]
+        try:
+            plan_idx = 0  # Just use the first plan
+            torch_data = query.torch_data[plan_idx]
+        except Exception as e:
+            # queries are saved as single plans
+            torch_data = query
 
 
 
@@ -845,17 +849,25 @@ def process_single_query(args):
         if 'GBJO' in optimization_algorithms:
             # Run gradient optimization k times and pick the best result
             k = optimization_params.get('k', 1)  # Number of runs, default to 1
+            gbjo_verbose = optimization_params.get('gbjo_verbose', False)
             best_adjacency = None
             best_triples_num = None
             best_grad_pred_cost = float('inf')
             best_animation_data = None
             
+            # Create trajectory save directory if verbose is enabled
+            gbjo_save_dir = None
+            if gbjo_verbose and save_directory:
+                gbjo_save_dir = os.path.join(save_directory, "gbjo_trajectory", f"query_{query_index}")
+                os.makedirs(gbjo_save_dir, exist_ok=True)
+            
             for run_idx in range(k):
                 optimization_result = GBJO(
                     torch_data, model, device, 
                     optimization_steps=optimization_steps, 
-                    verbose=False,  # Always false for parallel execution
-                    **optimization_params
+                    verbose=gbjo_verbose,
+                    save_directory=gbjo_save_dir,
+                    **{k: v for k, v in optimization_params.items() if k not in ['gbjo_verbose']}
                 )
                 
                 # Handle different return types
@@ -1111,15 +1123,15 @@ if __name__ == "__main__":
     # Configuration for optimization
     config_wikidata_star = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl",
-        "model_path": "/home/tim/query_optimization/training_results/wikidata-star-new/model.pt",
-        "num_queries": 20,
+        "model_path": "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt", # current best: "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt"
+        "num_queries": 50,
         "optimization_steps": 500, # 2500
         "use_exhaustive": False,
         "use_dp": True,
         "dp_limit": 9,  # Set the limit here (e.g., 15 for star queries)
         "use_true_costs": True,
         "save_path": "optimization_results",
-        "num_workers": 3,  # Use all available cores
+        "num_workers": 8,  # Use all available cores
         "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"],
         "model_params": {
             "version": "v3",
@@ -1128,51 +1140,52 @@ if __name__ == "__main__":
             "n_layers": 6,
             "use_jk": False,
             "jk_mode": "cat",
-            "use_residual": False,
-            "use_layer_norm": True,
+            "use_residual": True,
+            "use_layer_norm": False,
             "dropout": 0.0,
         },
         "optimization_params": {
-            "k": 3,  # Number of gradient optimization runs
-            "learning_rate": 1, # 0.35
-            "lambda_acyclic": 3391.0,
-            "lambda_triple_in": 3334.0,
-            "lambda_triple_out": 2026.0,
-            "lambda_join_in": 2150.0,
-            "lambda_join_out": 1295.0,
-            "lambda_entropy": 0.0,
-            "lambda_total_penalty": 0.7,
-            "lambda_left_linear": 2157.0,
-            "init_tau": 15,
-            "min_tau": 1.0,
+            "k": 1,  # 1 Number of gradient optimization runs
+            "learning_rate": 0.85, # 0.35 or 1
+            "lambda_acyclic": 169, # 3391
+            "lambda_triple_in": 16.5,# 3334.0
+            "lambda_triple_out": 4.3,# 2026.0
+            "lambda_join_in": 91, # 2150.0
+            "lambda_join_out": 11.6,# 1295.0
+            "lambda_entropy": 0.0,# 0.0
+            "lambda_total_penalty": 0.5,# 0.7
+            "lambda_left_linear": 18.2,# 2157.0
+            "init_tau": 4.5, # 15
+            "min_tau": 0.48, # 1.0
             "tau_decay": 0.973,
             "use_temperature_annealing": True,
             "return_best": True,
-            "min_penalty_threshold": 3,
+            "min_penalty_threshold": 3.55,
             "use_lambda_ramping": True,
             "logit_sampling": "softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
-            "lambda_ramp_exponent": 5.3,
+            "lambda_ramp_exponent": 1.09, # 5.3
             "lr_warmup_steps": 46,
-            "gradient_clip_norm": 3.3,
+            "gradient_clip_norm": 2.6,
             "use_lr_scheduling": True,
             "decoding_method": "beam",
-            "use_gumbel_noise": False
+            "use_gumbel_noise": False,
+            "gbjo_verbose": False
         }
     }
 
     config_wikidata_path = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_optimization/queries.pkl",
-        "model_path": "/home/tim/query_optimization/training_results/gnn_20251216_202855/model.pt",
+        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new/dataset.pt",
+        "model_path": "/home/tim/query_optimization/training_results/wikidata-path-log1p/model.pt",
         "num_queries": 20,
         "optimization_steps": 500, #2500
         "use_exhaustive": False,
         "use_dp": True,
-        "use_true_costs": True,
+        "use_true_costs": False,
         "save_path": "optimization_results",
         "num_workers": 8,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "GEQO", "IterativeImprovement"], # ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"]
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"], # ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"]
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -1180,32 +1193,32 @@ if __name__ == "__main__":
             "n_layers": 6,
             "use_jk": False,
             "jk_mode": "cat",
-            "use_residual": False,
+            "use_residual": True,
             "use_layer_norm": False,
             "dropout": 0.0,
         },
         "optimization_params": { # params for GBJO
             "k": 1,  # Number of gradient optimization runs
             "learning_rate": 1, #0.5
-            "lambda_acyclic": 467.0,
-            "lambda_triple_in": 3194.0,
-            "lambda_triple_out": 3661.0,
-            "lambda_join_in": 1919.0,
-            "lambda_join_out": 1900.0,
+            "lambda_acyclic": 169, # 467.0
+            "lambda_triple_in": 16.5, # 3194.0
+            "lambda_triple_out": 4.3, # 3661.0
+            "lambda_join_in": 91, # 1919.0
+            "lambda_join_out": 11.6, # 1900.0
             "lambda_entropy": 0.0,
-            "lambda_total_penalty": 1.8,
-            "lambda_left_linear": 1900.0, #759
+            "lambda_total_penalty": 0.5, # 1.8
+            "lambda_left_linear": 18.2, # 1900.0
             "init_tau": 5,
-            "min_tau": 1.0,
+            "min_tau": 0.48, # 1.0
             "tau_decay": 0.973,
             "use_temperature_annealing": True,
             "return_best": True,
             "min_penalty_threshold": 4, # 0.5
             "use_lambda_ramping": True,
-            "logit_sampling": "dual-softmax",
+            "logit_sampling": "softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
-            "lambda_ramp_exponent": 7,
+            "lambda_ramp_exponent": 1.09, # 7
             "lr_warmup_steps": 150,
             "gradient_clip_norm": 4.1,
             "use_lr_scheduling": True,
@@ -1216,9 +1229,9 @@ if __name__ == "__main__":
     }
 
     config_lubm_star = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl",
-        "model_path": "/home/tim/query_optimization/meta_optimization_results/run_20251219_142626/best_model.pt", # /home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt
-        "num_queries": 20,
+        "queries_file": "/home/tim/query_optimization/datasets/plans/lubm/star-greedy/dataset.pt", # /home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl
+        "model_path": "/home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt", # /home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt
+        "num_queries": 100,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "optimization_steps": 500,
         "use_exhaustive": False,
@@ -1241,39 +1254,40 @@ if __name__ == "__main__":
         },
         "optimization_params": { # params for GBJO
             "k": 1,  # Number of gradient optimization runs
-            "learning_rate": 1.7, # 1.7
-            "lambda_acyclic": 3081.0, # 3081.0
-            "lambda_triple_in": 3714.0, # 3714.0
-            "lambda_triple_out": 135.0, # 135.0
-            "lambda_join_in": 1742.0, # 1742.0
-            "lambda_join_out": 1558.0, # 1558.0
+            "learning_rate": 0.85, # 1.7
+            "lambda_acyclic": 169, # 3081.0
+            "lambda_triple_in": 16.5, # 3714.0
+            "lambda_triple_out": 4.3, # 135.0
+            "lambda_join_in": 91, # 1742.0
+            "lambda_join_out": 11.6, # 1558.0
             "lambda_entropy": 0.0,
-            "lambda_total_penalty": 2.6, # 2.6
-            "lambda_left_linear": 2300.0, # 2300.0
+            "lambda_total_penalty": 0.5, # 2.6
+            "lambda_left_linear": 18.2, # 2300.0
             "init_tau": 4.5,
-            "min_tau": 1.0,
+            "min_tau": 0.48, #1.0
             "tau_decay": 0.963,
             "use_temperature_annealing": True,
             "return_best": True,
-            "min_penalty_threshold": 5,
+            "min_penalty_threshold": 3.55, # 5
             "use_lambda_ramping": True,
             "logit_sampling": "softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
-            "lambda_ramp_exponent": 6.5,
+            "lambda_ramp_exponent": 3, # 6.5
             "lr_warmup_steps": 50,
-            "gradient_clip_norm": 2,
+            "gradient_clip_norm": 2.6,
             "use_lr_scheduling": False,
             "decoding_method": "beam",
             "use_gumbel_noise": False,
             "use_swa": False,
+            "gbjo_verbose": True
         }
     }
 
     config_lubm_path = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl",
-        "model_path": "/home/tim/query_optimization/training_results/lubm-path-nice-v3-6-layer/model.pt",
-        "num_queries": 70,
+        "queries_file": "/home/tim/query_optimization/datasets/plans/lubm/path-greedy/dataset.pt", # /home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl
+        "model_path": "/home/tim/query_optimization/training_results/lubm-path-log1p/model.pt",
+        "num_queries": 100,
         "optimization_steps": 500,
         "use_exhaustive": False,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
@@ -1288,35 +1302,35 @@ if __name__ == "__main__":
             "n_layers": 6,
             "use_jk": False,
             "jk_mode": "cat",
-            "use_residual": False,
+            "use_residual": True,
             "use_layer_norm": False,
             "dropout": 0.0,
         },
         "num_workers": 10,  # Use all available cores
         "optimization_params": {
             "k": 1,  # Number of gradient optimization runs - 5
-            "learning_rate": 1.8, # 1.8
-            "lambda_acyclic": 4415.0,
-            "lambda_triple_in": 3027.0,
-            "lambda_triple_out": 790.0,
-            "lambda_join_in": 2197.0,
-            "lambda_join_out": 2204.0,
+            "learning_rate": 0.85, # 1.8
+            "lambda_acyclic": 169, # 4415.0
+            "lambda_triple_in": 16.5, # 3027.0
+            "lambda_triple_out": 4.3, # 790.0
+            "lambda_join_in": 91, # 2197.0
+            "lambda_join_out": 11.6, # 2204.0
             "lambda_entropy": 1, # 0
-            "lambda_total_penalty": 4.2 ,#4.2
-            "lambda_left_linear": 1910, # 1910
-            "init_tau": 3.7, #3.7
-            "min_tau": 1, # 1.0
+            "lambda_total_penalty": 1 ,#4.2
+            "lambda_left_linear": 18.2, # 1910.0
+            "init_tau": 4.5, #3.7
+            "min_tau": 0.48, # 1.0
             "tau_decay": 0.963, # 0.963
             "use_temperature_annealing": True,
             "return_best": True,
-            "min_penalty_threshold": 8.6,
+            "min_penalty_threshold": 3.55, # 8.6
             "use_lambda_ramping": True,
-            "logit_sampling": "dual-softmax",
+            "logit_sampling": "softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
-            "lambda_ramp_exponent": 6.8, # 6.8
+            "lambda_ramp_exponent": 6, # 6.8
             "lr_warmup_steps": 200,
-            "gradient_clip_norm": 1.9,
+            "gradient_clip_norm": 2.6,
             "use_lr_scheduling": False,
             "decoding_method": "greedy",
             "use_gumbel_noise": False,
@@ -1376,10 +1390,11 @@ if __name__ == "__main__":
             "decoding_method": "beam",
             "use_gumbel_noise": False,
             "use_swa": False,
+            "gbjo_verbose": True
         }
     }
 
-    config = config_lubm_star
+    config = config_wikidata_path
     
     # Create unique save directory based on datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1405,10 +1420,12 @@ if __name__ == "__main__":
         print(f"  {param}: {value}")
     
     # Load queries
-    sparql_queries = load_sparql_queries(config['queries_file'], config['num_queries'])
+    sparql_queries = load_sparql_queries(config['queries_file'])
     
     # Filter queries by max URI atoms per triple if configured
     sparql_queries = filter_queries_by_max_uri_atoms(sparql_queries, max_uri_atoms=2)
+
+    sparql_queries = sparql_queries[:config['num_queries']]
     
     # Filter queries by size if max_query_size is set
     if config.get('max_query_size') is not None:

@@ -15,7 +15,7 @@ import matplotlib.cm as cm
 
 # A list of experiment paths to load and combine
 experiment_paths = [
-    "/home/tim/query_optimization/hyperparam_search_results/paths_wikidata/join_optim_hpo",
+    "/home/tim/query_optimization/hpo_results/optuna_20251220_170039/gbjo_hpo",
 ]
 
 all_dfs = []

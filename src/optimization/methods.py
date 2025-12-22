@@ -63,6 +63,7 @@ def GBJO(
     use_gumbel_noise: bool = False,
     use_swa: bool = False,
     swa_update_interval: int = 10,
+    save_directory: str = None,  # Directory to save verbose plots
 ):
 
     # Move data 
@@ -88,11 +89,11 @@ def GBJO(
     class LogitsModel(torch.nn.Module):
         def __init__(self, n_edges):
             super().__init__()
-            #self.edge_logits = torch.nn.Parameter(torch.zeros(n_edges))
-            #self.edge_logits_slot2 = torch.nn.Parameter(torch.zeros(n_edges))
+            self.edge_logits = torch.nn.Parameter(torch.zeros(n_edges))
+            self.edge_logits_slot2 = torch.nn.Parameter(torch.zeros(n_edges))
             # or init them using random noise
-            self.edge_logits = torch.nn.Parameter(torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5)))
-            self.edge_logits_slot2 = torch.nn.Parameter(torch.tensor(0. + 0.1 * (torch.rand(num_edges) - 0.5)))
+            #self.edge_logits = torch.nn.Parameter(0.1 * (torch.rand(num_edges) - 0.5))
+            #self.edge_logits_slot2 = torch.nn.Parameter(0.1 * (torch.rand(num_edges) - 0.5))
             
     # 2. Initialize model and bind variables
     logits_model = LogitsModel(num_edges).to(device)
@@ -110,7 +111,9 @@ def GBJO(
         optimiser = optim.RAdam([edge_logits], lr=learning_rate)
         optimiser = optim_extra.Lookahead(optimiser, k=5, alpha=0.5)
         # or SGD with momentum
-        #optimiser = optim.SGD([edge_logits], lr=learning_rate, momentum=0.9)
+        #optimiser = optim.SGD([edge_logits], lr=learning_rate, momentum=0.9) #TODO
+        #optimiser = optim.Adam([edge_logits], lr=learning_rate) #TODO
+
 
     # 3. SWA Setup
     if use_swa:
@@ -559,7 +562,9 @@ def GBJO(
             triple_out_penalty_history,
             join_in_penalty_history,
             join_out_penalty_history,
-            entropy_penalty_history
+            entropy_penalty_history,
+            save_directory=save_directory,
+            show_plots=(save_directory is None)  # Only show interactively if not saving to file
         )
 
     with torch.no_grad():

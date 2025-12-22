@@ -16,6 +16,7 @@ from torch_geometric.typing import (
     Size,
     SparseTensor,
 )
+from torch_geometric.nn import GraphNorm
 
 
 class GINConv(MessagePassing):
@@ -158,7 +159,7 @@ class CostGNN(nn.Module):
 class CostGNNv2(nn.Module):
 	def __init__(self, node_feature_dim, hidden_dim):
 		super(CostGNNv2, self).__init__()
-		
+
 		self.projection = nn.Linear(node_feature_dim, hidden_dim)
 		
 		self.mlp1 = nn.Sequential(
@@ -195,6 +196,7 @@ class CostGNNv2(nn.Module):
 		
 		# Dropout for regularization
 		self.dropout = nn.Dropout(0.2)
+
 
 	def forward(self, x, edge_index, edge_weight=None, batch=None):
 		# For the first layer, project input to match hidden_dim for residual
@@ -285,9 +287,12 @@ class CostGNNv3(nn.Module):
         use_residual=False,
         use_layer_norm=False,
         dropout=0.0001,
+        aggr='add',
         **kwargs
     ):
         super(CostGNNv3, self).__init__()
+
+        self.final_graph_norm = GraphNorm(hidden_dim)
         
         self.n_layers = n_layers
         self.use_jk = use_jk
@@ -307,7 +312,7 @@ class CostGNNv3(nn.Module):
                 nn.GELU(),
                 nn.Linear(hidden_dim, hidden_dim)
             )
-            self.convs.append(GINConv(mlp, aggr='add')) #add or mean
+            self.convs.append(GINConv(mlp, aggr=aggr)) #add or mean
             
             if use_layer_norm:
                 self.layer_norms.append(nn.LayerNorm(hidden_dim))
@@ -384,6 +389,7 @@ class CostGNNv3(nn.Module):
 
     def forward(self, x, edge_index, edge_weight=None, batch=None):
         # Project input
+        x = torch.sign(x) * torch.log1p(torch.abs(x)) # TODO
         x = self.projection(x)
         
         # Store layer outputs for Jumping Knowledge
@@ -409,7 +415,7 @@ class CostGNNv3(nn.Module):
     
             
             # Activation
-            x = F.gelu(x)
+            #x = F.gelu(x) # TODO this should be removed ! it prevents subtraction from the residual as we force it to always be positive
 
 
             if self.use_residual:
@@ -426,18 +432,25 @@ class CostGNNv3(nn.Module):
         if self.jk is not None:
             x = self.jk(layer_outputs)
 
+        #x = self.final_graph_norm(x, batch) # TODO remove or put in config
+
         # Global pooling
         if batch is not None:
             x = scatter(x, batch, dim=0, reduce='add')
         else:
             x = torch.sum(x, dim=0)
+
+        # Optional: final layer norm
+        #x = F.layer_norm(x, (x.size(-1),))  #TODO remove or put in config
         
         # Output MLP
         x = self.fc1(x)
         x = F.gelu(x)
-        cost = self.fc2(x)
+        cost = self.fc2(x).squeeze(-1)
+        #L = 30.0  # choose based on your label range #TODO make this dynamic based on dataset
+        #cost = L * torch.tanh(cost / L)
 
-        return torch.squeeze(cost)
+        return cost
 
 
 class AddLearnableFingerprints(torch.nn.Module):
