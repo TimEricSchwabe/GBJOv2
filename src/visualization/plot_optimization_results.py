@@ -90,7 +90,8 @@ METHODS_MAP = {
     'II': 'Iterative Improvement',
     'GEQO': 'Genetic Search',
     'NeuralSort': 'Neural Sort',
-    'CMA': 'CMA'
+    'CMA': 'CMA',
+    'GBJO_CG': 'GBJO_CG'
 }
 
 # Define the list of methods to plot (keys from METHODS_MAP) determines Order and Selection
@@ -104,6 +105,7 @@ METHODS_TO_PLOT = [
     'random',
     'NeuralSort',
     'CMA'
+    'GBJO_CG'
 ]
 
 # Colorblind-friendly palette (Wong, 2011 / IBM Design)
@@ -118,6 +120,7 @@ METHOD_STYLES = {
     'Random': {'color': '#CC79A7', 'marker': 'X', 'linestyle': '--'},          # Reddish Purple
     'Neural Sort': {'color': '#666666', 'marker': 'h', 'linestyle': ':'},      # Dark Gray
     'CMA': {'color': '#000000', 'marker': '*', 'linestyle': '-.'},             # Black
+    'GBJO_CG': {'color': '#FF69B4', 'marker': '*', 'linestyle': '-.'},             # pink
 }
 
 def load_data(results_dir: str) -> pd.DataFrame:
@@ -672,7 +675,7 @@ def plot_performance_profile(df: pd.DataFrame, output_dir: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Plot optimization results.")
-    parser.add_argument("results_dir", nargs='?', default="optimization_results/LUBM-PATH", 
+    parser.add_argument("results_dir", nargs='?', default="optimization_results/run_20251223_142524", 
                         help="Directory containing detailed_results.json")
     args = parser.parse_args()
 

@@ -40,6 +40,7 @@ from model import CostGNNv2, CostGNNv3
 
 from optimization import (
     GBJO,
+    GBJO_LBFGS,
     GEQO,
     NeuralSort,
     GreedySearch,
@@ -681,8 +682,11 @@ def process_single_query(args):
         II_plan = None
         ns_plan = None
         cma_plan = None
+        lbfgs_plan = None
         II_pred_cost = float('inf')
         II_real_cost = float('inf')
+        lbfgs_pred_cost = float('inf')
+        lbfgs_real_cost = float('inf')
 
 
         if "GEQO" in optimization_algorithms:
@@ -904,6 +908,51 @@ def process_single_query(args):
                 if use_true_costs:
                     gradient_cost = gradient_plan.root.get_cost()
 
+        # Run GBJO with L-BFGS optimizer
+        if 'GBJO_LBFGS' in optimization_algorithms:
+            try:
+                # Create trajectory save directory if verbose is enabled
+                lbfgs_verbose = optimization_params.get('gbjo_verbose', False)
+                lbfgs_save_dir = None
+                if lbfgs_verbose and save_directory:
+                    lbfgs_save_dir = os.path.join(save_directory, "gbjo_lbfgs_trajectory", f"query_{query_index}")
+                    os.makedirs(lbfgs_save_dir, exist_ok=True)
+                
+                lbfgs_result = GBJO_LBFGS(
+                    torch_data, model, device,
+                    optimization_steps=optimization_steps,
+                    verbose=lbfgs_verbose,
+                    save_directory=lbfgs_save_dir,
+                    **{k: v for k, v in optimization_params.items() if k not in ['gbjo_verbose', 'k']}
+                )
+                
+                if len(lbfgs_result) == 4:
+                    lbfgs_adj, lbfgs_triples_num, lbfgs_pred_cost, _ = lbfgs_result
+                else:
+                    lbfgs_adj, lbfgs_triples_num, lbfgs_pred_cost = lbfgs_result
+                
+                lbfgs_plan = adjacency_to_query_with_real_triples(lbfgs_adj, len(triple_objs), triple_objs)
+                
+                # Validate the plan
+                is_valid, validation_msg = validate_plan(lbfgs_plan, triple_objs)
+                if not is_valid:
+                    print(f"Warning: Invalid GBJO_LBFGS plan for query {query_index}: {validation_msg}")
+                    lbfgs_plan = None
+                    lbfgs_pred_cost = float('inf')
+                    lbfgs_real_cost = float('inf')
+                else:
+                    if use_true_costs:
+                        lbfgs_real_cost = lbfgs_plan.root.get_cost()
+                
+                result["plans"]["GBJO_LBFGS"] = {
+                    "predicted_cost": float(lbfgs_pred_cost),
+                    "plan_string": plan_to_string(lbfgs_plan) if lbfgs_plan else None
+                }
+                if use_true_costs and is_valid:
+                    result["plans"]["GBJO_LBFGS"]["real_cost"] = float(lbfgs_real_cost)
+            except Exception as e:
+                print(f"Error in GBJO_LBFGS for query {query_index}: {e}")
+
         
         # Run greedy optimization
         if 'GreedySearch' in optimization_algorithms:
@@ -994,6 +1043,7 @@ def process_single_query(args):
                     "GEQO": GEQO_plan,
                     "NeuralSort": ns_plan,
                     "CMA": cma_plan,
+                    "GBJO_LBFGS": lbfgs_plan,
                 }
 
                 plans_dict = {}
@@ -1124,8 +1174,8 @@ if __name__ == "__main__":
     config_wikidata_star = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl",
         "model_path": "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt", # current best: "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt"
-        "num_queries": 50,
-        "optimization_steps": 500, # 2500
+        "num_queries": 10,
+        "optimization_steps": 30, # 2500
         "use_exhaustive": False,
         "use_dp": True,
         "dp_limit": 9,  # Set the limit here (e.g., 15 for star queries)
@@ -1146,13 +1196,13 @@ if __name__ == "__main__":
         },
         "optimization_params": {
             "k": 1,  # 1 Number of gradient optimization runs
-            "learning_rate": 0.85, # 0.35 or 1
+            "learning_rate": 5, # 0.35 or 1; best 0.85
             "lambda_acyclic": 169, # 3391
             "lambda_triple_in": 16.5,# 3334.0
             "lambda_triple_out": 4.3,# 2026.0
             "lambda_join_in": 91, # 2150.0
             "lambda_join_out": 11.6,# 1295.0
-            "lambda_entropy": 0.0,# 0.0
+            "lambda_entropy": 10.0,# 0.0
             "lambda_total_penalty": 0.5,# 0.7
             "lambda_left_linear": 18.2,# 2157.0
             "init_tau": 4.5, # 15
@@ -1165,13 +1215,13 @@ if __name__ == "__main__":
             "logit_sampling": "softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
-            "lambda_ramp_exponent": 1.09, # 5.3
+            "lambda_ramp_exponent": 1.09, # 5.3 best: 1.09
             "lr_warmup_steps": 46,
             "gradient_clip_norm": 2.6,
             "use_lr_scheduling": True,
             "decoding_method": "beam",
             "use_gumbel_noise": False,
-            "gbjo_verbose": False
+            "gbjo_verbose": True
         }
     }
 
@@ -1394,7 +1444,7 @@ if __name__ == "__main__":
         }
     }
 
-    config = config_wikidata_path
+    config = config_wikidata_star
     
     # Create unique save directory based on datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -23,12 +23,12 @@ from src.create_data.create_optimization_data import SPARQLQuery
 
 
 # differentiable temperature annealing
-def _temperature_anneal(init_tau: torch.Tensor, min_tau: float, decay: float, step: int, max_step: int) -> torch.Tensor:
+def _temperature_anneal(init_tau: torch.Tensor, min_tau: float, decay: float, step: int, max_step: int, device="cpu") -> torch.Tensor:
     """
     Exponential temperature annealing every step (differentiable version).
     """
     annealed = init_tau - (init_tau - min_tau) * (step / max_step)
-    return torch.maximum(annealed, torch.tensor(min_tau))
+    return torch.maximum(annealed, torch.tensor(min_tau, device=device))
 
 
 
@@ -179,7 +179,7 @@ def gbjo(query, C_theta, hyperparams, device="cpu"):
     returns final soft logits
     """
 
-    N_STEPS = 50
+    N_STEPS = 100
     lambda_triple_out = 1.0
     lambda_join_in = 1.0
     lambda_join_out = 1.0
@@ -192,16 +192,16 @@ def gbjo(query, C_theta, hyperparams, device="cpu"):
     triples_num = (N_NODES + 1) // 2  # n triples ➜ 2n‑1 nodes
 
     # Enumerate all candidate edges (excluding self‑loops) - we have all-to-all edges because we need to consider all possible plans
-    src, dst = torch.where(~torch.eye(N_NODES, dtype=torch.bool))
-    edge_index = torch.stack([src, dst], dim=0).to(device)
+    src, dst = torch.where(~torch.eye(N_NODES, dtype=torch.bool, device=device))
+    edge_index = torch.stack([src, dst], dim=0)
     num_edges = edge_index.size(1)
     
-    logits = torch.zeros(num_edges, requires_grad=True)
+    logits = torch.zeros(num_edges, requires_grad=True, device=device)
     v = torch.zeros_like(logits)  # velocity buffer
     g = torch.zeros_like(logits)  # gradient buffer
 
     for step in range(N_STEPS):
-        tau = _temperature_anneal(torch.tensor(5.0), 1.0, 0.999, step, N_STEPS)
+        tau = _temperature_anneal(torch.tensor(5.0, device=device), 1.0, 0.999, step, N_STEPS, device=device)
         learning_rate = hyperparams.eta()
         lambda_triple_out = hyperparams.lambda_triple_out()
         lambda_join_in = hyperparams.lambda_join_in()
@@ -244,7 +244,7 @@ def gbjo(query, C_theta, hyperparams, device="cpu"):
         # Calculate the ramping coefficient for the current step
         frac = min(1.0, step / N_STEPS)
         coefficient =  frac ** 3
-        coefficient = 1 # TODO currently no ramping, adapt if necessary
+        #coefficient = 1 # TODO currently no ramping, adapt if necessary
 
         # backprop cost to logits
         momentum = 0.9  # momentum coefficient
@@ -298,7 +298,7 @@ if __name__ == "__main__":
     USE_LAYER_NORM = False
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    ACCUMULATION_STEPS = 4  # aka batch size, we accumulate gradients over this many steps
+    ACCUMULATION_STEPS = 16  # aka batch size, we accumulate gradients over this many steps
 
     # Create a dedicated output directory for this run (matches evaluation_parallel.py style)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -311,7 +311,7 @@ if __name__ == "__main__":
     sparql_queries = torch.load(QUERY_PATH, weights_only=False)
     sparql_queries = sparql_queries['data']
     random.shuffle(sparql_queries)
-    sparql_queries = sparql_queries[:10]
+    sparql_queries = sparql_queries[:10000]
     #sparql_queries = [q for q in sparql_queries if len(q.triples) == 3]
     # print how many queries are loaded and used
     print(f"INFO: Loaded {len(sparql_queries)} queries")
@@ -350,13 +350,13 @@ if __name__ == "__main__":
             "weight_decay": 1e-2,
         },
         "hyperparams_init": {
-            "init_lambda_triple_out": 10.0,
-            "init_lambda_join_in": 1.0,
-            "init_lambda_join_out": 10.0,
+            "init_lambda_triple_out": 100.0,
+            "init_lambda_join_in": 100.0,
+            "init_lambda_join_out": 100.0,
             "init_lambda_acyclic": 100.0,
             "init_lambda_left_linear": 100.0,
             "init_lambda_entropy": 100.0,
-            "init_eta": 1.0,
+            "init_eta": 0.9,
             "init_tau": 5.0,
         },
     }
@@ -374,10 +374,23 @@ if __name__ == "__main__":
         "init_tau": [],
     }
 
+    # Define hyperparams from config
+    hyperparams = Hyperparams(
+        init_lambda_triple_out=config["hyperparams_init"]["init_lambda_triple_out"],
+        init_lambda_join_in=config["hyperparams_init"]["init_lambda_join_in"],
+        init_lambda_join_out=config["hyperparams_init"]["init_lambda_join_out"],
+        init_lambda_acyclic=config["hyperparams_init"]["init_lambda_acyclic"],
+        init_lambda_left_linear=config["hyperparams_init"]["init_lambda_left_linear"],
+        init_lambda_entropy=config["hyperparams_init"]["init_lambda_entropy"],
+        init_eta=config["hyperparams_init"]["init_eta"],
+        init_tau=config["hyperparams_init"]["init_tau"],
+    ).to(device)
+
+
     # define outer optimizer for psi_theta (updates C_theta params and hyperparams)
     #opt_theta = torch.optim.Adam(list(C_theta.parameters()) + list(hyperparams.parameters()), lr=1e-4)
     #opt_theta = torch.optim.Adam(hyperparams.parameters(), lr=1e-3)
-    opt_theta = torch.optim.Adam(C_theta.parameters(), lr=1e-4)
+    opt_theta = torch.optim.AdamW(C_theta.parameters(), lr=1e-5)
 
     # different lr for hyper and model
     #opt_theta = torch.optim.AdamW(
@@ -406,10 +419,21 @@ if __name__ == "__main__":
     # Freeze c_psi as we never train it
     freeze_(C_psi)
 
+
     average_loss_per_epoch = []
     average_total_penalty_per_epoch = []
     average_anchor_loss_per_epoch = []
     best_loss = float('inf')
+
+    # Step-wise loss tracking (average over every 100 steps)
+    avg_loss_per_100_steps = []
+    avg_penalty_per_100_steps = []
+    avg_anchor_loss_per_100_steps = []
+    # Accumulators for 100-step windows
+    window_loss = 0.0
+    window_penalty = 0.0
+    window_anchor_loss = 0.0
+    global_step = 0
 
     for i in range(0, EPOCHS):
         model_loss = 0
@@ -420,6 +444,8 @@ if __name__ == "__main__":
         single_query = sparql_queries[0]
         single_query = add_fingerprints_to_query_data(single_query, fingerprint_dim=64) # TODO remove jsut test for overfitting
 
+
+
         for idx, query in enumerate(tqdm(sparql_queries, desc=f"Epoch {i+1}/{EPOCHS}")):
             #query = sparql_queries[0]
             #query = query.torch_data[0]
@@ -427,14 +453,17 @@ if __name__ == "__main__":
             query = add_fingerprints_to_query_data(query, fingerprint_dim=64)
             #query = single_query # TODO remove
 
-
+            # Move query data to device
+            query.x = query.x.to(device)
+            query.edge_index = query.edge_index.to(device)
+            query.y = query.y.to(device)
 
             N_NODES = len(query.x)
             triples_num = (N_NODES + 1) // 2  # n triples ➜ 2n‑1 nodes
 
             # Enumerate all candidate edges (excluding self‑loops)
-            src, dst = torch.where(~torch.eye(N_NODES, dtype=torch.bool))
-            edge_index = torch.stack([src, dst], dim=0).to(device)
+            src, dst = torch.where(~torch.eye(N_NODES, dtype=torch.bool, device=device))
+            edge_index = torch.stack([src, dst], dim=0)
             num_edges = edge_index.size(1)
 
 
@@ -458,44 +487,45 @@ if __name__ == "__main__":
             ### Just to check the gradinet s
             grads = torch.autograd.grad(L_outer, hyperparams.parameters(), retain_graph=True, allow_unused=True)
             grad_norms = [None if g is None else g.norm().item() for g in grads]
-            print(f"INFO: Grad Norm: {grad_norms}")
+            #m: {grad_norms}")
 
             # predict penalty of final plan
             P_triple_out, P_join_in, P_join_out, P_acyclic, P_left_linear, P_entropy = compute_structure_penalties(edge_index, edge_weights, N_NODES, triples_num, device)
-            total_penalty = (
-                lambda_triple_out * P_triple_out
-                + lambda_join_in * P_join_in
-                + lambda_join_out * P_join_out
-                + lambda_acyclic * P_acyclic
-                + lambda_left_linear * P_left_linear
-                + lambda_entropy * P_entropy
+            L_struct_al = (
+               lambda_triple_out * P_triple_out
+               + lambda_join_in * P_join_in
+               + lambda_join_out * P_join_out
+               + lambda_acyclic * P_acyclic
+               + lambda_left_linear * P_left_linear
+               + lambda_entropy * P_entropy
             )
+
 
 
             # Supervised Anchor of C_theta on true cost
             anchor_plan_pred = C_theta(query.x, query.edge_index)
             L_anchor = anchor_loss(anchor_plan_pred, torch.log(query.y))
 
-            L_outer = (L_outer + L_anchor + total_penalty) / ACCUMULATION_STEPS
+            L_outer = (L_outer + L_anchor + 0.1 * L_struct_al) 
 
 
             # Checking gradient magnitude
             # Use allow_unused=True and don't unpack with comma (it returns a tuple of gradients)
-            g_m = torch.autograd.grad(L_outer, C_theta.parameters(), retain_graph=True, allow_unused=True)
-            g_s = torch.autograd.grad(total_penalty, C_theta.parameters(), retain_graph=True, allow_unused=True)
-            g_a = torch.autograd.grad(L_anchor, C_theta.parameters(), retain_graph=True, allow_unused=True)
+            #g_m = torch.autograd.grad(L_outer, C_theta.parameters(), retain_graph=True, allow_unused=True)
+            #g_s = torch.autograd.grad(L_struct_al, C_theta.parameters(), retain_graph=True, allow_unused=True)
+            #g_a = torch.autograd.grad(L_anchor, C_theta.parameters(), retain_graph=True, allow_unused=True)
 
             # Compute norms, filtering out None gradients (for unused params)
-            nm = torch.sqrt(sum(g.pow(2).sum() for g in g_m if g is not None))
-            ns = torch.sqrt(sum(g.pow(2).sum() for g in g_s if g is not None))
-            na = torch.sqrt(sum(g.pow(2).sum() for g in g_a if g is not None))
-            print(f"INFO: Grad Norm per loss term - L_outer: {nm.item()}, penalty: {ns.item()}, anchor: {na.item()}")
+            #nm = torch.sqrt(sum(g.pow(2).sum() for g in g_m if g is not None))
+            #ns = torch.sqrt(sum(g.pow(2).sum() for g in g_s if g is not None))
+            #na = torch.sqrt(sum(g.pow(2).sum() for g in g_a if g is not None))
+            #print(f"INFO: Grad Norm per loss term - L_outer: {nm.item()}, penalty: {ns.item()}, anchor: {na.item()}")
 
 
 
 
 
-            print(f"INFO: L_cost_pred: {cost_pred_psi.item()}, total_penalty: {total_penalty.item()} L_anchor: {L_anchor.item()}")
+            print(f"INFO: L_cost_pred: {cost_pred_psi.item()}, total_penalty: {L_struct_al.item()} L_anchor: {L_anchor.item()}")
 
 
             # Backprop Outer-cost through inner gbjo and take gradient step:
@@ -511,10 +541,59 @@ if __name__ == "__main__":
                 opt_theta.step()
                 opt_theta.zero_grad(set_to_none=True)
 
+
+
             model_loss += cost_pred_psi.item()
-            total_penalties += total_penalty.item()
+            total_penalties += L_struct_al.item()
             total_loss += L_outer.item()
             total_anchor_loss += L_anchor.item()
+
+            # Step-wise loss tracking (average over 100 steps)
+            global_step += 1
+            window_loss += cost_pred_psi.item()
+            window_penalty += L_struct_al.item()
+            window_anchor_loss += L_anchor.item()
+
+            # Log averaged plots every 100 steps
+            if global_step % 100 == 0:
+                avg_loss_per_100_steps.append(window_loss / 100)
+                avg_penalty_per_100_steps.append(window_penalty / 100)
+                avg_anchor_loss_per_100_steps.append(window_anchor_loss / 100)
+                window_loss = 0.0
+                window_penalty = 0.0
+                window_anchor_loss = 0.0
+
+                plt.figure()
+                plt.plot(avg_loss_per_100_steps, label='Avg Loss (100 steps)')
+                plt.xlabel("100-step Window")
+                plt.ylabel("Loss")
+                plt.title(f"Average Loss per 100 Steps (step {global_step})")
+                plt.legend()
+                plt.tight_layout()
+                plt.savefig(os.path.join(save_directory, 'step_loss_plot.png'))
+                plt.close()
+
+                plt.figure()
+                plt.plot(avg_penalty_per_100_steps, label='Avg Penalty (100 steps)')
+                plt.xlabel("100-step Window")
+                plt.ylabel("Penalty")
+                plt.title(f"Average Penalty per 100 Steps (step {global_step})")
+                plt.legend()
+                plt.tight_layout()
+                plt.savefig(os.path.join(save_directory, 'step_penalty_plot.png'))
+                plt.close()
+
+                plt.figure()
+                plt.plot(avg_anchor_loss_per_100_steps, label='Avg Anchor Loss (100 steps)')
+                plt.xlabel("100-step Window")
+                plt.ylabel("Anchor Loss")
+                plt.title(f"Average Anchor Loss per 100 Steps (step {global_step})")
+                plt.legend()
+                plt.tight_layout()
+                plt.savefig(os.path.join(save_directory, 'step_anchor_loss_plot.png'))
+                plt.close()
+            if global_step % 1000 == 0:
+                torch.save(C_theta.state_dict(), os.path.join(save_directory, f'model_epoch_{global_step}.pt'))
 
 
         #### Reporting at the end of the epoch ####
@@ -544,7 +623,7 @@ if __name__ == "__main__":
 
         plot_hyperparameter_history(hyperparam_history, save_directory)
 
-        torch.save(C_theta.state_dict(), os.path.join(save_directory, 'model_epoch_{i}.pt'))
+        torch.save(C_theta.state_dict(), os.path.join(save_directory, f'model_epoch_{i}.pt'))
 
 
         if total_loss < best_loss:

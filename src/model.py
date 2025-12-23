@@ -256,14 +256,7 @@ class CostGNNv2(nn.Module):
 
 class CostGNNv3(nn.Module):
     """
-    Improved CostGNN with smoother gradient flow for optimization.
-    
-    Features:
-    - Dynamic number of GIN layers (n_layers parameter)
-    - Optional Jumping Knowledge (JK) aggregation using PyG's JumpingKnowledge module
-    - GELU activation instead of ReLU (smooth gradients)
-    - Configurable residual connections and layer normalization
-    
+
     Args:
         node_feature_dim: Input feature dimension
         hidden_dim: Hidden layer dimension
@@ -292,7 +285,6 @@ class CostGNNv3(nn.Module):
     ):
         super(CostGNNv3, self).__init__()
 
-        self.final_graph_norm = GraphNorm(hidden_dim)
         
         self.n_layers = n_layers
         self.use_jk = use_jk
@@ -305,7 +297,9 @@ class CostGNNv3(nn.Module):
         
         self.convs = nn.ModuleList()
         self.layer_norms = nn.ModuleList() if use_layer_norm else None
-        
+        self.final_graph_norm = GraphNorm(hidden_dim)
+
+        # GINConv layers for message passing	
         for i in range(n_layers):
             mlp = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim),
@@ -317,12 +311,6 @@ class CostGNNv3(nn.Module):
             if use_layer_norm:
                 self.layer_norms.append(nn.LayerNorm(hidden_dim))
         
-        # ReZero: learnable scales starting at 0 for each layer
-        # At init, conv output is multiplied by 0, so only residual passes through
-        # The model learns to gradually incorporate conv layers during training
-        #self.layer_scales = nn.ParameterList([
-        #    nn.Parameter(torch.zeros(1)) for _ in range(n_layers)
-        #])
         
         # Dropout
         self.dropout = nn.Dropout(dropout)
@@ -330,7 +318,6 @@ class CostGNNv3(nn.Module):
         # Jumping Knowledge module from PyG
         # Aggregates representations from all layers
         if use_jk:
-            # For LSTM mode, we need to pass channels and num_layers
             if jk_mode == 'lstm':
                 self.jk = JumpingKnowledge(mode=jk_mode, channels=hidden_dim, num_layers=n_layers)
             else:
@@ -389,7 +376,7 @@ class CostGNNv3(nn.Module):
 
     def forward(self, x, edge_index, edge_weight=None, batch=None):
         # Project input
-        x = torch.sign(x) * torch.log1p(torch.abs(x)) # TODO
+        x = torch.sign(x) * torch.log1p(torch.abs(x))
         x = self.projection(x)
         
         # Store layer outputs for Jumping Knowledge
@@ -398,29 +385,18 @@ class CostGNNv3(nn.Module):
         # Message passing layers
         for i, conv in enumerate(self.convs):
 
-						# Layer normalization
             if self.use_layer_norm:
                 x = self.layer_norms[i](x)
 
             residual = x if self.use_residual else None
 
-
-
-            
-            # Graph convolution
             if edge_weight is not None:
                 x = conv(x, edge_index, edge_weight=edge_weight)
             else:
                 x = conv(x, edge_index)
-    
-            
-            # Activation
-            #x = F.gelu(x) # TODO this should be removed ! it prevents subtraction from the residual as we force it to always be positive
-
 
             if self.use_residual:
                 x = residual + x
-            # Dropout (skip on last layer if not using JK)
             if i < self.n_layers - 1:
                 pass
                 #x = self.dropout(x)
@@ -428,11 +404,8 @@ class CostGNNv3(nn.Module):
             # Store for JK
             layer_outputs.append(x)
         
-        # Jumping Knowledge aggregation using PyG module
         if self.jk is not None:
             x = self.jk(layer_outputs)
-
-        #x = self.final_graph_norm(x, batch) # TODO remove or put in config
 
         # Global pooling
         if batch is not None:
@@ -440,15 +413,11 @@ class CostGNNv3(nn.Module):
         else:
             x = torch.sum(x, dim=0)
 
-        # Optional: final layer norm
-        #x = F.layer_norm(x, (x.size(-1),))  #TODO remove or put in config
-        
         # Output MLP
         x = self.fc1(x)
         x = F.gelu(x)
         cost = self.fc2(x).squeeze(-1)
-        #L = 30.0  # choose based on your label range #TODO make this dynamic based on dataset
-        #cost = L * torch.tanh(cost / L)
+
 
         return cost
 
