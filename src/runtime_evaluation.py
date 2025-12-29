@@ -2,7 +2,7 @@
 Runtime evaluation script for query optimization approaches.
 
 This script generates random queries of increasing sizes and measures the runtime
-of different optimization approaches: Dynamic Programming, Greedy, and Gradient-based.
+of different optimization approaches: DP, Greedy, GBJO, II, GEQO, CMA-ES, NeuralSort.
 
 All functions are redefined to make it easily portable to other machines (not elegant)
 """
@@ -22,6 +22,16 @@ from dataclasses import dataclass
 import torch.optim as optim
 import graphviz
 import itertools
+
+# Add the parent directory to Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(os.path.dirname(__file__))
+
+import src.data as data_module
+sys.modules['explicit_join_model.data'] = data_module
+sys.modules['explicit_join_model'] = sys.modules['src']
+
+
 
 import requests
 import re
@@ -48,11 +58,19 @@ from torch_geometric.typing import (
     SparseTensor,
 )
 
-import scienceplots
-plt.style.use('science')
+#import scienceplots
+#plt.style.use('science')
 
 
-from optimization.methods import greedy_optimize_query, dp_leftdeep_best_plan, optimize_query_gumbel, optimize_query_gumbel_efficient_reduced
+from optimization import (
+    GBJO,
+    GreedySearch,
+    DPLinear,
+    IterativeImprovement,
+    GEQO,
+    CMA,
+    NeuralSort,
+)
 from model import CostGNNv2
 from data import Triple, Join, Query, Entity
 
@@ -245,37 +263,69 @@ def benchmark_method(method_func, query_data, model, device, method_name: str, *
         Tuple of (runtime_seconds, success_flag)
     """
     try:
-
         query_data = query_data.to(device)
-
         start_time = time.time()
-        
+
+        # Keep all methods silent for benchmarking
         if method_name == "Greedy":
             n_triples = (query_data.num_nodes + 1) // 2
             original_triples = create_dummy_triples(n_triples)
-            result = method_func(query_data, model, original_triples, device, verbose=False)
-        elif method_name == "Gradient":
-            result = method_func(
-                query_data, model, device,
-                optimization_steps=kwargs.get('optimization_steps', 250),
+            _ = method_func(query_data, model, original_triples, device, verbose=False)
+
+        elif method_name == "GBJO":
+            _ = method_func(
+                query_data,
+                model,
+                device,
+                optimization_steps=kwargs.get("optimization_steps", 250),
                 verbose=False,
-                **{k: v for k, v in kwargs.items() if k != 'optimization_steps'}
+                **{k: v for k, v in kwargs.items() if k != "optimization_steps"},
             )
+
+        elif method_name == "NeuralSort":
+            _ = method_func(
+                query_data,
+                model,
+                device,
+                optimization_steps=kwargs.get("optimization_steps", 250),
+                **{k: v for k, v in kwargs.items() if k != "optimization_steps"},
+            )
+
+        elif method_name == "CMA":
+            _ = method_func(
+                query_data,
+                model,
+                device,
+                optimization_steps=kwargs.get("optimization_steps", 250),
+                verbose=False,
+                **{k: v for k, v in kwargs.items() if k != "optimization_steps"},
+            )
+
+        elif method_name in ("II", "GEQO"):
+            # Both accept (query_data, model, optimization_steps, device)
+            _ = method_func(
+                query_data,
+                model,
+                kwargs.get("optimization_steps", 250),
+                device,
+            )
+
+        elif method_name == "DP":
+            _ = method_func(query_data, model, device)
+
         else:
-            # DP method
-            result = method_func(query_data, model, device)
-        
+            raise ValueError(f"Unknown method_name for benchmarking: {method_name}")
+
         end_time = time.time()
         runtime = end_time - start_time
-        
         return runtime, True
-        
+
     except Exception as e:
-        raise e
         print(f"Error in {method_name}: {e}")
-        return float('inf'), False
+        return float("inf"), False
 
 def run_runtime_evaluation(
+    optimization_steps: int = 10,
     query_sizes: List[int] = list(range(3, 11)),
     num_trials_per_size: int = 5,
     device: str = 'cpu',
@@ -324,38 +374,48 @@ def run_runtime_evaluation(
                     
                     # Warmup Greedy
                     _, _ = benchmark_method(
-                        greedy_optimize_query, warmup_query_data, model, device, "Greedy"
+                        GreedySearch, warmup_query_data, model, device, "Greedy"
                     )
                     
-                    # Warmup Gradient
-                    warmup_gradient_config = {
-                        'optimization_steps': 10,  # Shorter for warmup
-                        'learning_rate': 1.0,
-                        'lambda_acyclic': 1000.0,
-                        'lambda_triple_in': 1000.0,
-                        'lambda_triple_out': 1000.0,
-                        'lambda_join_in': 500.0,
-                        'lambda_join_out': 1000.0,
-                        'lambda_left_linear': 1000.0,
-                        'lambda_entropy': 0.0,
-                        'lambda_total_penalty': 1.0,
-                        'init_tau': 10.0,
-                        'min_tau': 1.0,
-                        'tau_decay': 0.999,
-                        'use_temperature_annealing': True,
-                        'return_best': True,
-                        'min_penalty_threshold': 0.1,
-                        'use_lambda_ramping': False,
-                        'logit_sampling': 'dual-softmax',
-                        'save_animation_data': False,
-                        'animation_save_interval': 10,
-                        'print_times': False
+                    warmup_gbjo_config = {
+                        "optimization_steps": 50,  # Shorter for warmup
+                        "learning_rate": 1.0,
+                        "lambda_acyclic": 1000.0,
+                        "lambda_triple_in": 1000.0,
+                        "lambda_triple_out": 1000.0,
+                        "lambda_join_in": 500.0,
+                        "lambda_join_out": 1000.0,
+                        "lambda_left_linear": 1000.0,
+                        "lambda_entropy": 0.0,
+                        "lambda_total_penalty": 1.0,
+                        "init_tau": 10.0,
+                        "min_tau": 1.0,
+                        "tau_decay": 0.999,
+                        "use_temperature_annealing": True,
+                        "return_best": True,
+                        "min_penalty_threshold": 0.1,
+                        "use_lambda_ramping": False,
+                        "logit_sampling": "softmax",
+                        "save_animation_data": False,
+                        "animation_save_interval": 10,
                     }
-                    
+
                     _, _ = benchmark_method(
-                        optimize_query_gumbel_efficient_reduced, warmup_query_data, model, device, "Gradient",
-                        **warmup_gradient_config
+                        GBJO,
+                        warmup_query_data,
+                        model,
+                        device,
+                        "GBJO",
+                        **warmup_gbjo_config,
                     )
+
+                    # Optional warmups for other methods (best-effort)
+                    _, _ = benchmark_method(DPLinear, warmup_query_data, model, device, "DP")
+                    _, _ = benchmark_method(IterativeImprovement, warmup_query_data, model, device, "II", optimization_steps=50)
+                    _, _ = benchmark_method(GEQO, warmup_query_data, model, device, "GEQO", optimization_steps=50)
+                    _, _ = benchmark_method(NeuralSort, warmup_query_data, model, device, "NeuralSort", optimization_steps=50, learning_rate=0.1)
+                    # CMA depends on nevergrad; keep best-effort
+                    _, _ = benchmark_method(CMA, warmup_query_data, model, device, "CMA", optimization_steps=50)
                     
                 except Exception as e:
                     print(f"Warning: Warmup failed for size {warmup_size}, trial {warmup_trial}: {e}")
@@ -364,36 +424,52 @@ def run_runtime_evaluation(
         print("Warmup completed!")
     
     results = {
-        'Greedy': {size: [] for size in query_sizes},
-        'Gradient': {size: [] for size in query_sizes}
+        "Greedy": {size: [] for size in query_sizes},
+        "GBJO": {size: [] for size in query_sizes},
+        "II": {size: [] for size in query_sizes},
+        "GEQO": {size: [] for size in query_sizes},
+        "CMA": {size: [] for size in query_sizes},
+        "NeuralSort": {size: [] for size in query_sizes},
     }
     
     if include_dp:
-        results['DP'] = {size: [] for size in query_sizes}
+        results["DP"] = {size: [] for size in query_sizes}
     
     # Method configurations
-    gradient_config = {
-        'optimization_steps': 500,
-        'learning_rate': 1.0,
-        'lambda_acyclic': 1000.0,
-        'lambda_triple_in': 1000.0,
-        'lambda_triple_out': 1000.0,
-        'lambda_join_in': 500.0,
-        'lambda_join_out': 1000.0,
-        'lambda_left_linear': 1000.0,
-        'lambda_entropy': 0.0,
-        'lambda_total_penalty': 1.0,
-        'init_tau': 10.0,
-        'min_tau': 1.0,
-        'tau_decay': 0.999,
-        'use_temperature_annealing': True,
-        'return_best': True,
-        'min_penalty_threshold': 0.1,
-        'use_lambda_ramping': False,
-        'logit_sampling': 'dual-softmax',
-        'save_animation_data': False,
-        'animation_save_interval': 10,
-        'print_times': False
+    gbjo_config = {
+        "optimization_steps": optimization_steps,
+        "learning_rate": 1.0,
+        "lambda_acyclic": 1000.0,
+        "lambda_triple_in": 1000.0,
+        "lambda_triple_out": 1000.0,
+        "lambda_join_in": 500.0,
+        "lambda_join_out": 1000.0,
+        "lambda_left_linear": 1000.0,
+        "lambda_entropy": 0.0,
+        "lambda_total_penalty": 1.0,
+        "init_tau": 10.0,
+        "min_tau": 1.0,
+        "tau_decay": 0.999,
+        "use_temperature_annealing": True,
+        "return_best": True,
+        "min_penalty_threshold": 0.1,
+        "use_lambda_ramping": False,
+        "logit_sampling": "softmax",
+        "save_animation_data": False,
+        "animation_save_interval": 10,
+    }
+
+    # Method-specific knobs (kept small-ish by default)
+    ii_config = {"optimization_steps": 50} # TODO
+    geqo_config = {"optimization_steps": 50}
+    cma_config = {"optimization_steps": 1000}
+    neuralsort_config = {
+        "optimization_steps": optimization_steps,
+        "learning_rate": 0.1,
+        "init_tau": 1.0,
+        "tau_decay": 0.99,
+        "min_tau": 0.1,
+        "return_best": True,
     }
     
     # Run evaluation for each query size
@@ -407,28 +483,59 @@ def run_runtime_evaluation(
             # Benchmark DP (only if enabled)
             if include_dp:
                 dp_time, dp_success = benchmark_method(
-                    dp_leftdeep_best_plan, query_data, model, device, "DP"
+                    DPLinear, query_data, model, device, "DP"
                 )
                 if dp_success:
-                    results['DP'][query_size].append(dp_time)
+                    results["DP"][query_size].append(dp_time)
                 print(f"  DP trial {trial+1}: {dp_time:.4f}s")
             
             # Benchmark Greedy
             greedy_time, greedy_success = benchmark_method(
-                greedy_optimize_query, query_data, model, device, "Greedy"
+                GreedySearch, query_data, model, device, "Greedy"
             )
             if greedy_success:
-                results['Greedy'][query_size].append(greedy_time)
+                results["Greedy"][query_size].append(greedy_time)
             print(f"  Greedy trial {trial+1}: {greedy_time:.4f}s")
             
-            # Benchmark Gradient
-            gradient_time, gradient_success = benchmark_method(
-                optimize_query_gumbel_efficient_reduced, query_data, model, device, "Gradient",
-                **gradient_config
+            # Benchmark GBJO
+            gbjo_time, gbjo_success = benchmark_method(
+                GBJO, query_data, model, device, "GBJO", **gbjo_config
             )
-            if gradient_success:
-                results['Gradient'][query_size].append(gradient_time)
-            print(f"  Gradient trial {trial+1}: {gradient_time:.4f}s")
+            if gbjo_success:
+                results["GBJO"][query_size].append(gbjo_time)
+            print(f"  GBJO trial {trial+1}: {gbjo_time:.4f}s")
+
+            # Benchmark Iterative Improvement
+            ii_time, ii_success = benchmark_method(
+                IterativeImprovement, query_data, model, device, "II", **ii_config
+            )
+            if ii_success:
+                results["II"][query_size].append(ii_time)
+            print(f"  II trial {trial+1}: {ii_time:.4f}s")
+
+            # Benchmark GEQO
+            geqo_time, geqo_success = benchmark_method(
+                GEQO, query_data, model, device, "GEQO", **geqo_config
+            )
+            if geqo_success:
+                results["GEQO"][query_size].append(geqo_time)
+            print(f"  GEQO trial {trial+1}: {geqo_time:.4f}s")
+
+            # Benchmark CMA-ES (Nevergrad)
+            cma_time, cma_success = benchmark_method(
+                CMA, query_data, model, device, "CMA", **cma_config
+            )
+            if cma_success:
+                results["CMA"][query_size].append(cma_time)
+            print(f"  CMA trial {trial+1}: {cma_time:.4f}s")
+
+            # Benchmark NeuralSort
+            ns_time, ns_success = benchmark_method(
+                NeuralSort, query_data, model, device, "NeuralSort", **neuralsort_config
+            )
+            if ns_success:
+                results["NeuralSort"][query_size].append(ns_time)
+            print(f"  NeuralSort trial {trial+1}: {ns_time:.4f}s")
     
     # Calculate and print summary statistics
     print("\n" + "="*50)
@@ -470,9 +577,33 @@ def create_runtime_plot(
 
     fontsize = 12
     
-    colors = {'DP': '#999999', 'Greedy': '#666666', 'Gradient': 'black'}
-    markers = {'DP': 'o', 'Greedy': 's', 'Gradient': '^'}
-    linestyles = {'DP': ':', 'Greedy': '--', 'Gradient': '-'}
+    colors = {
+        "DP": "#999999",
+        "Greedy": "#666666",
+        "GBJO": "black",
+        "II": "#9b59b6",
+        "GEQO": "#f39c12",
+        "CMA": "#e91e63",
+        "NeuralSort": "#1abc9c",
+    }
+    markers = {
+        "DP": "o",
+        "Greedy": "s",
+        "GBJO": "^",
+        "II": "D",
+        "GEQO": "P",
+        "CMA": "X",
+        "NeuralSort": "v",
+    }
+    linestyles = {
+        "DP": ":",
+        "Greedy": "--",
+        "GBJO": "-",
+        "II": "-.",
+        "GEQO": (0, (3, 1, 1, 1)),
+        "CMA": (0, (1, 1)),
+        "NeuralSort": (0, (5, 2)),
+    }
     
     for method in results:
         sizes = []
@@ -487,22 +618,22 @@ def create_runtime_plot(
                 std_times.append(np.std(times))
         
         if sizes:
-            plt.plot(sizes, mean_times, label=method, color=colors[method], 
-                    marker=markers[method], linestyle=linestyles[method], 
-                    markersize=6, linewidth=1.5)
+            plt.plot(
+                sizes,
+                mean_times,
+                label=method,
+                color=colors.get(method, "black"),
+                marker=markers.get(method, "o"),
+                linestyle=linestyles.get(method, "-"),
+                markersize=6,
+                linewidth=1.5,
+            )
     
     plt.xlabel('Query Size', fontsize=fontsize)
     plt.ylabel('Time (s)', fontsize=fontsize)
 
     plt.xticks(fontsize=fontsize-1)
     plt.yticks(fontsize=fontsize-1)
-    
-    # Dynamic title based on included methods
-    methods_included = list(results.keys())
-    if 'DP' in methods_included:
-        title = 'Runtime Comparison: DP vs Greedy vs Gradient-based Optimization'
-    else:
-        title = 'Runtime Comparison: Greedy vs Gradient-based Optimization'
     
     plt.legend(fontsize=fontsize-1)
     plt.yscale('log')  # Use log scale for better visualization
@@ -538,13 +669,14 @@ def save_results_to_file(results: Dict, filename: str = 'runtime_results.txt'):
 if __name__ == "__main__":
     # Configuration
     config = {
-        'query_sizes': list(range(3, 25)), 
+        'query_sizes': list(range(3, 12)), 
         'num_trials_per_size': 1,           # Number of trials per size
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+        'optimization_steps': 10,
         'save_plot': True,
         'plot_filename': 'runtime_comparison.pdf',
-        'include_dp': False,  # Set to False to exclude DP and compare only Greedy vs Gradient
-        'use_compile': False  # Set to True to enable torch.compile optimization
+        'include_dp': True,  # Set to False to exclude DP from the comparison
+        'use_compile': False  # Set to True to enable torch.compile optimization TODO we need to implement this again
     }
     
     print("Starting Runtime Evaluation")

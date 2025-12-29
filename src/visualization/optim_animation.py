@@ -405,7 +405,7 @@ def generate_animations_for_run(run_directory, fps=10, use_tree_layout=True, max
 def main():
     """Main function to generate animations."""
     # Configuration parameters
-    run_directory = "optimization_results/run_20250606_123336"
+    run_directory = "optimization_results/run_20251223_160907"
     fps = 10
     use_tree_layout = True
     max_edge_weight = 2.0

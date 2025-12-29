@@ -73,6 +73,7 @@ def sample_grouped_gumbel_softmax(edge_logits: torch.Tensor,
 
     
     if use_gumbel_noise:
+        raise NotImplementedError("Gumbel noise is not allowed !")
         g = sample_gumbel(edge_logits.shape, device=edge_logits.device)
         scaled_logits = (edge_logits + g) / temperature
     else:

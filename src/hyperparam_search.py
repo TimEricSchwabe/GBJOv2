@@ -680,25 +680,25 @@ def get_cma_search_space():
     import nevergrad as ng
     
     return ng.p.Dict(
-        learning_rate=ng.p.Log(lower=0.1, upper=2.0, init=1),
+        learning_rate=ng.p.Log(lower=0.1, upper=20.0, init=1),
 
-        lambda_acyclic=ng.p.Log(lower=1.0, upper=1000.0, init=10.0),
-        lambda_triple_in=ng.p.Log(lower=1.0, upper=1000.0, init=10.0),
-        lambda_triple_out=ng.p.Log(lower=1.0, upper=1000.0, init=10.0),
-        lambda_join_in=ng.p.Log(lower=1.0, upper=1000.0, init=10.0),
-        lambda_join_out=ng.p.Log(lower=1.0, upper=1000.0, init=10.0),
-        lambda_left_linear=ng.p.Log(lower=1.0, upper=1000.0, init=10.0),
+        lambda_acyclic=ng.p.Log(lower=1.0, upper=100.0, init=1.0),
+        lambda_triple_in=ng.p.Log(lower=1.0, upper=100.0, init=1.0),
+        lambda_triple_out=ng.p.Log(lower=1.0, upper=100.0, init=1.0),
+        lambda_join_in=ng.p.Log(lower=1.0, upper=100.0, init=1.0),
+        lambda_join_out=ng.p.Log(lower=1.0, upper=100.0, init=1.0),
+        lambda_left_linear=ng.p.Log(lower=1.0, upper=100.0, init=1.0),
 
-        lambda_total_penalty=ng.p.Scalar(lower=0.1, upper=1.0, init=0.5),
+        lambda_total_penalty=ng.p.Scalar(lower=0., upper=1.0, init=0.5),
 
-        init_tau=ng.p.Log(lower=1.0, upper=10.0, init=3.0),
+        init_tau=ng.p.Log(lower=1.0, upper=20.0, init=3.0),
         min_tau=ng.p.Log(lower=0.1, upper=2.0, init=1),
 
         lambda_ramp_exponent=ng.p.Scalar(lower=1.0, upper=10.0, init=2.0),
         min_penalty_threshold=ng.p.Scalar(lower=1.0, upper=10.0, init=3.0),
 
         # Gradient settings: linear
-        gradient_clip_norm=ng.p.Scalar(lower=1.0, upper=5.0, init=2.0),
+        gradient_clip_norm=ng.p.Scalar(lower=1.0, upper=100.0, init=2.0),
     )
 
 
@@ -884,17 +884,17 @@ if __name__ == "__main__":
         "backend": "cma",
         
         # Data paths
-        "dataset_path": "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_training/new/dataset.pt",
-        "model_path": "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt",
+        "dataset_path": "/home/tim/query_optimization/datasets/plans/lubm/path-greedy/dataset.pt",
+        "model_path": "/home/tim/query_optimization/training_results/lubm-path-log1p/model.pt",
         
         # Evaluation settings
-        "num_plans": 1000,  # Number of plans to evaluate per trial
-        "optimization_steps": 500,  # GBJO optimization steps per plan
+        "num_plans": 400,  # Number of plans to evaluate per trial
+        "optimization_steps": 10,  # GBJO optimization steps per plan
         "penalty_per_failure": 1e-4,  # Penalty added for failed optimizations
         "fingerprint_dim": 64,  # Fingerprint dimension for join nodes
         
         # Search settings
-        "max_trials": 100,  # Number of trials/iterations for the search
+        "max_trials": 1000,  # Number of trials/iterations for the search
         "cpus_per_trial": 2,  # CPUs per trial (for Ray Tune)
         "gpus_per_trial": 0,  # GPUs per trial (for Ray Tune)
         "max_concurrent_trials": 6,  # Max parallel trials (for Ray Tune)
@@ -922,7 +922,7 @@ if __name__ == "__main__":
             "logit_sampling": "softmax",
             "use_temperature_annealing": True,
             "return_best": True,
-            "use_lr_scheduling": False,
+            "use_lr_scheduling": True,
             "decoding_method": "beam",
             "use_gumbel_noise": False,
             "use_swa": False,

@@ -467,7 +467,7 @@ if __name__ == "__main__":
         'hidden_dim': 128,          # Hidden layer dimension
         
         # CostGNNv3 architecture parameters
-        'n_layers': 12,              # Number of GIN message-passing layers
+        'n_layers': 6,              # Number of GIN message-passing layers
         'use_jk': False,            # Whether to use Jumping Knowledge
         'jk_mode': 'cat',           # JK mode: 'cat', 'max', or 'lstm'
         'use_residual': True,       # Whether to use residual connections

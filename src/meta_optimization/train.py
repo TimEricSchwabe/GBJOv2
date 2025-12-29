@@ -18,7 +18,7 @@ sys.path.append(os.path.dirname(__file__))
 
 from model import CostGNNv3
 from optimization.gumbel_utils import sample_grouped_gumbel_softmax
-from utils.data_utils import load_sparql_queries
+from utils.data_utils import load_sparql_queries, filter_queries_by_max_uri_atoms
 from src.create_data.create_optimization_data import SPARQLQuery
 
 
@@ -29,6 +29,82 @@ def _temperature_anneal(init_tau: torch.Tensor, min_tau: float, decay: float, st
     """
     annealed = init_tau - (init_tau - min_tau) * (step / max_step)
     return torch.maximum(annealed, torch.tensor(min_tau, device=device))
+
+
+def _cosine_anneal(frac: torch.Tensor, start: torch.Tensor, end: torch.Tensor) -> torch.Tensor:
+    """
+    Cosine anneal from `start` -> `end` over frac in [0,1].
+    Differentiable w.r.t. start/end.
+    """
+    frac = frac.clamp(0.0, 1.0)
+    return end + 0.5 * (start - end) * (1.0 + torch.cos(torch.pi * frac))
+
+
+def _one_cycle_lr(
+    step: int,
+    total_steps: int,
+    *,
+    max_lr: torch.Tensor,
+    pct_start: float = 0.2,
+    div_factor: float = 5.0,
+    final_div_factor: float = 20.0,
+) -> torch.Tensor:
+    """
+    Differentiable approximation of PyTorch OneCycleLR (anneal_strategy='cos').
+    Mirrors `methods.py` OneCycleLR config but works inside a fully differentiable unroll.
+    """
+    device = max_lr.device
+    max_lr = max_lr.to(device)
+    initial_lr = max_lr / torch.tensor(div_factor, device=device)
+    final_lr = max_lr / torch.tensor(final_div_factor, device=device)
+
+    # phase split
+    warmup_steps = int(total_steps * pct_start)
+    warmup_steps = max(1, min(warmup_steps, total_steps - 1))
+    down_steps = max(1, total_steps - warmup_steps)
+
+    if step < warmup_steps:
+        # map step in [0..warmup_steps-1] -> frac in (0..1]
+        frac = torch.tensor((step + 1) / warmup_steps, device=device, dtype=torch.float32)
+        # cosine increase: initial -> max
+        return _cosine_anneal(1.0 - frac, start=max_lr, end=initial_lr)
+
+    # cosine decay: max -> final
+    frac = torch.tensor((step - warmup_steps + 1) / down_steps, device=device, dtype=torch.float32)
+    return _cosine_anneal(frac, start=max_lr, end=final_lr)
+
+
+def _one_cycle_momentum(
+    step: int,
+    total_steps: int,
+    *,
+    base_momentum: float = 0.85,
+    max_momentum: float = 0.95,
+    pct_start: float = 0.2,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """
+    Differentiable approximation of OneCycleLR's cycle_momentum=True behavior (cosine).
+    Momentum is inverse to LR:
+      - warmup: max_momentum -> base_momentum
+      - decay:  base_momentum -> max_momentum
+    """
+    device = torch.device(device) if device is not None else torch.device("cpu")
+    warmup_steps = int(total_steps * pct_start)
+    warmup_steps = max(1, min(warmup_steps, total_steps - 1))
+    down_steps = max(1, total_steps - warmup_steps)
+
+    max_m = torch.tensor(max_momentum, device=device, dtype=torch.float32)
+    base_m = torch.tensor(base_momentum, device=device, dtype=torch.float32)
+
+    if step < warmup_steps:
+        frac = torch.tensor((step + 1) / warmup_steps, device=device, dtype=torch.float32)
+        # cosine decrease: max -> base
+        return _cosine_anneal(frac, start=max_m, end=base_m)
+
+    frac = torch.tensor((step - warmup_steps + 1) / down_steps, device=device, dtype=torch.float32)
+    # cosine increase: base -> max
+    return base_m + 0.5 * (max_m - base_m) * (1.0 - torch.cos(torch.pi * frac.clamp(0.0, 1.0)))
 
 
 
@@ -114,7 +190,7 @@ class Hyperparams(nn.Module):
     """
     def __init__(self, init_lambda_triple_out=1.0,
      init_lambda_join_in=1.0, init_lambda_join_out=1.0, init_lambda_acyclic=1.0,
-      init_lambda_left_linear=1.0, init_lambda_entropy=1.0, init_eta=0.8, init_tau=5.0) -> None:
+      init_lambda_left_linear=1.0, init_lambda_entropy=1.0, init_eta=1.5, init_tau=5.0) -> None:
         super().__init__()
 
         self._lambda_triple_out = nn.Parameter(torch.tensor(float(init_lambda_triple_out)))
@@ -179,7 +255,7 @@ def gbjo(query, C_theta, hyperparams, device="cpu"):
     returns final soft logits
     """
 
-    N_STEPS = 100
+    N_STEPS = 50
     lambda_triple_out = 1.0
     lambda_join_in = 1.0
     lambda_join_out = 1.0
@@ -202,7 +278,16 @@ def gbjo(query, C_theta, hyperparams, device="cpu"):
 
     for step in range(N_STEPS):
         tau = _temperature_anneal(torch.tensor(5.0, device=device), 1.0, 0.999, step, N_STEPS, device=device)
-        learning_rate = hyperparams.eta()
+        # OneCycleLR-like schedule (differentiable) using eta() as max_lr
+        max_lr = hyperparams.eta()
+        learning_rate = _one_cycle_lr(
+            step,
+            N_STEPS,
+            max_lr=max_lr,
+            pct_start=0.2,
+            div_factor=5.0,
+            final_div_factor=20.0,
+        )
         lambda_triple_out = hyperparams.lambda_triple_out()
         lambda_join_in = hyperparams.lambda_join_in()
         lambda_join_out = hyperparams.lambda_join_out()
@@ -247,16 +332,24 @@ def gbjo(query, C_theta, hyperparams, device="cpu"):
         #coefficient = 1 # TODO currently no ramping, adapt if necessary
 
         # backprop cost to logits
-        momentum = 0.9  # momentum coefficient
+        # OneCycleLR-style cycle momentum (mirrors methods.py OneCycleLR config)
+        momentum = _one_cycle_momentum(
+            step,
+            N_STEPS,
+            base_momentum=0.85,
+            max_momentum=0.95,
+            pct_start=0.2,
+            device=device,
+        )
 
 
-        cost = (cost_pred + coefficient * total_penalty).mean()
-        #cost = cost_pred.mean() #  case to not use penalties in inner unroll
+        #cost = (cost_pred + coefficient * total_penalty).mean()
+        cost = cost_pred.mean() #  case to not use penalties in inner unroll
         (g,) = torch.autograd.grad(cost, logits, create_graph=True)
 
-        # Gradient Descent Update
+        # SGD + momentum update (differentiable)
         v = momentum * v + g
-        logits = logits - learning_rate * (momentum * v + g)
+        logits = logits - learning_rate * v
 
     return logits
 
@@ -297,8 +390,9 @@ if __name__ == "__main__":
     USE_RESIDUAL = True
     USE_LAYER_NORM = False
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    EPOCHS = 1000
 
-    ACCUMULATION_STEPS = 16  # aka batch size, we accumulate gradients over this many steps
+    ACCUMULATION_STEPS = 32  # aka batch size, we accumulate gradients over this many steps
 
     # Create a dedicated output directory for this run (matches evaluation_parallel.py style)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -307,11 +401,14 @@ if __name__ == "__main__":
     print(f"Saving all training outputs to: {save_directory}")
 
     # Load queries
-    #sparql_queries = load_sparql_queries(QUERY_PATH, 10)
-    sparql_queries = torch.load(QUERY_PATH, weights_only=False)
-    sparql_queries = sparql_queries['data']
-    random.shuffle(sparql_queries)
-    sparql_queries = sparql_queries[:10000]
+    # NOTE: Make query selection deterministic (and consistent with evaluation_parallel.py):
+    # - seeded shuffle inside load_sparql_queries(seed=42)
+    # - optional filtering by max URI atoms per triple
+    # - then slice the first N queries
+    N_QUERIES = 1000
+    sparql_queries = load_sparql_queries(QUERY_PATH, num_queries=None, seed=42)
+    sparql_queries = filter_queries_by_max_uri_atoms(sparql_queries, max_uri_atoms=2)
+    sparql_queries = sparql_queries[:N_QUERIES]
     #sparql_queries = [q for q in sparql_queries if len(q.triples) == 3]
     # print how many queries are loaded and used
     print(f"INFO: Loaded {len(sparql_queries)} queries")
@@ -356,7 +453,7 @@ if __name__ == "__main__":
             "init_lambda_acyclic": 100.0,
             "init_lambda_left_linear": 100.0,
             "init_lambda_entropy": 100.0,
-            "init_eta": 0.9,
+            "init_eta": 1.5,
             "init_tau": 5.0,
         },
     }
@@ -390,7 +487,39 @@ if __name__ == "__main__":
     # define outer optimizer for psi_theta (updates C_theta params and hyperparams)
     #opt_theta = torch.optim.Adam(list(C_theta.parameters()) + list(hyperparams.parameters()), lr=1e-4)
     #opt_theta = torch.optim.Adam(hyperparams.parameters(), lr=1e-3)
-    opt_theta = torch.optim.AdamW(C_theta.parameters(), lr=1e-5)
+    BASE_LR = 1e-4  # Peak LR after warmup
+    MIN_LR = 1e-5   # Final LR after cosine annealing
+    opt_theta = torch.optim.AdamW(C_theta.parameters(), lr=BASE_LR)
+
+    # Learning rate scheduler: linear warmup (1 epoch) + cosine annealing
+    from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+    
+    steps_per_epoch = len(sparql_queries) // ACCUMULATION_STEPS
+    warmup_steps = 2 * steps_per_epoch  # 2 epochs of warmup
+    total_steps = EPOCHS * steps_per_epoch
+    
+    # Warm up from % of BASE_LR -> 100% of BASE_LR
+    warmup = LinearLR(
+        opt_theta,
+        start_factor=0.01,
+        end_factor=1.0,
+        total_iters=warmup_steps,
+    )
+    
+    # Then cosine anneal to MIN_LR over the remaining steps
+    #cosine = CosineAnnealingLR(
+    #    opt_theta,
+    #    T_max=total_steps - warmup_steps,
+   #     eta_min=MIN_LR,
+    #)
+    
+    #scheduler = SequentialLR(
+    #    opt_theta,
+    #    schedulers=[warmup, cosine],
+    #    milestones=[warmup_steps],
+    #)
+
+    scheduler = warmup
 
     # different lr for hyper and model
     #opt_theta = torch.optim.AdamW(
@@ -407,7 +536,6 @@ if __name__ == "__main__":
     anchor_loss = nn.HuberLoss()
 
 
-    EPOCHS = 100
     lambda_triple_out = 1.0
     lambda_join_in = 1.0
     lambda_join_out = 1.0
@@ -506,7 +634,10 @@ if __name__ == "__main__":
             anchor_plan_pred = C_theta(query.x, query.edge_index)
             L_anchor = anchor_loss(anchor_plan_pred, torch.log(query.y))
 
-            L_outer = (L_outer + L_anchor + 0.1 * L_struct_al) 
+            #L_outer = (L_outer + L_anchor + 0.1 * L_struct_al) 
+            L_outer = (L_outer + 0.0 * L_struct_al)
+            L_outer = L_outer / ACCUMULATION_STEPS
+
 
 
             # Checking gradient magnitude
@@ -537,8 +668,9 @@ if __name__ == "__main__":
                 #params = list(hyperparams.parameters())
 
                 grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=1)
-                print(f"INFO: Grad Norm: {grad_norm}")
+                print(f"INFO: Grad Norm: {grad_norm}, LR: {scheduler.get_last_lr()[0]:.2e}")
                 opt_theta.step()
+                scheduler.step()
                 opt_theta.zero_grad(set_to_none=True)
 
 

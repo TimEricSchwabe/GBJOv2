@@ -1,6 +1,6 @@
 from .methods import (
     GBJO,
-    optimize_query_gumbel_efficient_reduced,
+    GBJO_LBFGS,
     GreedySearch,
     random_join_plan,
     DPLinear,
@@ -20,7 +20,7 @@ from .gumbel_utils import (
 
 __all__ = [
     'GBJO',
-    'optimize_query_gumbel_efficient_reduced',
+    'GBJO_LBFGS',
     'GreedySearch', 
     'random_join_plan',
     'DPLinear',

@@ -620,8 +620,24 @@ def process_single_query(args):
     Returns:
         Dictionary with detailed results for this query
     """
-    (query_index, query, model_path, device_str, optimization_params, 
-     optimization_algorithms, use_exhaustive, use_true_costs, optimization_steps, dp_limit, save_directory, model_params) = args
+    (query_index, query, model_path, device_str, optimization_params,
+     optimization_algorithms, use_exhaustive, use_true_costs, optimization_steps, dp_limit,
+     save_directory, model_params, debug_timing) = args
+
+    # Optional timing debug (printed from worker processes)
+    def _timed(label, fn):
+        """
+        Run fn() and, if debug_timing is enabled, print elapsed wall time.
+        Uses finally so timings still print even if fn raises.
+        """
+        if not debug_timing:
+            return fn()
+        t0 = time.perf_counter()
+        try:
+            return fn()
+        finally:
+            dt = time.perf_counter() - t0
+            print(f"[Query {query_index}] {label}: {dt:.3f}s", flush=True)
     
     # Set device
     device = torch.device(device_str)
@@ -690,7 +706,10 @@ def process_single_query(args):
 
 
         if "GEQO" in optimization_algorithms:
-            GEQO_adj, GEQO_pred_cost = GEQO(torch_data, model, optimization_steps, device)
+            GEQO_adj, GEQO_pred_cost = _timed(
+                "GEQO optimize",
+                lambda: GEQO(torch_data, model, optimization_steps, device),
+            )
             GEQO_plan = adjacency_to_query_with_real_triples(GEQO_adj, len(triple_objs), triple_objs)
             GEQO_real_cost = float('inf')
 
@@ -699,13 +718,16 @@ def process_single_query(args):
                 "plan_string": plan_to_string(GEQO_plan) if GEQO_plan else None
             }
             if use_true_costs:
-                GEQO_real_cost = GEQO_plan.root.get_cost()
+                GEQO_real_cost = _timed("GEQO get_cost", lambda: GEQO_plan.root.get_cost())
                 result["plans"]["GEQO"]["real_cost"] = float(GEQO_real_cost)
 
 
         if "IterativeImprovement" in optimization_algorithms:
             # Run Iterative Improvement
-            II_adj, II_pred_cost = IterativeImprovement(torch_data, model, optimization_steps, device)
+            II_adj, II_pred_cost = _timed(
+                "II optimize",
+                lambda: IterativeImprovement(torch_data, model, optimization_steps, device),
+            )
             II_plan = adjacency_to_query_with_real_triples(II_adj, len(triple_objs), triple_objs)
 
             result["plans"]["II"] = {
@@ -713,16 +735,19 @@ def process_single_query(args):
                 "plan_string": plan_to_string(II_plan) if II_plan else None
             }
             if use_true_costs:
-                II_real_cost = II_plan.root.get_cost()
+                II_real_cost = _timed("II get_cost", lambda: II_plan.root.get_cost())
                 result["plans"]["II"]["real_cost"] = float(II_real_cost)
 
         if "NeuralSort" in optimization_algorithms:
             # Run NeuralSort optimization
             try:
-                ns_result = NeuralSort(
-                    torch_data, model, device,
-                    optimization_steps=optimization_steps,
-                    **optimization_params
+                ns_result = _timed(
+                    "NeuralSort optimize",
+                    lambda: NeuralSort(
+                        torch_data, model, device,
+                        optimization_steps=optimization_steps,
+                        **optimization_params
+                    ),
                 )
                 
                 if len(ns_result) == 4:
@@ -741,7 +766,7 @@ def process_single_query(args):
                     ns_real_cost = float('inf')
                 else:
                     if use_true_costs:
-                        ns_real_cost = ns_plan.root.get_cost()
+                        ns_real_cost = _timed("NeuralSort get_cost", lambda: ns_plan.root.get_cost())
                 
                 result["plans"]["NeuralSort"] = {
                     "predicted_cost": float(ns_pred_cost),
@@ -755,10 +780,13 @@ def process_single_query(args):
         if "CMA" in optimization_algorithms:
             # Run CMA optimization
             try:
-                cma_result = CMA(
-                    torch_data, model, device,
-                    optimization_steps=optimization_steps,
-                    **optimization_params
+                cma_result = _timed(
+                    "CMA optimize",
+                    lambda: CMA(
+                        torch_data, model, device,
+                        optimization_steps=optimization_steps,
+                        **optimization_params
+                    ),
                 )
                 
                 if len(cma_result) == 4:
@@ -777,7 +805,7 @@ def process_single_query(args):
                     cma_real_cost = float('inf')
                 else:
                     if use_true_costs:
-                        cma_real_cost = cma_plan.root.get_cost()
+                        cma_real_cost = _timed("CMA get_cost", lambda: cma_plan.root.get_cost())
                 
                 result["plans"]["CMA"] = {
                     "predicted_cost": float(cma_pred_cost),
@@ -799,12 +827,15 @@ def process_single_query(args):
         # Only run DP if enabled AND query size is within the limit
         if 'DP' in optimization_algorithms and len(query_triples) <= dp_limit:
             try:
-                best_adj, best_pred_cost = DPLinear(torch_data, model, device)
+                best_adj, best_pred_cost = _timed(
+                    "DP optimize",
+                    lambda: DPLinear(torch_data, model, device),
+                )
                 triples_num = len(triple_objs)
                 best_pred_plan = adjacency_to_query_with_real_triples(
                     best_adj, triples_num, triple_objs)
                 if use_true_costs:
-                    true_cost_best_pred = best_pred_plan.root.get_cost()
+                    true_cost_best_pred = _timed("DP get_cost", lambda: best_pred_plan.root.get_cost())
                 
                 result["plans"]["dp"] = {
                     "predicted_cost": float(best_pred_cost),
@@ -823,7 +854,10 @@ def process_single_query(args):
         
         if use_exhaustive:
             try:
-                exhaustive_adj, exhaustive_pred_cost = exhaustive_leftdeep_best_plan(torch_data, model, device)
+                exhaustive_adj, exhaustive_pred_cost = _timed(
+                    "Exhaustive optimize",
+                    lambda: exhaustive_leftdeep_best_plan(torch_data, model, device),
+                )
                 triples_num = len(triple_objs)
                 exhaustive_plan = adjacency_to_query_with_real_triples(
                     exhaustive_adj, triples_num, triple_objs)
@@ -833,7 +867,10 @@ def process_single_query(args):
                     "plan_string": plan_to_string(exhaustive_plan) if exhaustive_plan else None
                 }
                 if use_true_costs:
-                    result["plans"]["exhaustive"]["real_cost"] = float(exhaustive_plan.root.get_cost()) if exhaustive_plan else float('inf')
+                    result["plans"]["exhaustive"]["real_cost"] = (
+                        float(_timed("Exhaustive get_cost", lambda: exhaustive_plan.root.get_cost()))
+                        if exhaustive_plan else float('inf')
+                    )
                     
             except Exception as e:
                 print(f"Warning: Exhaustive search failed for query {query_index}: {e}")
@@ -842,12 +879,15 @@ def process_single_query(args):
         gradient_plan = None
         greedy_plan = None
         random_plan = None
+        meta_gradient_plan = None
         gradient_cost = float('inf')
         greedy_cost = float('inf')
         random_cost = float('inf')
         grad_pred_cost = float('inf')
         greedy_pred_cost = float('inf')
         random_pred_cost = float('inf')
+        meta_grad_pred_cost = float('inf')
+        meta_gradient_cost = float('inf')
         
         # Run gradient-based optimization
         if 'GBJO' in optimization_algorithms:
@@ -866,12 +906,15 @@ def process_single_query(args):
                 os.makedirs(gbjo_save_dir, exist_ok=True)
             
             for run_idx in range(k):
-                optimization_result = GBJO(
-                    torch_data, model, device, 
-                    optimization_steps=optimization_steps, 
-                    verbose=gbjo_verbose,
-                    save_directory=gbjo_save_dir,
-                    **{k: v for k, v in optimization_params.items() if k not in ['gbjo_verbose']}
+                optimization_result = _timed(
+                    f"GBJO optimize run {run_idx+1}/{k}",
+                    lambda: GBJO(
+                        torch_data, model, device,
+                        optimization_steps=optimization_steps,
+                        verbose=gbjo_verbose,
+                        save_directory=gbjo_save_dir,
+                        **{k: v for k, v in optimization_params.items() if k not in ['gbjo_verbose']}
+                    ),
                 )
                 
                 # Handle different return types
@@ -906,7 +949,117 @@ def process_single_query(args):
             else:
                 # Calculate the actual cost (only if enabled)
                 if use_true_costs:
-                    gradient_cost = gradient_plan.root.get_cost()
+                    gradient_cost = _timed("GBJO get_cost", lambda: gradient_plan.root.get_cost())
+            
+            # Save animation data for this query if available
+            if best_animation_data is not None and save_directory:
+                animation_data_dir = os.path.join(save_directory, "animation_data")
+                os.makedirs(animation_data_dir, exist_ok=True)
+                animation_data_file = os.path.join(animation_data_dir, f"query_{query_index}_animation_data.pkl")
+                try:
+                    with open(animation_data_file, 'wb') as f:
+                        pickle.dump(best_animation_data, f)
+                except Exception as e:
+                    print(f"Warning: Failed to save animation data for query {query_index}: {e}")
+
+        # Run gradient-based optimization with a separate (meta) model checkpoint
+        if 'GBJO-Meta' in optimization_algorithms:
+            # Hardcoded meta model path (as requested)
+            meta_model_path = "/home/tim/query_optimization/meta_optimization_results/wikidata-star-1e-4/best_model.pt"
+
+            try:
+                # Create and load a second model instance (same architecture as the main one)
+                if model_params is None:
+                    meta_model = CostGNNv3(node_feature_dim=307, hidden_dim=128).to(device)
+                else:
+                    meta_params = model_params.copy()
+                    if meta_params.get('version') == 'v3':
+                        meta_model = CostGNNv3(**meta_params).to(device)
+                    elif meta_params.get('version') == 'v2':
+                        meta_model = CostGNNv2(**meta_params).to(device)
+                    else:
+                        raise ValueError(f"Unknown model version: {meta_params.get('version')}")
+
+                meta_model.load_state_dict(torch.load(meta_model_path, map_location=device))
+                meta_model.eval()
+                for p in meta_model.parameters():
+                    p.requires_grad_(False)
+
+                # Run the exact same GBJO logic, just swapping the model.
+                k = optimization_params.get('k', 1)
+                gbjo_verbose = optimization_params.get('gbjo_verbose', False)
+                best_adjacency = None
+                best_triples_num = None
+                best_meta_grad_pred_cost = float('inf')
+                best_animation_data = None
+
+                meta_gbjo_save_dir = None
+                if gbjo_verbose and save_directory:
+                    meta_gbjo_save_dir = os.path.join(save_directory, "gbjo_meta_trajectory", f"query_{query_index}")
+                    os.makedirs(meta_gbjo_save_dir, exist_ok=True)
+
+                for run_idx in range(k):
+                    optimization_result = _timed(
+                        f"GBJO-Meta optimize run {run_idx+1}/{k}",
+                        lambda: GBJO(
+                            torch_data, meta_model, device,
+                            optimization_steps=optimization_steps,
+                            verbose=gbjo_verbose,
+                            save_directory=meta_gbjo_save_dir,
+                            **{k: v for k, v in optimization_params.items() if k not in ['gbjo_verbose']}
+                        ),
+                    )
+
+                    if len(optimization_result) == 4:
+                        final_adjacency, triples_num, meta_grad_pred_cost, animation_data = optimization_result
+                    elif len(optimization_result) == 3:
+                        final_adjacency, triples_num, meta_grad_pred_cost = optimization_result
+                        animation_data = None
+                    else:
+                        raise ValueError("Unexpected return tuple from optimization_function")
+
+                    # Recompute predicted cost using the *main* model (same scoring path as other methods),
+                    # using the final adjacency + the query's node features (torch_data.x).
+                    try:
+                        adj_tensor = final_adjacency if torch.is_tensor(final_adjacency) else torch.as_tensor(final_adjacency)
+                        edge_index = adj_tensor.nonzero().t().to(device)
+                        x = torch_data.x.to(device)
+                        with torch.no_grad():
+                            log_pred_cost = model(x, edge_index=edge_index).item()
+                        recomputed_pred_cost = float(np.exp(log_pred_cost))
+                    except Exception as e:
+                        print(f"Warning: Failed to recompute GBJO-Meta predicted cost for query {query_index}, run {run_idx}: {e}")
+                        recomputed_pred_cost = float('inf')
+
+                    if recomputed_pred_cost < best_meta_grad_pred_cost:
+                        best_adjacency = final_adjacency
+                        best_triples_num = triples_num
+                        best_meta_grad_pred_cost = recomputed_pred_cost
+                        best_animation_data = animation_data
+
+                meta_grad_pred_cost = best_meta_grad_pred_cost
+                meta_gradient_plan = adjacency_to_query_with_real_triples(best_adjacency, best_triples_num, triple_objs)
+
+                is_valid, validation_msg = validate_plan(meta_gradient_plan, triple_objs)
+                if not is_valid:
+                    print(f"Warning: Invalid GBJO-Meta plan for query {query_index}: {validation_msg}")
+                    meta_gradient_plan = None
+                    meta_grad_pred_cost = float('inf')
+                else:
+                    if use_true_costs:
+                        meta_gradient_cost = _timed("GBJO-Meta get_cost", lambda: meta_gradient_plan.root.get_cost())
+
+                if best_animation_data is not None and save_directory:
+                    animation_data_dir = os.path.join(save_directory, "animation_data")
+                    os.makedirs(animation_data_dir, exist_ok=True)
+                    animation_data_file = os.path.join(animation_data_dir, f"query_{query_index}_gbjo_meta_animation_data.pkl")
+                    try:
+                        with open(animation_data_file, 'wb') as f:
+                            pickle.dump(best_animation_data, f)
+                    except Exception as e:
+                        print(f"Warning: Failed to save GBJO-Meta animation data for query {query_index}: {e}")
+            except Exception as e:
+                print(f"Error in GBJO-Meta for query {query_index}: {e}")
 
         # Run GBJO with L-BFGS optimizer
         if 'GBJO_LBFGS' in optimization_algorithms:
@@ -918,12 +1071,15 @@ def process_single_query(args):
                     lbfgs_save_dir = os.path.join(save_directory, "gbjo_lbfgs_trajectory", f"query_{query_index}")
                     os.makedirs(lbfgs_save_dir, exist_ok=True)
                 
-                lbfgs_result = GBJO_LBFGS(
-                    torch_data, model, device,
-                    optimization_steps=optimization_steps,
-                    verbose=lbfgs_verbose,
-                    save_directory=lbfgs_save_dir,
-                    **{k: v for k, v in optimization_params.items() if k not in ['gbjo_verbose', 'k']}
+                lbfgs_result = _timed(
+                    "GBJO_LBFGS optimize",
+                    lambda: GBJO_LBFGS(
+                        torch_data, model, device,
+                        optimization_steps=optimization_steps,
+                        verbose=lbfgs_verbose,
+                        save_directory=lbfgs_save_dir,
+                        **{k: v for k, v in optimization_params.items() if k not in ['gbjo_verbose', 'k']}
+                    ),
                 )
                 
                 if len(lbfgs_result) == 4:
@@ -942,7 +1098,7 @@ def process_single_query(args):
                     lbfgs_real_cost = float('inf')
                 else:
                     if use_true_costs:
-                        lbfgs_real_cost = lbfgs_plan.root.get_cost()
+                        lbfgs_real_cost = _timed("GBJO_LBFGS get_cost", lambda: lbfgs_plan.root.get_cost())
                 
                 result["plans"]["GBJO_LBFGS"] = {
                     "predicted_cost": float(lbfgs_pred_cost),
@@ -956,8 +1112,9 @@ def process_single_query(args):
         
         # Run greedy optimization
         if 'GreedySearch' in optimization_algorithms:
-            greedy_plan, greedy_pred_cost = GreedySearch(
-                torch_data, model, triple_objs, device, verbose=False
+            greedy_plan, greedy_pred_cost = _timed(
+                "GreedySearch optimize",
+                lambda: GreedySearch(torch_data, model, triple_objs, device, verbose=False),
             )
             
             # Validate that the plan contains all expected triple patterns
@@ -968,7 +1125,7 @@ def process_single_query(args):
             else:
                 # Calculate the actual cost (only if enabled)
                 if use_true_costs:
-                    greedy_cost = greedy_plan.root.get_cost()
+                    greedy_cost = _timed("GreedySearch get_cost", lambda: greedy_plan.root.get_cost())
         
         # Create a random plan
         random_plan = None
@@ -977,25 +1134,29 @@ def process_single_query(args):
 
         if "Random" in optimization_algorithms:
             try:
-                # Generate random permutation
-                n_triples = len(triple_objs)
-                perm = torch.randperm(n_triples)
-                
-                # Create adjacency for left-deep tree
-                random_adj = left_deep_adj_from_perm(perm)
-                
-                # Predict cost
-                edge_index = random_adj.nonzero().t().to(device)
-                x = torch_data.x.to(device)
-                
-                log_pred_cost = model(x, edge_index=edge_index).item()
-                random_pred_cost = float(np.exp(log_pred_cost))
-                
-                # Convert to plan
-                random_plan = adjacency_to_query_with_real_triples(random_adj, n_triples, triple_objs)
-                
-                if use_true_costs:
-                    random_true_cost = random_plan.root.get_cost()
+                def _random_optimize():
+                    # Generate random permutation
+                    n_triples = len(triple_objs)
+                    perm = torch.randperm(n_triples)
+
+                    # Create adjacency for left-deep tree
+                    random_adj = left_deep_adj_from_perm(perm)
+
+                    # Predict cost
+                    edge_index = random_adj.nonzero().t().to(device)
+                    x = torch_data.x.to(device)
+
+                    log_pred_cost = model(x, edge_index=edge_index).item()
+                    pred_cost = float(np.exp(log_pred_cost))
+
+                    # Convert to plan
+                    plan = adjacency_to_query_with_real_triples(random_adj, n_triples, triple_objs)
+                    return plan, pred_cost
+
+                random_plan, random_pred_cost = _timed("Random optimize", _random_optimize)
+
+                if use_true_costs and random_plan is not None:
+                    random_true_cost = _timed("Random get_cost", lambda: random_plan.root.get_cost())
             except Exception as e:
                 print(f"Error creating random plan for query {query_index}: {e}")
                 random_true_cost = float('inf')
@@ -1004,6 +1165,10 @@ def process_single_query(args):
         result["plans"]["gradient"] = {
             "predicted_cost": float(grad_pred_cost),
             "plan_string": plan_to_string(gradient_plan) if gradient_plan else None
+        }
+        result["plans"]["GBJO-Meta"] = {
+            "predicted_cost": float(meta_grad_pred_cost),
+            "plan_string": plan_to_string(meta_gradient_plan) if meta_gradient_plan else None
         }
         result["plans"]["greedy"] = {
             "predicted_cost": float(greedy_pred_cost),
@@ -1017,6 +1182,7 @@ def process_single_query(args):
         # Add true costs only if enabled
         if use_true_costs:
             result["plans"]["gradient"]["real_cost"] = float(gradient_cost)
+            result["plans"]["GBJO-Meta"]["real_cost"] = float(meta_gradient_cost)
             result["plans"]["greedy"]["real_cost"] = float(greedy_cost)
             result["plans"]["random"]["real_cost"] = float(random_true_cost)
         
@@ -1084,9 +1250,10 @@ def process_single_query(args):
         return None
 
 
-def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None, optimization_steps=500, 
-                                 optimization_params=None, optimization_algorithms=None, save_directory=".", 
-                                 use_exhaustive=True, use_true_costs=True, num_workers=None, dp_limit=9, model_params=None):
+def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None, optimization_steps=500,
+                                 optimization_params=None, optimization_algorithms=None, save_directory=".",
+                                 use_exhaustive=True, use_true_costs=True, num_workers=None, dp_limit=9,
+                                 model_params=None, debug_timing: bool = False):
     """
     Evaluate the optimization algorithm on the given SPARQL queries in parallel.
     
@@ -1122,12 +1289,15 @@ def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None,
         num_workers = min(mp.cpu_count(), len(sparql_queries))
     
     print(f"Processing {len(sparql_queries)} queries using {num_workers} parallel workers")
+    if debug_timing:
+        print("Timing debug enabled: will print per-query per-algorithm + get_cost() timings from worker processes.")
     
     # Prepare arguments for parallel processing
     args_list = []
     for i, query in enumerate(sparql_queries):
         args = (i, query, model_path, device_str, optimization_params, 
-                optimization_algorithms, use_exhaustive, use_true_costs, optimization_steps, dp_limit, save_directory, model_params)
+                optimization_algorithms, use_exhaustive, use_true_costs, optimization_steps, dp_limit,
+                save_directory, model_params, debug_timing)
         args_list.append(args)
     
     # Process queries in parallel
@@ -1166,23 +1336,40 @@ def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None,
     
     print(f"Saved detailed results to: {detailed_results_file}")
     
+    # Create animation metadata file if animation data directory exists
+    animation_data_dir = os.path.join(save_directory, "animation_data")
+    if os.path.exists(animation_data_dir):
+        visualization_dir = os.path.join(save_directory, "visualizations")
+        os.makedirs(visualization_dir, exist_ok=True)
+        
+        animation_metadata = {
+            "animation_data_dir": animation_data_dir,
+            "visualization_dir": visualization_dir,
+            "num_queries": len(sparql_queries)
+        }
+        metadata_file = os.path.join(save_directory, "animation_metadata.json")
+        with open(metadata_file, 'w') as f:
+            json.dump(animation_metadata, f, indent=2)
+        print(f"Saved animation metadata to: {metadata_file}")
+    
     return detailed_results
 
 
 if __name__ == "__main__":
     # Configuration for optimization
     config_wikidata_star = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl",
+        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_training/new/dataset.pt", # /home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl
         "model_path": "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt", # current best: "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt"
-        "num_queries": 10,
-        "optimization_steps": 30, # 2500
+        "num_queries": 80,
+        "optimization_steps": 10, # 2500
         "use_exhaustive": False,
         "use_dp": True,
         "dp_limit": 9,  # Set the limit here (e.g., 15 for star queries)
         "use_true_costs": True,
         "save_path": "optimization_results",
-        "num_workers": 8,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"],
+        "num_workers": 1,  # Use all available cores
+        "debug_timing": True,
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"], # ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"]
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -1196,46 +1383,46 @@ if __name__ == "__main__":
         },
         "optimization_params": {
             "k": 1,  # 1 Number of gradient optimization runs
-            "learning_rate": 5, # 0.35 or 1; best 0.85
-            "lambda_acyclic": 169, # 3391
-            "lambda_triple_in": 16.5,# 3334.0
-            "lambda_triple_out": 4.3,# 2026.0
-            "lambda_join_in": 91, # 2150.0
-            "lambda_join_out": 11.6,# 1295.0
-            "lambda_entropy": 10.0,# 0.0
-            "lambda_total_penalty": 0.5,# 0.7
-            "lambda_left_linear": 18.2,# 2157.0
-            "init_tau": 4.5, # 15
-            "min_tau": 0.48, # 1.0
+            "learning_rate": 4.9, # 0.35 or 1; best 0.85; 3 or 50 timesteps
+            "lambda_acyclic": 29, # 3391
+            "lambda_triple_in": 1.5,# 3334.0
+            "lambda_triple_out": 1.4,# 2026.0
+            "lambda_join_in": 3.6, # 2150.0
+            "lambda_join_out": 4.1,# 1295.0
+            "lambda_entropy": 0.0,# 0.0
+            "lambda_total_penalty": 0.99,# 0.7
+            "lambda_left_linear": 60,# 2157.0
+            "init_tau": 4, # 15
+            "min_tau": 0.49, # 1.0
             "tau_decay": 0.973,
             "use_temperature_annealing": True,
             "return_best": True,
-            "min_penalty_threshold": 3.55,
+            "min_penalty_threshold": 9.96,
             "use_lambda_ramping": True,
             "logit_sampling": "softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
-            "lambda_ramp_exponent": 1.09, # 5.3 best: 1.09
+            "lambda_ramp_exponent": 1.01, # 5.3 best: 1.09
             "lr_warmup_steps": 46,
-            "gradient_clip_norm": 2.6,
+            "gradient_clip_norm": 4.7,
             "use_lr_scheduling": True,
             "decoding_method": "beam",
             "use_gumbel_noise": False,
-            "gbjo_verbose": True
+            "gbjo_verbose": False
         }
     }
 
     config_wikidata_path = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new/dataset.pt",
+        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/dataset.pt",
         "model_path": "/home/tim/query_optimization/training_results/wikidata-path-log1p/model.pt",
-        "num_queries": 20,
-        "optimization_steps": 500, #2500
+        "num_queries": 10,
+        "optimization_steps": 10, #2500
         "use_exhaustive": False,
         "use_dp": True,
-        "use_true_costs": False,
+        "use_true_costs": True,
         "save_path": "optimization_results",
-        "num_workers": 8,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"], # ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"]
+        "num_workers": 1,  # Use all available cores
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO"], # ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA"]
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -1249,30 +1436,30 @@ if __name__ == "__main__":
         },
         "optimization_params": { # params for GBJO
             "k": 1,  # Number of gradient optimization runs
-            "learning_rate": 1, #0.5
-            "lambda_acyclic": 169, # 467.0
-            "lambda_triple_in": 16.5, # 3194.0
-            "lambda_triple_out": 4.3, # 3661.0
-            "lambda_join_in": 91, # 1919.0
-            "lambda_join_out": 11.6, # 1900.0
+            "learning_rate": 9.99, #0.5
+            "lambda_acyclic": 4.48, # 467.0
+            "lambda_triple_in": 3.42, # 3194.0
+            "lambda_triple_out": 81.5, # 3661.0
+            "lambda_join_in": 1.99, # 1919.0
+            "lambda_join_out": 1.00, # 1900.0
             "lambda_entropy": 0.0,
-            "lambda_total_penalty": 0.5, # 1.8
-            "lambda_left_linear": 18.2, # 1900.0
-            "init_tau": 5,
-            "min_tau": 0.48, # 1.0
+            "lambda_total_penalty": 0.91, # 1.8
+            "lambda_left_linear": 66, # 1900.0
+            "init_tau": 9.66,
+            "min_tau": 0.26, # 1.0
             "tau_decay": 0.973,
             "use_temperature_annealing": True,
             "return_best": True,
-            "min_penalty_threshold": 4, # 0.5
+            "min_penalty_threshold": 9.96, # 0.5
             "use_lambda_ramping": True,
             "logit_sampling": "softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
-            "lambda_ramp_exponent": 1.09, # 7
+            "lambda_ramp_exponent": 1.13, # 7
             "lr_warmup_steps": 150,
-            "gradient_clip_norm": 4.1,
+            "gradient_clip_norm": 5.52,
             "use_lr_scheduling": True,
-            "decoding_method": "greedy",
+            "decoding_method": "beam",
             "use_gumbel_noise": False,
             "use_swa": False
         }
@@ -1280,8 +1467,8 @@ if __name__ == "__main__":
 
     config_lubm_star = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm/star-greedy/dataset.pt", # /home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl
-        "model_path": "/home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt", # /home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt
-        "num_queries": 100,
+        "model_path": "/home/tim/query_optimization/training_results/lubm-star-log1p/model.pt", # /home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt
+        "num_queries": 80,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "optimization_steps": 500,
         "use_exhaustive": False,
@@ -1298,47 +1485,47 @@ if __name__ == "__main__":
             "n_layers": 6,
             "use_jk": False,
             "jk_mode": "cat",
-            "use_residual": False,
-            "use_layer_norm": True,
+            "use_residual": True,
+            "use_layer_norm": False,
             "dropout": 0.0,
         },
         "optimization_params": { # params for GBJO
             "k": 1,  # Number of gradient optimization runs
-            "learning_rate": 0.85, # 1.7
-            "lambda_acyclic": 169, # 3081.0
-            "lambda_triple_in": 16.5, # 3714.0
-            "lambda_triple_out": 4.3, # 135.0
-            "lambda_join_in": 91, # 1742.0
-            "lambda_join_out": 11.6, # 1558.0
+            "learning_rate": 2.26, # 1.7
+            "lambda_acyclic": 24.5, # 3081.0
+            "lambda_triple_in": 13.5, # 3714.0
+            "lambda_triple_out": 60.7, # 135.0
+            "lambda_join_in": 18.8, # 1742.0
+            "lambda_join_out": 9.3, # 1558.0
             "lambda_entropy": 0.0,
-            "lambda_total_penalty": 0.5, # 2.6
-            "lambda_left_linear": 18.2, # 2300.0
-            "init_tau": 4.5,
-            "min_tau": 0.48, #1.0
+            "lambda_total_penalty": 0.99, # 2.6
+            "lambda_left_linear": 28.8, # 2300.0
+            "init_tau": 3.2,
+            "min_tau": 0.12, #1.0
             "tau_decay": 0.963,
             "use_temperature_annealing": True,
             "return_best": True,
-            "min_penalty_threshold": 3.55, # 5
+            "min_penalty_threshold": 3.9, # 5
             "use_lambda_ramping": True,
             "logit_sampling": "softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
-            "lambda_ramp_exponent": 3, # 6.5
+            "lambda_ramp_exponent": 1.7, # 6.5
             "lr_warmup_steps": 50,
-            "gradient_clip_norm": 2.6,
-            "use_lr_scheduling": False,
+            "gradient_clip_norm": 4.1,
+            "use_lr_scheduling": True,
             "decoding_method": "beam",
             "use_gumbel_noise": False,
             "use_swa": False,
-            "gbjo_verbose": True
+            "gbjo_verbose": False
         }
     }
 
     config_lubm_path = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm/path-greedy/dataset.pt", # /home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl
         "model_path": "/home/tim/query_optimization/training_results/lubm-path-log1p/model.pt",
-        "num_queries": 100,
-        "optimization_steps": 500,
+        "num_queries": 20,
+        "optimization_steps": 10,
         "use_exhaustive": False,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "use_dp": True,
@@ -1359,32 +1546,33 @@ if __name__ == "__main__":
         "num_workers": 10,  # Use all available cores
         "optimization_params": {
             "k": 1,  # Number of gradient optimization runs - 5
-            "learning_rate": 0.85, # 1.8
-            "lambda_acyclic": 169, # 4415.0
-            "lambda_triple_in": 16.5, # 3027.0
-            "lambda_triple_out": 4.3, # 790.0
-            "lambda_join_in": 91, # 2197.0
-            "lambda_join_out": 11.6, # 2204.0
-            "lambda_entropy": 1, # 0
-            "lambda_total_penalty": 1 ,#4.2
-            "lambda_left_linear": 18.2, # 1910.0
-            "init_tau": 4.5, #3.7
-            "min_tau": 0.48, # 1.0
+            "learning_rate": 1.67, # 1.8
+            "lambda_acyclic": 3.34, # 4415.0
+            "lambda_triple_in": 1.36, # 3027.0
+            "lambda_triple_out": 11.7, # 790.0
+            "lambda_join_in": 2.07, # 2197.0
+            "lambda_join_out": 2.8, # 2204.0
+            "lambda_entropy": 0, # 0
+            "lambda_total_penalty": 0.56,#4.2
+            "lambda_left_linear": 51.7, # 1910.0
+            "init_tau": 1.12, #3.7
+            "min_tau": 0.12, # 1.0
             "tau_decay": 0.963, # 0.963
             "use_temperature_annealing": True,
             "return_best": True,
-            "min_penalty_threshold": 3.55, # 8.6
+            "min_penalty_threshold": 3.9, # 8.6
             "use_lambda_ramping": True,
             "logit_sampling": "softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
-            "lambda_ramp_exponent": 6, # 6.8
+            "lambda_ramp_exponent": 1.31, # 6.8
             "lr_warmup_steps": 200,
-            "gradient_clip_norm": 2.6,
-            "use_lr_scheduling": False,
-            "decoding_method": "greedy",
+            "gradient_clip_norm": 3.09,
+            "use_lr_scheduling": True,
+            "decoding_method": "beam",
             "use_gumbel_noise": False,
-            "use_swa": False
+            "use_swa": False,
+            "gbjo_verbose": True
                     }
     }
 
@@ -1400,7 +1588,7 @@ if __name__ == "__main__":
         "use_true_costs": True,
         "save_path": "optimization_results",
         "num_workers": 6,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"],
+        "optimization_algorithms": ["GBJO", "GBJO-Meta", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"],
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -1444,7 +1632,7 @@ if __name__ == "__main__":
         }
     }
 
-    config = config_wikidata_star
+    config = config_wikidata_path
     
     # Create unique save directory based on datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1507,7 +1695,8 @@ if __name__ == "__main__":
         use_true_costs=config.get('use_true_costs', True),
         num_workers=config.get('num_workers', None),
         dp_limit=config.get('dp_limit', 9),  # Pass dp_limit from config or default to 9
-        model_params=config.get('model_params', None)
+        model_params=config.get('model_params', None),
+        debug_timing=config.get('debug_timing', False),
     )
     
     end_time = time.time()

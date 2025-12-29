@@ -131,8 +131,8 @@ def GBJO(
             total_steps=optimization_steps,         # your inner steps
             pct_start=0.2,           # 20% warm-up, 80% decay
             anneal_strategy="cos",
-            div_factor=10.0,         # initial_lr = max_lr / div_factor
-            final_div_factor=100.0,  # final_lr = initial_lr / final_div_factor
+            div_factor=5.0,         # initial_lr = max_lr / div_factor
+            final_div_factor=20.0,  # final_lr = initial_lr / final_div_factor
             cycle_momentum=True,
             base_momentum=0.85,
             max_momentum=0.95,
@@ -220,6 +220,7 @@ def GBJO(
         P_join_in = ((in_deg[join_nodes] - 2) ** 2).sum()
         P_join_out = ((out_deg[non_root_joins] - 1) ** 2).sum() + out_deg[root] ** 2
         P_acyclic = torch.trace(torch.matrix_exp(A)) - N_NODES
+        #P_acyclic = torch.tensor(0.0, device=device)
 
 
         # enforce left-deep / linear join order
@@ -270,7 +271,7 @@ def GBJO(
         # Save cost and penalty for animation if enabled 
         if save_animation_data and step % animation_save_interval == 0:
             animation_data['cost_history'].append(cost_pred.item())
-            animation_data['penalty_history'].append(total_penalty.item())
+            animation_data['penalty_history'].append(total_penalty_raw.item())
 
         # Step 9 in Algorithm 1
         if use_lambda_ramping:
@@ -305,7 +306,7 @@ def GBJO(
                     best_discrete_A = discrete_A.clone()
 
         # Track metrics for plotting
-        cost_history.append(cost_pred.item() + total_penalty_raw.item()) 
+        cost_history.append(cost_pred.item()) 
         total_penalty_history.append(total_penalty_raw.item())
         acyclic_penalty_history.append(P_acyclic.item())
         triple_in_penalty_history.append(P_triple_in.item())
@@ -1214,7 +1215,8 @@ def IterativeImprovement(query_data, model, optimization_steps=100, device="cpu"
             current_plan = best_plan.clone()
         else:
             # We have found no better plan in this neighborhood
-            break
+            pass # TODO only to compare runtimes with random plans
+            #break
 
     # print('Did a total of %d steps' % n_steps_taken)
     # print('len of best_costs: %d' % len(best_costs))
@@ -1238,7 +1240,12 @@ def GEQO(query_data, model, optimization_steps=100, device="cpu"):
     """
 
     population_size: int = 20 
-    generations: int = 50
+
+    if optimization_steps < population_size:
+        population_size = optimization_steps
+    #generations: int = 50
+    generations: int = max(1, int(np.ceil(optimization_steps / population_size)))
+
     elite_fraction: float = 0.05 # top n candidates that survive generation unchanged
     mutation_rate = 0.05
 
@@ -1501,241 +1508,6 @@ def exhaustive_leftdeep_best_plan(query_data, model, device="cpu"):
             best_adj = A_candidate
 
     return best_adj, best_pred_cost
-
-
-#@torch.compile
-def calculate_penalties_compiled(
-    edge_weights,
-    src,
-    dst,
-    N_NODES,
-    triple_nodes,
-    join_nodes,
-    non_root_joins,
-    root,
-    src_is_triple_mask,
-    src_is_join_mask,
-    triples_num,
-    device,
-    lambda_triple_in,
-    lambda_triple_out,
-    lambda_join_in,
-    lambda_join_out,
-    lambda_acyclic,
-    lambda_left_linear
-):
-    """Compiled penalty calculation function."""
-    # ----------------  structural penalty  ---------------------------
-    in_deg  = scatter(edge_weights, dst, dim=0, dim_size=N_NODES, reduce="sum")
-    out_deg = scatter(edge_weights, src, dim=0, dim_size=N_NODES, reduce="sum")
-
-    P_triple_in  = (in_deg[triple_nodes] ** 2).sum()  # should stay zero
-    P_triple_out = ((out_deg[triple_nodes] - 1) ** 2).sum()
-    P_join_in    = ((in_deg[join_nodes] - 2) ** 2).sum()
-    P_join_out   = ((out_deg[non_root_joins] - 1) ** 2).sum() + out_deg[root] ** 2
-
-    # build dense A only for acyclicity & left-deep checks
-    A_dense = torch.zeros((N_NODES, N_NODES), device=device)
-    A_dense[src, dst] = edge_weights  # in-place write
-    P_acyclic = torch.trace(torch.matrix_exp(A_dense)) - N_NODES
-    P_acyclic = 0.0
-    # child counts per join
-    child_triple_counts = scatter(
-        edge_weights[src_is_triple_mask], dst[src_is_triple_mask] - triples_num, dim=0,
-        dim_size=len(join_nodes), reduce="sum",
-    ) if len(join_nodes) > 0 else edge_weights.new_zeros(0)
-    child_join_counts = scatter(
-        edge_weights[src_is_join_mask], dst[src_is_join_mask] - triples_num, dim=0,
-        dim_size=len(join_nodes), reduce="sum",
-    ) if len(join_nodes) > 0 else edge_weights.new_zeros(0)
-
-    if len(join_nodes) > 0:
-        P_first = (child_triple_counts[0] - 2) ** 2 + child_join_counts[0] ** 2
-        if len(join_nodes) > 1:
-            P_rest_triple = ((child_triple_counts[1:] - 1) ** 2).sum()
-            P_rest_join   = ((child_join_counts[1:] - 1) ** 2).sum()
-            P_left_linear = P_first + P_rest_triple + P_rest_join
-        else:
-            P_left_linear = P_first
-    else:
-        P_left_linear = edge_weights.new_tensor(0.0)
-
-    total_penalty = (
-        lambda_triple_in  * P_triple_in + lambda_triple_out * P_triple_out + lambda_join_in * P_join_in +
-        lambda_join_out * P_join_out + lambda_acyclic * P_acyclic + lambda_left_linear * P_left_linear
-    )
-    total_penalty_raw = P_triple_in + P_triple_out + P_join_in + P_join_out + P_acyclic + P_left_linear
-    
-    return total_penalty, total_penalty_raw
-
-
-def optimize_query_gumbel_efficient_reduced(
-    query_data,
-    model,
-    device: str = "cpu",
-    *,
-    optimization_steps: int = 500,
-    verbose: bool = True,
-    learning_rate: float = 0.01,
-    lambda_acyclic: float = 1000.0,
-    lambda_triple_in: float = 1000.0,
-    lambda_triple_out: float = 1000.0,
-    lambda_join_in: float = 500.0,
-    lambda_join_out: float = 1000.0,
-    lambda_entropy: float = 10.0,
-    lambda_total_penalty: float = 1.0,
-    lambda_left_linear: float = 1000.0,
-    init_tau: float = 10.0,
-    min_tau: float = 1.0,
-    tau_decay: float = 0.999,
-    use_temperature_annealing: bool = True,
-    return_best: bool = True,
-    min_penalty_threshold: float = 1.0,
-    use_lambda_ramping: bool = True,
-    lambda_ramp_exponent: float = 2.0,
-    logit_sampling: str = "sigmoid",  # "sigmoid", "softmax" or "dual-softmax"
-    save_animation_data: bool = False,
-    animation_save_interval: int = 10,
-    gradient_clip_norm: float = 5.0,
-    use_lr_scheduling: bool = True,
-    lr_warmup_steps: int = 200,
-    decoding_method: str = "threshold",
-    use_gumbel_noise: bool = True,
-    **kwargs,
-):
-    """Same optimiser as *optimize_query_gumbel_efficient* but stores logits
-    **only for edges whose *target* is a join node** (dst ≥ n_triples).  Edges
-    leading to triple-pattern leaves are permanently zero and therefore waste
-    memory and gradient bandwidth – we simply leave them out.  The returned
-    adjacency matrix, however, is still (2n-1)×(2n-1) so callers remain fully
-    compatible.
-    """
-
-    # ------------------------------------------------------------------
-    # 0.  Static graph information
-    # ------------------------------------------------------------------
-    data = query_data
-    N_NODES = data.x.size(0)
-    triples_num = (N_NODES + 1) // 2
-    root = N_NODES - 1
-
-    # Candidate edges: *exclude* self-loops AND all edges with dst<triples_num
-    src_full, dst_full = torch.where(~torch.eye(N_NODES, dtype=torch.bool, device=device))
-    mask_dst_is_join = dst_full >= triples_num
-    src = src_full[mask_dst_is_join]
-    dst = dst_full[mask_dst_is_join]
-    edge_index = torch.stack([src, dst], dim=0)
-    num_edges = edge_index.size(1)
-
-    # Convenience index tensors ----------------------------------------------
-    triple_nodes = torch.arange(triples_num, device=device)
-    join_nodes   = torch.arange(triples_num, N_NODES, device=device)
-    non_root_joins = join_nodes[:-1] if len(join_nodes) > 0 else join_nodes  # exclude root
-
-    # Masks (all target-join by construction) ---------------------------------
-    root_outgoing_mask = (src == root)
-    src_is_triple_mask = src < triples_num
-    src_is_join_mask   = ~src_is_triple_mask
-
-    # ------------------------------------------------------------------
-    # 1.  Trainable parameters & optimiser
-    # ------------------------------------------------------------------
-    edge_logits = torch.empty(num_edges, device=device).uniform_(-0.05, 0.05).requires_grad_(True)
-    edge_logits_slot2 = torch.empty_like(edge_logits).requires_grad_(True)
-
-    opt_params = [edge_logits, edge_logits_slot2] if logit_sampling == "dual-softmax" else [edge_logits]
-    optimiser = optim.AdamW(opt_params, lr=learning_rate)
-
-
-    # ------------------------------------------------------------------
-    # 2.  Book-keeping
-    # ------------------------------------------------------------------
-    best_cost = float("inf")
-    best_logits_1 = best_logits_2 = None
-
-
-    # ------------------------------------------------------------------
-    # 3.  Optimisation loop
-    # ------------------------------------------------------------------
-    for step in range(optimization_steps):
-        optimiser.zero_grad()
-
-        tau = _temperature_anneal(init_tau, min_tau, tau_decay, step, optimization_steps) if use_temperature_annealing else init_tau
-
-        # ----------------  edge sampling  -----------------------------------
-        # No invalid-edge masking needed: every candidate is valid.
-        slot1 = sample_grouped_gumbel_softmax(edge_logits, dst, tau, use_gumbel_noise)
-        slot2 = sample_grouped_gumbel_softmax(edge_logits_slot2, dst, tau, use_gumbel_noise)
-        edge_weights = slot1 + slot2  # (0,2)
-        edge_weights[root_outgoing_mask] = 0.0
-
-
-        # ----------------  cost prediction  ---------------------------------
-        cost_pred = model(data.x, edge_index, edge_weight=edge_weights)
-
-        # ----------------  compiled penalty calculation  -------------------
-        total_penalty, total_penalty_raw = calculate_penalties_compiled(
-            edge_weights,
-            src,
-            dst,
-            N_NODES,
-            triple_nodes,
-            join_nodes,
-            non_root_joins,
-            root,
-            src_is_triple_mask,
-            src_is_join_mask,
-            triples_num,
-            device,
-            lambda_triple_in,
-            lambda_triple_out,
-            lambda_join_in,
-            lambda_join_out,
-            lambda_acyclic,
-            lambda_left_linear
-        )
-
-        lambda_total = (lambda_total_penalty * (min(1.0, step / 150) ** lambda_ramp_exponent)) if use_lambda_ramping else lambda_total_penalty
-        loss = cost_pred + lambda_total * total_penalty
-
-        # best tracking -------------------------------------------------------
-        #if return_best and total_penalty_raw < min_penalty_threshold and cost_pred < best_cost:
-        #    best_cost = cost_pred.detach()
-        #    best_logits_1 = edge_logits.detach().clone()
-        #    best_logits_2 = edge_logits_slot2.detach().clone()
-
-        # backward -----------------------------------------------------------
-        loss.backward()
-        
-        # Gradient improvements -----------------------------------------------
-        params_to_clip = [edge_logits, edge_logits_slot2]
-
-        
-        optimiser.step()
-        
-
-    # 4.  Hard decoding  -------------------------------------------------
-    # ------------------------------------------------------------------
-    with torch.no_grad():
-        logits1_final = best_logits_1 if (return_best and best_cost < float("inf")) else edge_logits
-        logits2_final = best_logits_2 if (return_best and best_cost < float("inf") and logit_sampling=="dual-softmax") else edge_logits_slot2
-
-        if logit_sampling == "dual-softmax":
-            final_edge_weights = torch.zeros(num_edges, device=device)
-            for j in join_nodes:
-                cand = dst == j
-                idx1 = torch.argmax(logits1_final[cand]); final_edge_weights[cand.nonzero(as_tuple=True)[0][idx1]] = 1.0
-                idx2 = torch.argmax(logits2_final[cand]); final_edge_weights[cand.nonzero(as_tuple=True)[0][idx2]] = 1.0
-
-
-        # assemble *full* adjacency (zero rows for triple targets)
-        final_A = torch.zeros((N_NODES, N_NODES), device=device)
-        final_A[src, dst] = final_edge_weights
-
-        final_log_cost = model(data.x, edge_index, edge_weight=final_edge_weights).item()
-        predicted_cost_exp = float(np.exp(final_log_cost))
-
-    return final_A, triples_num, predicted_cost_exp
 
 
 def optimize_query_gumbel_sinkhorn(
@@ -2131,9 +1903,9 @@ def CMA(
     lambda_join_out: float = 1000.0,
     lambda_left_linear: float = 1000.0,
     lambda_total_penalty: float = 1.0,
-    use_lambda_ramping: bool = True,
+    use_lambda_ramping: bool = False,
     lambda_ramp_exponent: float = 2.0,
-    logit_sampling: str = 'dual-softmax',
+    logit_sampling: str = 'softmax',
     decoding_method: str = 'greedy',
     save_animation_data: bool = False,
     num_workers: int = 1,
@@ -2146,6 +1918,8 @@ def CMA(
     optimization instead of gradient descent.
     """
     import nevergrad as ng
+
+    use_lambda_ramping = False
     
     model.eval()
     data = query_data.to(device)

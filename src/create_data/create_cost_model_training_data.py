@@ -228,17 +228,18 @@ def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> Lis
 
 
 def create_diverse_join_orders(triples: List[List[str]], num_random: int = 3, 
-                                beam_width: int = 1) -> List[Tuple[Query, Optional[float]]]:
+                                beam_width: int = 1, include_worst_plans: bool = True) -> List[Tuple[Query, Optional[float]]]:
     """
     Create a diverse set of join orders including:
     - beam_width beam-search-best plans (minimize real execution cost)
-    - beam_width beam-search-worst plans (maximize real execution cost)
+    - beam_width beam-search-worst plans (maximize real execution cost) - Optional
     - num_random random plans (for coverage of middle ground)
     
     Args:
         triples: List of triple patterns
         num_random: Number of random plans to generate
         beam_width: Beam width for search (returns this many best and worst plans)
+        include_worst_plans: Whether to include worst plans (default: True)
         
     Returns:
         List of (Query, cost_or_None) tuples. Beam search plans include pre-computed costs,
@@ -255,12 +256,13 @@ def create_diverse_join_orders(triples: List[List[str]], num_random: int = 3,
         return None
     
     # 2. Beam search worst plans (come with pre-computed costs)
-    try:
-        worst_plans = beam_search_worst_plan(triples, beam_width=beam_width)
-        plans.extend(worst_plans)  # Add all beam_width worst plans
-    except Exception as e:
-        print(f"Error creating beam-search-worst plans: {e}")
-        return None
+    if include_worst_plans:
+        try:
+            worst_plans = beam_search_worst_plan(triples, beam_width=beam_width)
+            plans.extend(worst_plans)  # Add all beam_width worst plans
+        except Exception as e:
+            print(f"Error creating beam-search-worst plans: {e}")
+            return None
     
     # 3. Random plans (cost will be calculated later)
     for i in range(num_random):
@@ -366,7 +368,8 @@ def generate_invalid_plan(valid_data: Data) -> Data:
 
 def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans: int = 10, 
                           use_diverse_plans: bool = False, num_random_plans: int = 3,
-                          beam_width: int = 1) -> SPARQLQuery:
+                          beam_width: int = 1, include_worst_plans: bool = True,
+                          include_invalid_plan: bool = True) -> SPARQLQuery:
     """
     Convert a raw query to a SPARQLQuery with multiple join plans and costs.
     
@@ -378,6 +381,8 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
         use_diverse_plans: If True, use beam-search-best, beam-search-worst, and random plans
         num_random_plans: Number of random plans when using diverse mode
         beam_width: Beam width for search (1 = greedy, higher = more exploration)
+        include_worst_plans: Whether to include worst plans
+        include_invalid_plan: Whether to include an invalid plan
         
     Returns:
         SPARQLQuery object with multiple join plans
@@ -387,7 +392,8 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
     if use_diverse_plans:
         # Use diverse plan generation: beam-search-best, beam-search-worst, and random plans
         plans_with_costs = create_diverse_join_orders(triples, num_random=num_random_plans, 
-                                                       beam_width=beam_width)
+                                                       beam_width=beam_width,
+                                                       include_worst_plans=include_worst_plans)
         if plans_with_costs is None:
             return None
     else:
@@ -440,8 +446,8 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
             torch_data_list.append(None)  # Add None for failed plans
             triples_where_list.append([])  # Add empty list for failed plans
     
-    # Generate one invalid plan if we have valid plans # TODO make a flag here to make invalid plans optional
-    if torch_data_list:
+    # Generate one invalid plan if we have valid plans and it is requested
+    if include_invalid_plan and torch_data_list:
         try:
             # Find first valid data to base off
             valid_idx = next((i for i, d in enumerate(torch_data_list) if d is not None), -1)
@@ -605,7 +611,8 @@ def save_sparql_queries_single_file(sparql_queries, output_file):
     print(f"Saved {len(sparql_queries)} SPARQLQuery objects to {output_file}")
 
 
-def save_sparql_queries_human_readable(sparql_queries, output_file, use_diverse_plans=True, beam_width=1):
+def save_sparql_queries_human_readable(sparql_queries, output_file, use_diverse_plans=True, 
+                                       beam_width=1, include_worst_plans=True):
     """
     Save SPARQLQuery objects to a human-readable JSON file.
     
@@ -616,14 +623,15 @@ def save_sparql_queries_human_readable(sparql_queries, output_file, use_diverse_
     
     When use_diverse_plans=True, plans are labeled based on beam_width:
     - Indices [0:beam_width): beam_search_best plans (ranked 1st, 2nd, etc.)
-    - Indices [beam_width:2*beam_width): beam_search_worst plans (ranked 1st, 2nd, etc.)
-    - Indices [2*beam_width:): random plans
+    - Indices [beam_width:2*beam_width): beam_search_worst plans (ranked 1st, 2nd, etc.) (if included)
+    - Remaining: random plans
     
     Args:
         sparql_queries: List of SPARQLQuery objects
         output_file: Path to save the JSON file
         use_diverse_plans: If True, label plans with beam search info
         beam_width: Beam width used for search (to properly label plans)
+        include_worst_plans: Whether worst plans were included
     """
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     
@@ -632,17 +640,27 @@ def save_sparql_queries_human_readable(sparql_queries, output_file, use_diverse_
         if not use_diverse_plans:
             return "random"
         
-        # With beam_width plans, we have:
-        # [0:beam_width) = beam_search_best plans
-        # [beam_width:2*beam_width) = beam_search_worst plans
-        # [2*beam_width:) = random plans
-        
-        if plan_idx < beam_width:
-            return f"beam_search_best_rank_{plan_idx + 1}"
-        elif plan_idx < 2 * beam_width:
-            return f"beam_search_worst_rank_{plan_idx - beam_width + 1}"
+        if include_worst_plans:
+            # With beam_width plans, we have:
+            # [0:beam_width) = beam_search_best plans
+            # [beam_width:2*beam_width) = beam_search_worst plans
+            # [2*beam_width:) = random plans
+            
+            if plan_idx < beam_width:
+                return f"beam_search_best_rank_{plan_idx + 1}"
+            elif plan_idx < 2 * beam_width:
+                return f"beam_search_worst_rank_{plan_idx - beam_width + 1}"
+            else:
+                return "random"
         else:
-            return "random"
+            # With beam_width plans, we have:
+            # [0:beam_width) = beam_search_best plans
+            # [beam_width:) = random plans
+            
+            if plan_idx < beam_width:
+                return f"beam_search_best_rank_{plan_idx + 1}"
+            else:
+                return "random"
     
     def to_python_type(val):
         """Convert numpy types to native Python types for JSON serialization."""
@@ -789,12 +807,15 @@ if __name__ == "__main__":
     USE_DIVERSE_PLANS = True  # If True: generate beam-search-best, beam-search-worst, and random plans
                                # If False: generate only random plans (original behavior)
     
+    INCLUDE_WORST_PLANS = False # If True: include beam-search-worst plans in diverse generation
+    INCLUDE_INVALID_PLAN = False # If True: include one invalid plan per query (randomly mutated)
+
     # Beam width for beam search (1 = greedy, higher = more exploration)
     # Complexity: O(n^2 * beam_width) per query
     BEAM_WIDTH = 3
     
     # Number of random plans to create per query
-    # When USE_DIVERSE_PLANS=True: total plans = 2 (beam search) + NUM_RANDOM_PLANS
+    # When USE_DIVERSE_PLANS=True: total plans = beam_width (best) + [beam_width (worst)] + NUM_RANDOM_PLANS
     # When USE_DIVERSE_PLANS=False: total plans = NUM_RANDOM_PLANS
     NUM_RANDOM_PLANS = 3
     
@@ -828,7 +849,9 @@ if __name__ == "__main__":
                 num_plans=NUM_RANDOM_PLANS,
                 use_diverse_plans=USE_DIVERSE_PLANS,
                 num_random_plans=NUM_RANDOM_PLANS,
-                beam_width=BEAM_WIDTH
+                beam_width=BEAM_WIDTH,
+                include_worst_plans=INCLUDE_WORST_PLANS,
+                include_invalid_plan=INCLUDE_INVALID_PLAN
             )
             if sparql_query is None:
                 return None
@@ -895,6 +918,7 @@ if __name__ == "__main__":
     
     # Save human-readable version
     human_readable_file = sparql_queries_file.replace('.pt', '_readable.json')
-    save_sparql_queries_human_readable(sparql_queries, human_readable_file, use_diverse_plans=USE_DIVERSE_PLANS, beam_width=BEAM_WIDTH)
+    save_sparql_queries_human_readable(sparql_queries, human_readable_file, use_diverse_plans=USE_DIVERSE_PLANS, 
+                                       beam_width=BEAM_WIDTH, include_worst_plans=INCLUDE_WORST_PLANS)
 
     print("\nDataset creation complete!")

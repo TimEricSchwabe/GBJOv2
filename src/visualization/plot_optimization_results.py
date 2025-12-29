@@ -8,12 +8,14 @@ Styled for IJCAI paper submission.
 import json
 import os
 import argparse
+from tkinter import FALSE
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.ticker import MaxNLocator
 from typing import Dict, Any
+from matplotlib.ticker import LogLocator, ScalarFormatter, FuncFormatter, NullLocator
 
 # =============================================================================
 # IJCAI Paper Formatting Constants
@@ -84,14 +86,15 @@ setup_paper_style()
 METHODS_MAP = {
     'exhaustive': 'Exhaustive',
     'greedy': 'Greedy',
-    'gradient': 'Gradient',
+    'gradient': 'GBJO',
     'dp': 'DP',
     'random': 'Random',
     'II': 'Iterative Improvement',
     'GEQO': 'Genetic Search',
     'NeuralSort': 'Neural Sort',
     'CMA': 'CMA',
-    'GBJO_CG': 'GBJO_CG'
+    'GBJO_CG': 'GBJO_CG',
+    'GBJO-Meta': 'GBJO-Meta'
 }
 
 # Define the list of methods to plot (keys from METHODS_MAP) determines Order and Selection
@@ -104,8 +107,9 @@ METHODS_TO_PLOT = [
     'GEQO',
     'random',
     'NeuralSort',
-    'CMA'
-    'GBJO_CG'
+    'CMA',
+    'GBJO_CG',
+    'GBJO-Meta'
 ]
 
 # Colorblind-friendly palette (Wong, 2011 / IBM Design)
@@ -113,14 +117,17 @@ METHODS_TO_PLOT = [
 METHOD_STYLES = {
     'Exhaustive': {'color': '#E69F00', 'marker': 'o', 'linestyle': '-'},       # Orange
     'DP': {'color': '#56B4E9', 'marker': 's', 'linestyle': '--'},              # Sky Blue  
-    'Gradient': {'color': '#0072B2', 'marker': '^', 'linestyle': '-'},         # Bluish Green
+    'GBJO': {'color': '#0072B2', 'marker': '^', 'linestyle': '-'},         # Bluish Green
     'Iterative Improvement': {'color': '#F0E442', 'marker': 'D', 'linestyle': ':'},  # Yellow
     'Greedy': {'color': '#009E73', 'marker': 'v', 'linestyle': '-.'},          # Blue
     'Genetic Search': {'color': '#D55E00', 'marker': 'P', 'linestyle': '-'},   # Vermillion
     'Random': {'color': '#CC79A7', 'marker': 'X', 'linestyle': '--'},          # Reddish Purple
     'Neural Sort': {'color': '#666666', 'marker': 'h', 'linestyle': ':'},      # Dark Gray
     'CMA': {'color': '#000000', 'marker': '*', 'linestyle': '-.'},             # Black
-    'GBJO_CG': {'color': '#FF69B4', 'marker': '*', 'linestyle': '-.'},             # pink
+    # Matches METHODS_MAP display name for key 'GBJO-Meta'
+    'GBJO-Meta': {'color': '#FF69B4', 'marker': '*', 'linestyle': '-.'},       # Pink
+    # If present in results
+    'GBJO_CG': {'color': '#9E69FF', 'marker': 'p', 'linestyle': '--'},          # Purple
 }
 
 def load_data(results_dir: str) -> pd.DataFrame:
@@ -265,12 +272,12 @@ def plot_mean_costs_bar(df: pd.DataFrame, output_dir: str):
     fig.savefig(os.path.join(output_dir, 'mean_costs_barplot.pdf'), **SAVE_KWARGS)
     plt.close(fig)
 
-def plot_lineplots_by_size(df: pd.DataFrame, output_dir: str):
+def plot_lineplots_by_size(df: pd.DataFrame, output_dir: str, metric: str = "median"):
     """True and predicted lineplots per query size (mean cost)"""
     if 'query_size' not in df.columns:
         return
 
-    grouped = df.groupby('query_size').median()
+    grouped = df.groupby('query_size').agg(metric)
     
     # Sort columns to ensure consistent legend order
     method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
@@ -298,14 +305,15 @@ def plot_lineplots_by_size(df: pd.DataFrame, output_dir: str):
             
     if has_data:
         ax.set_xlabel('Query Size (Triple Patterns)')
-        ax.set_ylabel('Median True Cost')
+        #ax.set_ylabel('Median True Cost')
         ax.set_yscale('log')
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         # Compact legend outside plot or in best location
         ax.legend(loc='best', ncol=3, fontsize=5, frameon=True, 
                   handlelength=0.8, columnspacing=0.4)
         ax.margins(x=0.05, y=0.1)
-        fig.savefig(os.path.join(output_dir, 'lineplot_true_costs.pdf'), **SAVE_KWARGS)
+        ax.grid(False)
+        fig.savefig(os.path.join(output_dir, f'lineplot_true_costs_{metric}.pdf'), **SAVE_KWARGS)
     plt.close(fig)
 
     # 2. Predicted Costs
@@ -331,13 +339,101 @@ def plot_lineplots_by_size(df: pd.DataFrame, output_dir: str):
             
     if has_data:
         ax.set_xlabel('Query Size (Triple Patterns)')
-        ax.set_ylabel('Median Predicted Cost')
+        metric_label = metric.capitalize()
+        ax.set_ylabel(f'{metric_label} Predicted Cost')
         ax.set_yscale('log')
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
         ax.legend(loc='best', ncol=3, fontsize=5, frameon=True,
                   handlelength=0.8, columnspacing=0.4)
         ax.margins(x=0.05, y=0.1)
-        fig.savefig(os.path.join(output_dir, 'lineplot_predicted_costs.pdf'), **SAVE_KWARGS)
+        fig.savefig(os.path.join(output_dir, f'lineplot_predicted_costs_{metric}.pdf'), **SAVE_KWARGS)
+    plt.close(fig)
+
+def plot_lineplots_by_size_geomean(df: pd.DataFrame, output_dir: str):
+    """True and predicted lineplots per query size (geometric mean cost)."""
+    if 'query_size' not in df.columns:
+        return
+
+    # Geometric mean is only defined for positive values; we also ignore NaNs.
+    def geometric_mean(s: pd.Series) -> float:
+        s = s.dropna()
+        s = s[s > 0]
+        if s.empty:
+            return np.nan
+        return float(np.exp(np.mean(np.log(s.values))))
+
+    # Aggregate all cost columns by query_size using geometric mean
+    cost_cols = [c for c in df.columns if c.endswith('_real') or c.endswith('_pred')]
+    if not cost_cols:
+        return
+
+    grouped = df.groupby('query_size')[cost_cols].agg(geometric_mean)
+
+    # Sort columns to ensure consistent legend order
+    method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
+
+    # 1. True Costs
+    fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
+    real_cols = [c for c in grouped.columns if '_real' in c]
+    has_data = False
+
+    real_cols.sort(key=lambda c: method_ranks.get(c.replace('_real', ''), 99))
+
+    for col in real_cols:
+        if grouped[col].notna().any():
+            method = col.replace('_real', '')
+            style = METHOD_STYLES.get(method, {})
+
+            ax.plot(grouped.index, grouped[col],
+                    label=method,
+                    color=style.get('color'),
+                    marker=style.get('marker'),
+                    linestyle=style.get('linestyle', '-'),
+                    markeredgecolor='white',
+                    markeredgewidth=0.3)
+            has_data = True
+
+    if has_data:
+        ax.set_xlabel('Query Size (Triple Patterns)')
+        ax.set_ylabel('Geometric Mean True Cost')
+        ax.set_yscale('log')
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.legend(loc='best', ncol=3, fontsize=5, frameon=True,
+                  handlelength=0.8, columnspacing=0.4)
+        ax.margins(x=0.05, y=0.1)
+        fig.savefig(os.path.join(output_dir, 'lineplot_true_costs_geomean.pdf'), **SAVE_KWARGS)
+    plt.close(fig)
+
+    # 2. Predicted Costs
+    fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
+    pred_cols = [c for c in grouped.columns if '_pred' in c]
+    has_data = False
+
+    pred_cols.sort(key=lambda c: method_ranks.get(c.replace('_pred', ''), 99))
+
+    for col in pred_cols:
+        if grouped[col].notna().any():
+            method = col.replace('_pred', '')
+            style = METHOD_STYLES.get(method, {})
+
+            ax.plot(grouped.index, grouped[col],
+                    label=method,
+                    color=style.get('color'),
+                    marker=style.get('marker'),
+                    linestyle=style.get('linestyle', '-'),
+                    markeredgecolor='white',
+                    markeredgewidth=0.3)
+            has_data = True
+
+    if has_data:
+        ax.set_xlabel('Query Size (Triple Patterns)')
+        ax.set_ylabel('Geometric Mean Predicted Cost')
+        ax.set_yscale('log')
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.legend(loc='best', ncol=3, fontsize=5, frameon=True,
+                  handlelength=0.8, columnspacing=0.4)
+        ax.margins(x=0.05, y=0.1)
+        fig.savefig(os.path.join(output_dir, 'lineplot_predicted_costs_geomean.pdf'), **SAVE_KWARGS)
     plt.close(fig)
 
 def plot_boxplot_per_size(df: pd.DataFrame, output_dir: str):
@@ -363,7 +459,13 @@ def plot_boxplot_per_size(df: pd.DataFrame, output_dir: str):
         unique_methods = melted['Method'].unique()
         hue_order = sorted(unique_methods, key=lambda m: method_ranks.get(m, 99))
         
+        # Palette must contain valid matplotlib colors; fill in missing ones defensively.
         palette = {m: METHOD_STYLES.get(m, {}).get('color') for m in hue_order}
+        missing = [m for m, c in palette.items() if c is None]
+        if missing:
+            fallback_colors = sns.color_palette("colorblind", n_colors=len(missing))
+            for m, c in zip(missing, fallback_colors):
+                palette[m] = c
         
         sns.boxplot(data=melted, x='query_size', y='Cost', hue='Method', 
                     palette=palette, hue_order=hue_order, ax=ax,
@@ -654,6 +756,8 @@ def plot_performance_profile(df: pd.DataFrame, output_dir: str):
         
         # Compute CDF: fraction of queries where ratio <= τ
         y_vals = np.array([np.sum(ratios[m] <= tau) / n_queries for tau in x_vals])
+        auc = np.trapz(y_vals, x_vals)
+        print(f"AUC for {m}: {auc:.4f} (max ratio capped at {max_ratio:.2f})")
         
         ax.plot(x_vals, y_vals,
                 label=m,
@@ -662,20 +766,201 @@ def plot_performance_profile(df: pd.DataFrame, output_dir: str):
                 linewidth=1.2)
     
     ax.set_xlabel(r'Performance Ratio $\tau$')
-    ax.set_ylabel(r'$P(\mathrm{ratio} \leq \tau)$')
+    #ax.set_ylabel(r'$P(\mathrm{ratio} \leq \tau)$')
     ax.set_xlim(1.0, max_ratio)
     ax.set_ylim(0, 1.02)
     ax.set_xscale('log')
+    custom_ticks = [1, 2, 5, 10, 20, 50, 100] 
+    # Filter them to only show what fits in your current plot range
+    ticks_to_show = [t for t in custom_ticks if t <= max_ratio]
+    
+    ax.set_xticks(ticks_to_show)
+    
+    # 2. Use a lambda to force integer display (this removes the .0)
+    from matplotlib.ticker import FuncFormatter, NullFormatter
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{int(x)}'))
+    
+    # 3. This is the key to stopping the crowding: hide all minor ticks/labels
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.xaxis.set_minor_locator(NullLocator())
+    ax.tick_params(axis='x', rotation=0) 
     # Place legend outside the plot area to avoid overlap
     ax.legend(loc='lower right', ncol=3, fontsize=5, frameon=True,
               handlelength=0.8, columnspacing=0.4, bbox_to_anchor=(0.98, 0.02))
-    
+    ax.grid(False)
     fig.savefig(os.path.join(output_dir, 'performance_profile.pdf'), **SAVE_KWARGS)
     plt.close(fig)
 
+
+def plot_optimization_steps_sweep(root_sweep_dir: str, output_dir: str, 
+                                  methods_to_plot: list = None,
+                                  exclude_query_sizes: list = None,
+                                  metric: str = "median"):
+    """
+    Plot metric (median/mean/geomean) true cost vs optimization_steps by walking
+    through subdirectories (steps_*) in root_sweep_dir.
+    
+    Args:
+        root_sweep_dir: Directory containing steps_X/detailed_results.json folders
+        output_dir: Where to save plots
+        methods_to_plot: List of method names to include (None = all)
+        exclude_query_sizes: List of query sizes (integers) to exclude
+        metric: "median", "mean", or "geomean"
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Map friendly names to internal keys
+    # Note: Using consistent display names from start is better
+    PLANKEY_TO_DISPLAY = {
+        "gradient": "GBJO",
+        "GEQO": "Genetic Search",
+        "II": "Iterative Improvement",
+        "NeuralSort": "Neural Sort",
+        "CMA": "CMA",
+        "random": "Random",
+    }
+    
+    # 1. Discover step directories
+    step_dirs = {}
+    try:
+        for entry in os.listdir(root_sweep_dir):
+            if entry.startswith("steps_") and os.path.isdir(os.path.join(root_sweep_dir, entry)):
+                try:
+                    step_val = int(entry.split("_")[1])
+                    step_dirs[step_val] = os.path.join(root_sweep_dir, entry)
+                except ValueError:
+                    continue
+    except FileNotFoundError:
+        print(f"Sweep directory not found: {root_sweep_dir}")
+        return
+
+    if not step_dirs:
+        print(f"No steps_* directories found in {root_sweep_dir}")
+        return
+        
+    sorted_steps = sorted(step_dirs.keys())
+    
+    # 2. Collect data for each step
+    # structure: {method_display_name: {step_val: aggregated_cost}}
+    aggregated_data = {} 
+    
+    for step in sorted_steps:
+        res_file = os.path.join(step_dirs[step], "detailed_results.json")
+        if not os.path.exists(res_file):
+            continue
+            
+        with open(res_file, 'r') as f:
+            queries = json.load(f)
+            
+        # Extract costs per method
+        method_costs = {} # {display_name: [list of costs]}
+        
+        for q in queries:
+            q_size = q.get('ntriplepattern', 0)
+            if exclude_query_sizes and q_size in exclude_query_sizes:
+                continue
+                
+            plans = q.get('plans', {})
+            for key, plan_data in plans.items():
+                cost = plan_data.get('real_cost')
+                if cost is None or cost == float('inf') or not np.isfinite(cost):
+                    continue
+                
+                display_name = PLANKEY_TO_DISPLAY.get(key, key)
+                
+                if display_name not in method_costs:
+                    method_costs[display_name] = []
+                method_costs[display_name].append(float(cost))
+        
+        # Aggregate
+        for m_name, costs in method_costs.items():
+            if not costs:
+                continue
+            
+            val = float('nan')
+            if metric == "median":
+                val = np.median(costs)
+            elif metric == "mean":
+                val = np.mean(costs)
+            elif metric == "geomean":
+                # filter <= 0 for geomean
+                pos_costs = [c for c in costs if c > 0]
+                if pos_costs:
+                    val = np.exp(np.mean(np.log(pos_costs)))
+            
+            if m_name not in aggregated_data:
+                aggregated_data[m_name] = {}
+            aggregated_data[m_name][step] = val
+
+    # 3. Plotting
+    fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
+    
+    # Filter methods if requested
+    available_methods = list(aggregated_data.keys())
+    if methods_to_plot:
+        plot_methods = [m for m in available_methods if m in methods_to_plot]
+    else:
+        plot_methods = available_methods
+
+    # Sort by preferred order
+    preferred_order = ["GBJO", "Iterative Improvement", "Genetic Search", "Neural Sort", "CMA"]
+    plot_methods.sort(key=lambda m: preferred_order.index(m) if m in preferred_order else 999)
+    
+    has_any = False
+    for method in plot_methods:
+        data_points = aggregated_data[method]
+        xs = []
+        ys = []
+        for s in sorted_steps:
+            if s in data_points:
+                xs.append(s)
+                ys.append(data_points[s])
+        
+        if not xs:
+            continue
+            
+        style = METHOD_STYLES.get(method, {})
+        ax.plot(xs, ys, 
+                label=method,
+                color=style.get("color"),
+                marker=style.get("marker", "o"),
+                linestyle=style.get("linestyle", "-"),
+                markeredgecolor="white",
+                markeredgewidth=0.3)
+        has_any = True
+        
+    if not has_any:
+        print("No valid data to plot.")
+        plt.close(fig)
+        return
+
+    ax.set_xlabel("Optimization Steps")
+    metric_label = metric.capitalize()
+    if metric == "geomean": metric_label = "Geometric Mean"
+    ax.set_ylabel(f"{metric_label} True Cost")
+    ax.set_yscale("log")
+    
+    # X-axis formatting
+    try:
+        ax.set_xscale("log")
+        ax.set_xticks(sorted_steps)
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{int(x)}"))
+        ax.xaxis.set_minor_locator(NullLocator())
+    except Exception:
+        ax.set_xticks(sorted_steps)
+
+    ax.legend(loc="best", ncol=2, fontsize=6, frameon=True, handlelength=0.9, columnspacing=0.6)
+    ax.grid(False)
+
+    out_filename = f"optimization_steps_sweep_{metric}.pdf"
+    out_path = os.path.join(output_dir, out_filename)
+    fig.savefig(out_path, **SAVE_KWARGS)
+    plt.close(fig)
+    print(f"Saved sweep plot to: {out_path}")
+
 def main():
     parser = argparse.ArgumentParser(description="Plot optimization results.")
-    parser.add_argument("results_dir", nargs='?', default="optimization_results/run_20251223_142524", 
+    parser.add_argument("results_dir", nargs='?', default="optimization_results/WIKIDATA-PATH-I-10", 
                         help="Directory containing detailed_results.json")
     args = parser.parse_args()
 
@@ -698,6 +983,8 @@ def main():
     plot_overall_boxplot(df, output_dir)
     plot_mean_costs_bar(df, output_dir)
     plot_lineplots_by_size(df, output_dir)
+    plot_lineplots_by_size(df, output_dir, metric="mean")
+    plot_lineplots_by_size_geomean(df, output_dir)
     plot_boxplot_per_size(df, output_dir)
     plot_scatter_correlations(df, output_dir)
     plot_win_loss_heatmap(df, output_dir)
