@@ -88,24 +88,44 @@ def create_random_join_orders(triples: List[List[str]], count: int, rdf2vec_dict
     return plans
 
 
-def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> List[Tuple[Query, float]]:
+def shares_variables(node1, node2) -> bool:
+    """
+    Check if two nodes (Triple or Join) share at least one variable.
+    Used to avoid Cartesian products in join plans.
+    """
+    return bool(node1.variables & node2.variables)
+
+
+def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1, 
+                          avoid_cartesian: bool = False) -> List[Tuple[Query, float]]:
     """
     Build left-deep plans using beam search to find plans that minimize cost.
     Keeps top beam_width partial plans at each step.
     
+    Handles errors gracefully by skipping failed candidates and returning
+    whatever complete plans could be built.
+    
     Args:
         triples: List of triple patterns (each is [subject, predicate, object])
         beam_width: Number of top plans to keep at each step (1 = greedy)
+        avoid_cartesian: If True, skip joins where subtrees don't share variables
         
     Returns:
-        List of (Query object, cost) tuples - up to beam_width best plans sorted by cost ascending
+        List of (Query object, cost) tuples - up to beam_width best plans sorted by cost ascending.
+        Returns empty list if no complete plans could be built.
     """
     triple_objs = [Triple(*(Entity(name=name) for name in t[:3])) for t in triples]
     n = len(triple_objs)
     
     if n == 1:
         # C_out cost for a single triple is 0 (leaves have no cost)
-        return [(Query(root=triple_objs[0], triples_num=1), 0)]
+        try:
+            # Still need to verify the triple is valid
+            triple_objs[0].get_cardinality()
+            return [(Query(root=triple_objs[0], triples_num=1), 0)]
+        except Exception as e:
+            print(f"Error getting cardinality for single triple: {e}")
+            return []
     
     # Initialize beam with single triples
     # Each beam entry: (cardinality_for_sorting, plan, used_indices_frozenset)
@@ -115,12 +135,14 @@ def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> List
         try:
             cardinality = triple_objs[i].get_cardinality()
             beam.append((cardinality, triple_objs[i], frozenset({i})))
-        except Exception:
+        except Exception as e:
+            print(f"Error getting cardinality for triple {i}, skipping: {e}")
             continue
     
     if not beam:
-        # Fallback if all failed
-        beam = [(float('inf'), triple_objs[0], frozenset({0}))]
+        # All triples failed - cannot build any plan
+        print("All triples failed cardinality check, cannot build any plan")
+        return []
     
     # Sort by cardinality (ascending) to pick best starting triples, keep top beam_width
     beam.sort(key=lambda x: x[0])
@@ -130,52 +152,79 @@ def beam_search_best_plan(triples: List[List[str]], beam_width: int = 1) -> List
     beam = [(0, plan, used) for (_, plan, used) in beam]
     
     # Expand beam n-1 times (add one triple at each step)
-    for _ in range(n - 1):
+    for step in range(n - 1):
         candidates = []
         
         for current_cost, current_plan, used in beam:
             remaining = set(range(n)) - used
             
             for idx in remaining:
+                # Skip Cartesian products if requested
+                if avoid_cartesian and not shares_variables(current_plan, triple_objs[idx]):
+                    continue
+                
                 new_plan = Join(left=current_plan, right=triple_objs[idx])
                 try:
                     # Incremental cost: only query this join's cardinality, reuse current_cost
                     new_cardinality = new_plan.get_cardinality()
                     new_cost = new_cardinality + current_cost
                     candidates.append((new_cost, new_plan, used | {idx}))
-                except Exception:
-                    raise
+                except Exception as e:
+                    # Skip this candidate but continue with others
+                    print(f"Error in beam search step {step}, skipping candidate: {e}")
                     continue
         
         if not candidates:
+            # No valid candidates at this step - could be due to Cartesian product filtering
+            if avoid_cartesian:
+                print(f"No valid candidates at step {step} (possibly only Cartesian products remain)")
+            else:
+                print(f"No valid candidates at step {step}, returning partial results")
             break
             
         # Sort by cost and keep top beam_width
         candidates.sort(key=lambda x: x[0])
         beam = candidates[:beam_width]
     
-    # Return ALL complete plans in the beam (already sorted by cost ascending)
-    return [(Query(root=plan, triples_num=n), cost) for cost, plan, _ in beam]
+    # Return only COMPLETE plans (those that include all n triples)
+    complete_plans = [
+        (Query(root=plan, triples_num=n), cost) 
+        for cost, plan, used in beam 
+        if len(used) == n
+    ]
+    
+    return complete_plans
 
 
-def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> List[Tuple[Query, float]]:
+def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1,
+                           avoid_cartesian: bool = False) -> List[Tuple[Query, float]]:
     """
     Build left-deep plans using beam search to find plans that MAXIMIZE cost.
     Keeps top beam_width partial plans (by highest cost) at each step.
     
+    Handles errors gracefully by skipping failed candidates and returning
+    whatever complete plans could be built.
+    
     Args:
         triples: List of triple patterns (each is [subject, predicate, object])
         beam_width: Number of top plans to keep at each step (1 = greedy)
+        avoid_cartesian: If True, skip joins where subtrees don't share variables
         
     Returns:
-        List of (Query object, cost) tuples - up to beam_width worst plans sorted by cost descending
+        List of (Query object, cost) tuples - up to beam_width worst plans sorted by cost descending.
+        Returns empty list if no complete plans could be built.
     """
     triple_objs = [Triple(*(Entity(name=name) for name in t[:3])) for t in triples]
     n = len(triple_objs)
     
     if n == 1:
         # C_out cost for a single triple is 0 (leaves have no cost)
-        return [(Query(root=triple_objs[0], triples_num=1), 0)]
+        try:
+            triple_objs[0].get_cardinality()
+            return [(Query(root=triple_objs[0], triples_num=1), 0)]
+        except Exception as e:
+            print(f"Error getting cardinality for single triple: {e}")
+            return []
     
     # Initialize beam with single triples
     # Each beam entry: (cardinality_for_sorting, plan, used_indices_frozenset)
@@ -185,12 +234,14 @@ def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> Lis
         try:
             cardinality = triple_objs[i].get_cardinality()
             beam.append((cardinality, triple_objs[i], frozenset({i})))
-        except Exception:
+        except Exception as e:
+            print(f"Error getting cardinality for triple {i}, skipping: {e}")
             continue
     
     if not beam:
-        # Fallback if all failed
-        beam = [(0, triple_objs[0], frozenset({0}))]
+        # All triples failed - cannot build any plan
+        print("All triples failed cardinality check, cannot build any plan")
+        return []
     
     # Sort by cardinality (descending) to pick worst starting triples, keep top beam_width
     beam.sort(key=lambda x: x[0], reverse=True)
@@ -200,77 +251,117 @@ def beam_search_worst_plan(triples: List[List[str]], beam_width: int = 1) -> Lis
     beam = [(0, plan, used) for (_, plan, used) in beam]
     
     # Expand beam n-1 times (add one triple at each step)
-    for _ in range(n - 1):
+    for step in range(n - 1):
         candidates = []
         
         for current_cost, current_plan, used in beam:
             remaining = set(range(n)) - used
             
             for idx in remaining:
+                # Skip Cartesian products if requested
+                if avoid_cartesian and not shares_variables(current_plan, triple_objs[idx]):
+                    continue
+                
                 new_plan = Join(left=current_plan, right=triple_objs[idx])
                 try:
                     # Incremental cost: only query this join's cardinality, reuse current_cost
                     new_cardinality = new_plan.get_cardinality()
                     new_cost = new_cardinality + current_cost
                     candidates.append((new_cost, new_plan, used | {idx}))
-                except Exception:
+                except Exception as e:
+                    # Skip this candidate but continue with others
+                    print(f"Error in beam search step {step}, skipping candidate: {e}")
                     continue
         
         if not candidates:
+            # No valid candidates at this step - could be due to Cartesian product filtering
+            if avoid_cartesian:
+                print(f"No valid candidates at step {step} (possibly only Cartesian products remain)")
+            else:
+                print(f"No valid candidates at step {step}, returning partial results")
             break
             
         # Sort by cost (descending) and keep top beam_width
         candidates.sort(key=lambda x: x[0], reverse=True)
         beam = candidates[:beam_width]
     
-    # Return ALL complete plans in the beam (already sorted by cost descending)
-    return [(Query(root=plan, triples_num=n), cost) for cost, plan, _ in beam]
+    # Return only COMPLETE plans (those that include all n triples)
+    complete_plans = [
+        (Query(root=plan, triples_num=n), cost) 
+        for cost, plan, used in beam 
+        if len(used) == n
+    ]
+    
+    return complete_plans
 
 
 def create_diverse_join_orders(triples: List[List[str]], num_random: int = 3, 
-                                beam_width: int = 1, include_worst_plans: bool = True) -> List[Tuple[Query, Optional[float]]]:
+                                beam_width: int = 1, include_worst_plans: bool = True,
+                                avoid_cartesian: bool = False) -> List[Tuple[Query, Optional[float]]]:
     """
     Create a diverse set of join orders including:
     - beam_width beam-search-best plans (minimize real execution cost)
     - beam_width beam-search-worst plans (maximize real execution cost) - Optional
     - num_random random plans (for coverage of middle ground)
     
+    Handles errors gracefully - collects whatever plans succeed and continues.
+    
     Args:
         triples: List of triple patterns
         num_random: Number of random plans to generate
         beam_width: Beam width for search (returns this many best and worst plans)
         include_worst_plans: Whether to include worst plans (default: True)
+        avoid_cartesian: If True, skip joins where subtrees don't share variables
         
     Returns:
         List of (Query, cost_or_None) tuples. Beam search plans include pre-computed costs,
         random plans have None (cost calculated later).
+        Returns None only if no plans could be generated at all.
     """
     plans = []
     
     # 1. Beam search best plans (come with pre-computed costs)
     try:
-        best_plans = beam_search_best_plan(triples, beam_width=beam_width)
-        plans.extend(best_plans)  # Add all beam_width best plans
+        best_plans = beam_search_best_plan(triples, beam_width=beam_width, avoid_cartesian=avoid_cartesian)
+        if best_plans:
+            plans.extend(best_plans)
+            print(f"Generated {len(best_plans)} beam-search-best plans")
+        else:
+            print("Warning: beam_search_best returned no complete plans")
     except Exception as e:
         print(f"Error creating beam-search-best plans: {e}")
-        return None
+        # Continue with other plan types instead of returning None
     
     # 2. Beam search worst plans (come with pre-computed costs)
     if include_worst_plans:
         try:
-            worst_plans = beam_search_worst_plan(triples, beam_width=beam_width)
-            plans.extend(worst_plans)  # Add all beam_width worst plans
+            worst_plans = beam_search_worst_plan(triples, beam_width=beam_width, avoid_cartesian=avoid_cartesian)
+            if worst_plans:
+                plans.extend(worst_plans)
+                print(f"Generated {len(worst_plans)} beam-search-worst plans")
+            else:
+                print("Warning: beam_search_worst returned no complete plans")
         except Exception as e:
             print(f"Error creating beam-search-worst plans: {e}")
-            return None
+            # Continue with other plan types instead of returning None
     
     # 3. Random plans (cost will be calculated later)
+    random_count = 0
     for i in range(num_random):
         try:
-            plan = random_join_order(triples, seed=i + 42)
+            plan = random_join_order(triples, seed=i + 42, avoid_cartesian=avoid_cartesian)
             plans.append((plan, None))
+            random_count += 1
         except Exception as e:
             print(f"Error creating random plan {i}: {e}")
+    
+    if random_count > 0:
+        print(f"Generated {random_count} random plans")
+    
+    # Return None only if we couldn't generate ANY plans
+    if not plans:
+        print("Warning: Could not generate any plans for this query")
+        return None
     
     return plans
 
@@ -369,7 +460,8 @@ def generate_invalid_plan(valid_data: Data) -> Data:
 def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans: int = 10, 
                           use_diverse_plans: bool = False, num_random_plans: int = 3,
                           beam_width: int = 1, include_worst_plans: bool = True,
-                          include_invalid_plan: bool = True) -> SPARQLQuery:
+                          include_invalid_plan: bool = True,
+                          avoid_cartesian: bool = False) -> SPARQLQuery:
     """
     Convert a raw query to a SPARQLQuery with multiple join plans and costs.
     
@@ -383,6 +475,7 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
         beam_width: Beam width for search (1 = greedy, higher = more exploration)
         include_worst_plans: Whether to include worst plans
         include_invalid_plan: Whether to include an invalid plan
+        avoid_cartesian: If True, skip joins where subtrees don't share variables
         
     Returns:
         SPARQLQuery object with multiple join plans
@@ -393,7 +486,8 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
         # Use diverse plan generation: beam-search-best, beam-search-worst, and random plans
         plans_with_costs = create_diverse_join_orders(triples, num_random=num_random_plans, 
                                                        beam_width=beam_width,
-                                                       include_worst_plans=include_worst_plans)
+                                                       include_worst_plans=include_worst_plans,
+                                                       avoid_cartesian=avoid_cartesian)
         if plans_with_costs is None:
             return None
     else:
@@ -412,8 +506,8 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
     triple_objs = [Triple(*(Entity(name=name) for name in triple[:3])) for triple in triples]
     triple_to_index = {str(triple): i for i, triple in enumerate(triple_objs)}
 
-
-    cost_error = False
+    plans_processed = 0
+    plans_failed = 0
 
     for plan, precomputed_cost in plans_with_costs:
         try:
@@ -424,27 +518,33 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
                 try:
                     cost = plan.root.get_cost() 
                 except RuntimeError as e:
-                    print(f"Error calculating cost: {e}")
-                    cost_error = True
-                    break
-            
-            costs.append(cost)
-            final_join_plans.append(plan)
+                    # Skip this plan - don't add it to the final data
+                    print(f"Error calculating cost for plan, skipping: {e}")
+                    plans_failed += 1
+                    continue
             
             # Create torch_data with consistent triple indices
             datapoint = join_order_to_adjacency_matrix_consistent(plan, triple_to_index, rdf2vec=rdf2vec_dict, counts=counts_dict)
             data = datapoint.get_torch_data(cost=cost)
-            torch_data_list.append(data)
             
             # Extract triples_where for this plan
             triples_where = [triple.where_body() for triple in datapoint.nodes_order if isinstance(triple, Triple)]
+            
+            # Only add the plan if everything succeeded
+            costs.append(cost)
+            final_join_plans.append(plan)
+            torch_data_list.append(data)
             triples_where_list.append(triples_where)
+            plans_processed += 1
+            
         except Exception as e:
-            raise e
-            print(f"Error calculating cost or creating torch_data: {e}")
-            costs.append(float('inf'))
-            torch_data_list.append(None)  # Add None for failed plans
-            triples_where_list.append([])  # Add empty list for failed plans
+            # Skip this plan entirely - don't add to final data
+            print(f"Error processing plan, skipping: {e}")
+            plans_failed += 1
+            continue
+    
+    if plans_failed > 0:
+        print(f"Warning: {plans_failed} plans failed, {plans_processed} plans succeeded")
     
     # Generate one invalid plan if we have valid plans and it is requested
     if include_invalid_plan and torch_data_list:
@@ -463,7 +563,9 @@ def query_to_sparql_query(query_data: dict, rdf2vec_dict, counts_dict, num_plans
         except Exception as e:
             print(f"Error generating invalid plan: {e}")
 
-    if cost_error:
+    # Return None only if we have no valid plans
+    if not final_join_plans:
+        print("No valid plans could be generated for this query")
         return None
     
     return SPARQLQuery(
@@ -775,28 +877,28 @@ def visualize_and_save_plans(sparql_query: SPARQLQuery, query_idx: int, output_d
 
 if __name__ == "__main__":
     # Load the RDF2Vec embeddings
-    with open("datasets/graphs/lubm/rdf2vec100dim.pkl", "rb") as f:
+    with open("/home/dss/GBJOv2/datasets/graphs/wikidata/rdf2vec100dim.pkl", "rb") as f:
         rdf2vec_dict = pickle.load(f)
         print(len(rdf2vec_dict))
 
 
     # Load the counts
-    with open("datasets/graphs/lubm/counts.pkl", "rb") as f:
+    with open("/home/dss/GBJOv2/datasets/graphs/wikidata/counts.pkl", "rb") as f:
         counts_dict = pickle.load(f)
 
     
     # Queries to generate random plans for
-    input_file = "datasets/queries/lubm/stars/star_queries.json"
+    input_file = "/mnt/data/tim_triple_files/wikidata/path/path_queries.json"
 
     # Directory to save the plans
-    dataset_dir = "datasets/plans/lubm/star/plans/new_dataset"
+    dataset_dir = "datasets/plans/wikidata/paths/greedy"
 
     #visualization_dir = "join_plan_visualizations_path_wikidata"
-    sparql_queries_file = "sparql_queries_star_lubm/queries.pt"
+    sparql_queries_file = "sparql_queries_path_wikidata/queries.pt"
 
 
     # How many queries to process
-    MAX_QUERIES = 10
+    MAX_QUERIES = 100000
 
     # The minimum cardinality of the queries to process
     MIN_CARDINALITY = 1
@@ -807,8 +909,12 @@ if __name__ == "__main__":
     USE_DIVERSE_PLANS = True  # If True: generate beam-search-best, beam-search-worst, and random plans
                                # If False: generate only random plans (original behavior)
     
-    INCLUDE_WORST_PLANS = False # If True: include beam-search-worst plans in diverse generation
+    INCLUDE_WORST_PLANS = True # If True: include beam-search-worst plans in diverse generation
     INCLUDE_INVALID_PLAN = False # If True: include one invalid plan per query (randomly mutated)
+    
+    # If True: only create joins where subtrees share variables (avoids Cartesian products)
+    # This is useful for path queries where random plans can create huge cross products
+    AVOID_CARTESIAN_PRODUCTS = True
 
     # Beam width for beam search (1 = greedy, higher = more exploration)
     # Complexity: O(n^2 * beam_width) per query
@@ -851,7 +957,8 @@ if __name__ == "__main__":
                 num_random_plans=NUM_RANDOM_PLANS,
                 beam_width=BEAM_WIDTH,
                 include_worst_plans=INCLUDE_WORST_PLANS,
-                include_invalid_plan=INCLUDE_INVALID_PLAN
+                include_invalid_plan=INCLUDE_INVALID_PLAN,
+                avoid_cartesian=AVOID_CARTESIAN_PRODUCTS
             )
             if sparql_query is None:
                 return None
