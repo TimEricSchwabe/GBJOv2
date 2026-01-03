@@ -12,13 +12,13 @@ from src.visualization.plot_optimization_results import plot_optimization_steps_
 
 # Path to the directory containing steps_10, steps_50, etc.
 # (The parent folder of sweep_results.json)
-sweep_run_dir = "/home/tim/query_optimization/optimization_results/steps_sweep/run_20251229_105202"
+sweep_run_dir = "/home/tim/query_optimization/optimization_results/steps_sweep/run_20251230_114235"
 
 # Where to save the new plots
 output_dir = os.path.join(sweep_run_dir, "plots_custom")
 
-# 1. Choose metric: "median", "mean", or "geomean"
-metric = "mean"
+# 1. Choose metrics: ["median", "mean", "geomean"]
+metrics = ["mean", "median"]
 
 # 2. Select specific methods to plot (None = plot all available)
 # Internal names map to: "GBJO", "Genetic Search", "Iterative Improvement", "Neural Sort", "CMA"
@@ -42,17 +42,19 @@ def main():
         return
 
     print(f"Plotting from: {sweep_run_dir}")
-    print(f"Metric: {metric}")
+    print(f"Metrics: {metrics}")
     print(f"Methods: {methods_subset if methods_subset else 'All'}")
     print(f"Excluded sizes: {exclude_sizes if exclude_sizes else 'None'}")
 
-    plot_optimization_steps_sweep(
-        root_sweep_dir=sweep_run_dir,
-        output_dir=output_dir,
-        methods_to_plot=methods_subset,
-        exclude_query_sizes=exclude_sizes,
-        metric=metric
-    )
+    for metric in metrics:
+        print(f"\n--- Generating plots for metric: {metric} ---")
+        plot_optimization_steps_sweep(
+            root_sweep_dir=sweep_run_dir,
+            output_dir=output_dir,
+            methods_to_plot=methods_subset,
+            exclude_query_sizes=exclude_sizes,
+            metric=metric
+        )
 
 if __name__ == "__main__":
     main()

@@ -36,8 +36,8 @@ from sklearn.ensemble import RandomForestRegressor
 # ----------------------------- configuration ---------------------------------
 
 # Relative to repo root (resolved from this file's location).
-RESULTS_FILE = "hpo_results/cma_20251223_195203/history.json"
-OUTPUT_DIR = "hpo_results/cma_20251223_195203/plots"
+RESULTS_FILE = "hpo_results/wikidata-path-10-steps/history.json"
+OUTPUT_DIR = "hpo_results/wikidata-path-10-steps/plots"
 
 # Plot style defaults
 FIG_DPI = 150
@@ -145,7 +145,7 @@ def plot_loss_over_time(hist: History, out_dir: Path) -> None:
     y = df["loss"]
 
     plt.figure(figsize=(10, 4))
-    plt.plot(x, y, marker="o", linewidth=1.5)
+    plt.plot(x, y, linewidth=1.5)
     plt.xlabel("Iteration")
     plt.ylabel("Loss")
     plt.title("Loss Over Time")
@@ -159,7 +159,7 @@ def plot_best_loss_over_time(hist: History, out_dir: Path) -> None:
     y_best = _running_min(df["loss"].to_numpy())
 
     plt.figure(figsize=(10, 4))
-    plt.plot(x, y_best, marker="o", linewidth=1.5, color="tab:green")
+    plt.plot(x, y_best, linewidth=1.5, color="tab:green")
     plt.xlabel("Iteration")
     plt.ylabel("Best Loss So Far")
     plt.title("Best (Running Min) Loss Over Time")

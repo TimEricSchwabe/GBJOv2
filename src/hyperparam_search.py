@@ -680,7 +680,7 @@ def get_cma_search_space():
     import nevergrad as ng
     
     return ng.p.Dict(
-        learning_rate=ng.p.Log(lower=0.1, upper=20.0, init=1),
+        learning_rate=ng.p.Log(lower=0.1, upper=10.0, init=1),
 
         lambda_acyclic=ng.p.Log(lower=1.0, upper=100.0, init=1.0),
         lambda_triple_in=ng.p.Log(lower=1.0, upper=100.0, init=1.0),
@@ -688,14 +688,16 @@ def get_cma_search_space():
         lambda_join_in=ng.p.Log(lower=1.0, upper=100.0, init=1.0),
         lambda_join_out=ng.p.Log(lower=1.0, upper=100.0, init=1.0),
         lambda_left_linear=ng.p.Log(lower=1.0, upper=100.0, init=1.0),
+        lambda_entropy=ng.p.Constant(0),
 
         lambda_total_penalty=ng.p.Scalar(lower=0., upper=1.0, init=0.5),
+        lambda_total_penalty_start=ng.p.Constant(0),
 
         init_tau=ng.p.Log(lower=1.0, upper=20.0, init=3.0),
         min_tau=ng.p.Log(lower=0.1, upper=2.0, init=1),
 
         lambda_ramp_exponent=ng.p.Scalar(lower=1.0, upper=10.0, init=2.0),
-        min_penalty_threshold=ng.p.Scalar(lower=1.0, upper=10.0, init=3.0),
+        min_penalty_threshold=ng.p.Constant(0),
 
         # Gradient settings: linear
         gradient_clip_norm=ng.p.Scalar(lower=1.0, upper=100.0, init=2.0),
@@ -737,10 +739,9 @@ def run_cma_search(config):
         """Objective function for CMA-ES optimization."""
         # Merge continuous params with fixed discrete params
         full_params = {
-            **params,
             **fixed_params,
+            **params,
             "optimization_steps": optimization_steps,
-            "lambda_entropy": 0.0,
             "save_animation_data": False,
         }
 
@@ -843,7 +844,6 @@ def run_cma_search(config):
         **{k: float(v) if isinstance(v, (int, float, np.number)) else v for k, v in final_params.items()},
         **fixed_params,
         "optimization_steps": optimization_steps,
-        "lambda_entropy": 0.0,
     }
     
     print("\n" + "=" * 60)
@@ -884,8 +884,8 @@ if __name__ == "__main__":
         "backend": "cma",
         
         # Data paths
-        "dataset_path": "/home/tim/query_optimization/datasets/plans/lubm/path-greedy/dataset.pt",
-        "model_path": "/home/tim/query_optimization/training_results/lubm-path-log1p/model.pt",
+        "dataset_path": "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new/dataset.pt",
+        "model_path": "/home/tim/query_optimization/training_results/wikidata-path-log1p/model.pt",
         
         # Evaluation settings
         "num_plans": 400,  # Number of plans to evaluate per trial
@@ -894,7 +894,7 @@ if __name__ == "__main__":
         "fingerprint_dim": 64,  # Fingerprint dimension for join nodes
         
         # Search settings
-        "max_trials": 1000,  # Number of trials/iterations for the search
+        "max_trials": 500,  # Number of trials/iterations for the search
         "cpus_per_trial": 2,  # CPUs per trial (for Ray Tune)
         "gpus_per_trial": 0,  # GPUs per trial (for Ray Tune)
         "max_concurrent_trials": 6,  # Max parallel trials (for Ray Tune)

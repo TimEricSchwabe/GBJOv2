@@ -797,8 +797,8 @@ def plot_optimization_steps_sweep(root_sweep_dir: str, output_dir: str,
                                   exclude_query_sizes: list = None,
                                   metric: str = "median"):
     """
-    Plot metric (median/mean/geomean) true cost vs optimization_steps by walking
-    through subdirectories (steps_*) in root_sweep_dir.
+    Plot metric (median/mean/geomean) true and predicted cost vs optimization_steps 
+    by walking through subdirectories (steps_*) in root_sweep_dir.
     
     Args:
         root_sweep_dir: Directory containing steps_X/detailed_results.json folders
@@ -810,7 +810,6 @@ def plot_optimization_steps_sweep(root_sweep_dir: str, output_dir: str,
     os.makedirs(output_dir, exist_ok=True)
     
     # Map friendly names to internal keys
-    # Note: Using consistent display names from start is better
     PLANKEY_TO_DISPLAY = {
         "gradient": "GBJO",
         "GEQO": "Genetic Search",
@@ -841,8 +840,8 @@ def plot_optimization_steps_sweep(root_sweep_dir: str, output_dir: str,
     sorted_steps = sorted(step_dirs.keys())
     
     # 2. Collect data for each step
-    # structure: {method_display_name: {step_val: aggregated_cost}}
-    aggregated_data = {} 
+    # structure: {cost_type: {method_display_name: {step_val: aggregated_cost}}}
+    aggregated_data = {"real": {}, "pred": {}} 
     
     for step in sorted_steps:
         res_file = os.path.join(step_dirs[step], "detailed_results.json")
@@ -853,7 +852,8 @@ def plot_optimization_steps_sweep(root_sweep_dir: str, output_dir: str,
             queries = json.load(f)
             
         # Extract costs per method
-        method_costs = {} # {display_name: [list of costs]}
+        method_costs_real = {} # {display_name: [list of costs]}
+        method_costs_pred = {} # {display_name: [list of costs]}
         
         for q in queries:
             q_size = q.get('ntriplepattern', 0)
@@ -862,105 +862,124 @@ def plot_optimization_steps_sweep(root_sweep_dir: str, output_dir: str,
                 
             plans = q.get('plans', {})
             for key, plan_data in plans.items():
-                cost = plan_data.get('real_cost')
-                if cost is None or cost == float('inf') or not np.isfinite(cost):
-                    continue
-                
                 display_name = PLANKEY_TO_DISPLAY.get(key, key)
                 
-                if display_name not in method_costs:
-                    method_costs[display_name] = []
-                method_costs[display_name].append(float(cost))
+                # Real cost
+                r_cost = plan_data.get('real_cost')
+                if r_cost is not None and r_cost != float('inf') and np.isfinite(r_cost):
+                    if display_name not in method_costs_real:
+                        method_costs_real[display_name] = []
+                    method_costs_real[display_name].append(float(r_cost))
+                
+                # Predicted cost
+                p_cost = plan_data.get('predicted_cost')
+                if p_cost is not None and p_cost != float('inf') and np.isfinite(p_cost):
+                    if display_name not in method_costs_pred:
+                        method_costs_pred[display_name] = []
+                    method_costs_pred[display_name].append(float(p_cost))
         
-        # Aggregate
-        for m_name, costs in method_costs.items():
-            if not costs:
-                continue
-            
-            val = float('nan')
-            if metric == "median":
-                val = np.median(costs)
-            elif metric == "mean":
-                val = np.mean(costs)
-            elif metric == "geomean":
-                # filter <= 0 for geomean
+        # Helper to aggregate
+        def get_agg(costs, metric_name):
+            if not costs: return np.nan
+            if metric_name == "median":
+                return np.median(costs)
+            elif metric_name == "mean":
+                return np.mean(costs)
+            elif metric_name == "geomean":
                 pos_costs = [c for c in costs if c > 0]
-                if pos_costs:
-                    val = np.exp(np.mean(np.log(pos_costs)))
-            
-            if m_name not in aggregated_data:
-                aggregated_data[m_name] = {}
-            aggregated_data[m_name][step] = val
+                return np.exp(np.mean(np.log(pos_costs))) if pos_costs else np.nan
+            return np.nan
+
+        for m_name, costs in method_costs_real.items():
+            val = get_agg(costs, metric)
+            if not np.isnan(val):
+                if m_name not in aggregated_data["real"]:
+                    aggregated_data["real"][m_name] = {}
+                aggregated_data["real"][m_name][step] = val
+
+        for m_name, costs in method_costs_pred.items():
+            val = get_agg(costs, metric)
+            if not np.isnan(val):
+                if m_name not in aggregated_data["pred"]:
+                    aggregated_data["pred"][m_name] = {}
+                aggregated_data["pred"][m_name][step] = val
 
     # 3. Plotting
-    fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
-    
-    # Filter methods if requested
-    available_methods = list(aggregated_data.keys())
-    if methods_to_plot:
-        plot_methods = [m for m in available_methods if m in methods_to_plot]
-    else:
-        plot_methods = available_methods
-
-    # Sort by preferred order
-    preferred_order = ["GBJO", "Iterative Improvement", "Genetic Search", "Neural Sort", "CMA"]
-    plot_methods.sort(key=lambda m: preferred_order.index(m) if m in preferred_order else 999)
-    
-    has_any = False
-    for method in plot_methods:
-        data_points = aggregated_data[method]
-        xs = []
-        ys = []
-        for s in sorted_steps:
-            if s in data_points:
-                xs.append(s)
-                ys.append(data_points[s])
-        
-        if not xs:
+    for cost_type in ["real", "pred"]:
+        type_data = aggregated_data[cost_type]
+        if not type_data:
             continue
             
-        style = METHOD_STYLES.get(method, {})
-        ax.plot(xs, ys, 
-                label=method,
-                color=style.get("color"),
-                marker=style.get("marker", "o"),
-                linestyle=style.get("linestyle", "-"),
-                markeredgecolor="white",
-                markeredgewidth=0.3)
-        has_any = True
+        fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
         
-    if not has_any:
-        print("No valid data to plot.")
+        # Filter methods if requested
+        available_methods = list(type_data.keys())
+        if methods_to_plot:
+            plot_methods = [m for m in available_methods if m in methods_to_plot]
+        else:
+            plot_methods = available_methods
+
+        # Sort by preferred order
+        preferred_order = ["GBJO", "Iterative Improvement", "Genetic Search", "Neural Sort", "CMA"]
+        plot_methods.sort(key=lambda m: preferred_order.index(m) if m in preferred_order else 999)
+        
+        has_any = False
+        for method in plot_methods:
+            data_points = type_data[method]
+            xs = []
+            ys = []
+            for s in sorted_steps:
+                if s in data_points:
+                    xs.append(s)
+                    ys.append(data_points[s])
+            
+            if not xs:
+                continue
+                
+            style = METHOD_STYLES.get(method, {})
+            ax.plot(xs, ys, 
+                    label=method,
+                    color=style.get("color"),
+                    marker=style.get("marker", "o"),
+                    linestyle=style.get("linestyle", "-"),
+                    markeredgecolor="white",
+                    markeredgewidth=0.3)
+            has_any = True
+            
+        if not has_any:
+            plt.close(fig)
+            continue
+
+        ax.set_xlabel("Optimization Steps")
+        metric_label = metric.capitalize()
+        if metric == "geomean": metric_label = "Geometric Mean"
+        
+        type_label = "True" if cost_type == "real" else "Predicted"
+        ax.set_ylabel(f"{metric_label} {type_label} Cost")
+        ax.set_yscale("log")
+        
+        # X-axis formatting
+        try:
+            ax.set_xscale("log")
+            ax.set_xticks(sorted_steps)
+            ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{int(x)}"))
+            ax.xaxis.set_minor_locator(NullLocator())
+        except Exception:
+            ax.set_xticks(sorted_steps)
+
+        ax.legend(loc="best", ncol=2, fontsize=6, frameon=True, handlelength=0.9, columnspacing=0.6)
+        ax.grid(False)
+
+        suffix = "true" if cost_type == "real" else "predicted"
+        out_filename = f"optimization_steps_sweep_{metric}_{suffix}.pdf"
+        out_path = os.path.join(output_dir, out_filename)
+        fig.savefig(out_path, **SAVE_KWARGS)
         plt.close(fig)
-        return
-
-    ax.set_xlabel("Optimization Steps")
-    metric_label = metric.capitalize()
-    if metric == "geomean": metric_label = "Geometric Mean"
-    ax.set_ylabel(f"{metric_label} True Cost")
-    ax.set_yscale("log")
-    
-    # X-axis formatting
-    try:
-        ax.set_xscale("log")
-        ax.set_xticks(sorted_steps)
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{int(x)}"))
-        ax.xaxis.set_minor_locator(NullLocator())
-    except Exception:
-        ax.set_xticks(sorted_steps)
-
-    ax.legend(loc="best", ncol=2, fontsize=6, frameon=True, handlelength=0.9, columnspacing=0.6)
-    ax.grid(False)
-
-    out_filename = f"optimization_steps_sweep_{metric}.pdf"
-    out_path = os.path.join(output_dir, out_filename)
-    fig.savefig(out_path, **SAVE_KWARGS)
-    plt.close(fig)
-    print(f"Saved sweep plot to: {out_path}")
+        print(f"Saved sweep plot to: {out_path}")
 
 def main():
     parser = argparse.ArgumentParser(description="Plot optimization results.")
-    parser.add_argument("results_dir", nargs='?', default="optimization_results/WIKIDATA-PATH-I-10", 
+    parser.add_argument("results_dir", nargs='?', default="optimization_results/FINAL-LUBM-STAR", 
                         help="Directory containing detailed_results.json")
     args = parser.parse_args()
 

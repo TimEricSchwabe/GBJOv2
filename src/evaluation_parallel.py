@@ -621,8 +621,12 @@ def process_single_query(args):
         Dictionary with detailed results for this query
     """
     (query_index, query, model_path, device_str, optimization_params,
-     optimization_algorithms, use_exhaustive, use_true_costs, optimization_steps, dp_limit,
+     optimization_algorithms, use_exhaustive, use_true_costs, optimization_steps, optimization_steps_geqo, optimization_steps_cma, optimization_steps_II, dp_limit,
      save_directory, model_params, debug_timing) = args
+
+    #torch.manual_seed(42)
+    #np.random.seed(42)
+    #random.seed(42)
 
     # Optional timing debug (printed from worker processes)
     def _timed(label, fn):
@@ -708,7 +712,7 @@ def process_single_query(args):
         if "GEQO" in optimization_algorithms:
             GEQO_adj, GEQO_pred_cost = _timed(
                 "GEQO optimize",
-                lambda: GEQO(torch_data, model, optimization_steps, device),
+                lambda: GEQO(torch_data, model, optimization_steps_geqo, device),
             )
             GEQO_plan = adjacency_to_query_with_real_triples(GEQO_adj, len(triple_objs), triple_objs)
             GEQO_real_cost = float('inf')
@@ -726,7 +730,7 @@ def process_single_query(args):
             # Run Iterative Improvement
             II_adj, II_pred_cost = _timed(
                 "II optimize",
-                lambda: IterativeImprovement(torch_data, model, optimization_steps, device),
+                lambda: IterativeImprovement(torch_data, model, optimization_steps_II, device),
             )
             II_plan = adjacency_to_query_with_real_triples(II_adj, len(triple_objs), triple_objs)
 
@@ -784,7 +788,7 @@ def process_single_query(args):
                     "CMA optimize",
                     lambda: CMA(
                         torch_data, model, device,
-                        optimization_steps=optimization_steps,
+                        optimization_steps=optimization_steps_cma,
                         **optimization_params
                     ),
                 )
@@ -965,7 +969,7 @@ def process_single_query(args):
         # Run gradient-based optimization with a separate (meta) model checkpoint
         if 'GBJO-Meta' in optimization_algorithms:
             # Hardcoded meta model path (as requested)
-            meta_model_path = "/home/tim/query_optimization/meta_optimization_results/wikidata-star-1e-4/best_model.pt"
+            meta_model_path = "/home/tim/query_optimization/meta_optimization_results/run_20251230_195309/model_epoch_70.pt"
 
             try:
                 # Create and load a second model instance (same architecture as the main one)
@@ -1251,6 +1255,7 @@ def process_single_query(args):
 
 
 def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None, optimization_steps=500,
+                                 optimization_steps_geqo=500, optimization_steps_cma=500, optimization_steps_II=500,
                                  optimization_params=None, optimization_algorithms=None, save_directory=".",
                                  use_exhaustive=True, use_true_costs=True, num_workers=None, dp_limit=9,
                                  model_params=None, debug_timing: bool = False):
@@ -1296,7 +1301,7 @@ def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None,
     args_list = []
     for i, query in enumerate(sparql_queries):
         args = (i, query, model_path, device_str, optimization_params, 
-                optimization_algorithms, use_exhaustive, use_true_costs, optimization_steps, dp_limit,
+                optimization_algorithms, use_exhaustive, use_true_costs, optimization_steps, optimization_steps_geqo, optimization_steps_cma, optimization_steps_II, dp_limit,
                 save_directory, model_params, debug_timing)
         args_list.append(args)
     
@@ -1358,17 +1363,20 @@ def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None,
 if __name__ == "__main__":
     # Configuration for optimization
     config_wikidata_star = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_training/new/dataset.pt", # /home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl
+        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl", # /home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl
         "model_path": "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt", # current best: "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt"
         "num_queries": 80,
         "optimization_steps": 10, # 2500
+        "optimization_steps_geqo": 500,
+        "optimization_steps_cma": 1500,
+        "optimization_steps_II": 500,
         "use_exhaustive": False,
         "use_dp": True,
         "dp_limit": 9,  # Set the limit here (e.g., 15 for star queries)
         "use_true_costs": True,
         "save_path": "optimization_results",
-        "num_workers": 1,  # Use all available cores
-        "debug_timing": True,
+        "num_workers": 8,  # Use all available cores
+        "debug_timing": False,
         "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"], # ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"]
         "model_params": {
             "version": "v3",
@@ -1413,10 +1421,13 @@ if __name__ == "__main__":
     }
 
     config_wikidata_path = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/dataset.pt",
+        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new/dataset.pt",
         "model_path": "/home/tim/query_optimization/training_results/wikidata-path-log1p/model.pt",
-        "num_queries": 10,
+        "num_queries": 80,
         "optimization_steps": 10, #2500
+        "optimization_steps_geqo": 500,
+        "optimization_steps_cma": 1500,
+        "optimization_steps_II": 500,
         "use_exhaustive": False,
         "use_dp": True,
         "use_true_costs": True,
@@ -1434,34 +1445,34 @@ if __name__ == "__main__":
             "use_layer_norm": False,
             "dropout": 0.0,
         },
-        "optimization_params": { # params for GBJO
-            "k": 1,  # Number of gradient optimization runs
-            "learning_rate": 9.99, #0.5
-            "lambda_acyclic": 4.48, # 467.0
-            "lambda_triple_in": 3.42, # 3194.0
-            "lambda_triple_out": 81.5, # 3661.0
-            "lambda_join_in": 1.99, # 1919.0
-            "lambda_join_out": 1.00, # 1900.0
-            "lambda_entropy": 0.0,
-            "lambda_total_penalty": 0.91, # 1.8
-            "lambda_left_linear": 66, # 1900.0
-            "init_tau": 9.66,
-            "min_tau": 0.26, # 1.0
+        "optimization_params": {
+            "k": 1,  # 1 Number of gradient optimization runs
+            "learning_rate": 2.5, # 0.35 or 1; best 0.85; 3 or 50 timesteps
+            "lambda_acyclic": 5.8, # 3391
+            "lambda_triple_in": 2.4,# 3334.0
+            "lambda_triple_out": 1.13,# 2026.0
+            "lambda_join_in": 9.6, # 2150.0
+            "lambda_join_out": 1.16,# 1295.0
+            "lambda_entropy": 0.0,# 0.0
+            "lambda_total_penalty": 0.93,# 0.7
+            "lambda_left_linear": 19,# 2157.0
+            "init_tau": 2.6, # 15
+            "min_tau": 1.0, # 1.0
             "tau_decay": 0.973,
             "use_temperature_annealing": True,
             "return_best": True,
-            "min_penalty_threshold": 9.96, # 0.5
+            "min_penalty_threshold": 9.96,
             "use_lambda_ramping": True,
             "logit_sampling": "softmax",
             "save_animation_data": False,
             "animation_save_interval": 10,
-            "lambda_ramp_exponent": 1.13, # 7
-            "lr_warmup_steps": 150,
-            "gradient_clip_norm": 5.52,
+            "lambda_ramp_exponent": 1.11, # 5.3 best: 1.09
+            "lr_warmup_steps": 46,
+            "gradient_clip_norm": 3.7,
             "use_lr_scheduling": True,
             "decoding_method": "beam",
             "use_gumbel_noise": False,
-            "use_swa": False
+            "gbjo_verbose": False
         }
     }
 
@@ -1470,14 +1481,17 @@ if __name__ == "__main__":
         "model_path": "/home/tim/query_optimization/training_results/lubm-star-log1p/model.pt", # /home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt
         "num_queries": 80,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
-        "optimization_steps": 500,
+        "optimization_steps": 10,
+        "optimization_steps_geqo": 500,
+        "optimization_steps_cma": 1500,
+        "optimization_steps_II": 500,
         "use_exhaustive": False,
         "use_dp": True,
         "dp_limit": 9,  # Set the limit here (e.g., 15 for star queries)
         "use_true_costs": True,
         "save_path": "optimization_results",
-        "num_workers": 6,  # Use all available cores
-        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"],
+        "num_workers": 8,  # Use all available cores
+        "optimization_algorithms": ["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"], #["GBJO", "DP", "GreedySearch", "IterativeImprovement", "GEQO", "NeuralSort", "CMA", "Random"]
         "model_params": {
             "version": "v3",
             "hidden_dim": 128,
@@ -1498,7 +1512,7 @@ if __name__ == "__main__":
             "lambda_join_in": 18.8, # 1742.0
             "lambda_join_out": 9.3, # 1558.0
             "lambda_entropy": 0.0,
-            "lambda_total_penalty": 0.99, # 2.6
+            "lambda_total_penalty": 0.99, # 0.99
             "lambda_left_linear": 28.8, # 2300.0
             "init_tau": 3.2,
             "min_tau": 0.12, #1.0
@@ -1524,9 +1538,11 @@ if __name__ == "__main__":
     config_lubm_path = {
         "queries_file": "/home/tim/query_optimization/datasets/plans/lubm/path-greedy/dataset.pt", # /home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl
         "model_path": "/home/tim/query_optimization/training_results/lubm-path-log1p/model.pt",
-        "num_queries": 20,
+        "num_queries": 80,
         "optimization_steps": 10,
-        "use_exhaustive": False,
+        "optimization_steps_geqo": 500,
+        "optimization_steps_cma": 1500,
+        "optimization_steps_II": 500,        "use_exhaustive": False,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "use_dp": True,
         "use_true_costs": True,
@@ -1572,7 +1588,7 @@ if __name__ == "__main__":
             "decoding_method": "beam",
             "use_gumbel_noise": False,
             "use_swa": False,
-            "gbjo_verbose": True
+            "gbjo_verbose": False
                     }
     }
 
@@ -1688,6 +1704,9 @@ if __name__ == "__main__":
         config['model_path'],
         num_queries=config['num_queries'],
         optimization_steps=config['optimization_steps'],
+        optimization_steps_geqo=config['optimization_steps_geqo'],
+        optimization_steps_cma=config['optimization_steps_cma'],
+        optimization_steps_II=config['optimization_steps_II'],
         optimization_params=config['optimization_params'],
         optimization_algorithms=config['optimization_algorithms'],
         save_directory=save_directory,
@@ -1730,6 +1749,7 @@ if __name__ == "__main__":
         plot_overall_boxplot(stats_df, plots_dir)
         plot_mean_costs_bar(stats_df, plots_dir)
         plot_lineplots_by_size(stats_df, plots_dir)
+        plot_lineplots_by_size(stats_df, plots_dir, metric="mean")
         plot_boxplot_per_size(stats_df, plots_dir)
         plot_scatter_correlations(stats_df, plots_dir)
         plot_win_loss_heatmap(stats_df, plots_dir)

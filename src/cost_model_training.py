@@ -83,7 +83,9 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
             
             # Calculate loss based on loss_type
             if loss_type != "qerror":
-                loss = criterion(out, torch.log(data.y))
+                noise = torch.randn_like(data.y) * 0.05 * data.y
+                noisy_y = data.y + noise # TODO change later back
+                loss = criterion(out, torch.log(noisy_y))
             elif loss_type == "qerror":
                 pred_y = torch.exp(out)
                 qerrors = calculate_qerror(pred_y, data.y)
@@ -171,6 +173,8 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
                 # Save the model when there's a new best performance
                 torch.save(model.state_dict(), save_path)
                 print(f"New best model saved to {save_path}")
+            # save model after each epoch
+            torch.save(model.state_dict(), save_path / f'model_epoch_{epoch + 1}.pt')
                 
         print(f'Epoch {epoch + 1}, Train Loss: {avg_train_loss:.4f}, Train Q-Error: {avg_train_qerror:.4f}, '
               f'Val Loss: {perf:.4f}, Val Q-Error: {qerror_metric:.4f}, '
@@ -471,13 +475,14 @@ if __name__ == "__main__":
         'use_jk': False,            # Whether to use Jumping Knowledge
         'jk_mode': 'cat',           # JK mode: 'cat', 'max', or 'lstm'
         'use_residual': True,       # Whether to use residual connections
-        'use_layer_norm': False,    # Whether to use layer normalization (disable for counting)
-        'dropout': 0.0,             # Dropout probability
+        'use_layer_norm': False,    # Whether to use layer normalization
+        'use_graph_norm': False,     # Whether to use graph normalization (recommended over layer norm)
+        'dropout': 0.,             # Dropout probability
         'aggr': 'add',              # Aggregation function for gin layers: 'add' or 'mean'
         
         # Training parameters
         'learning_rate': 0.0001,
-        'batch_size': 128,
+        'batch_size': 1,
         'num_epochs': 500,
         'loss_type': 'huber',         # Options: 'mse', 'qerror', 'huber'
         
@@ -566,6 +571,7 @@ if __name__ == "__main__":
             jk_mode=config['jk_mode'],
             use_residual=config['use_residual'],
             use_layer_norm=config['use_layer_norm'],
+            use_graph_norm=config['use_graph_norm'],
             dropout=config['dropout'],
             aggr=config['aggr']
         ).to(device)

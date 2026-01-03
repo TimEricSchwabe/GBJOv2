@@ -255,7 +255,7 @@ def gbjo(query, C_theta, hyperparams, device="cpu"):
     returns final soft logits
     """
 
-    N_STEPS = 50
+    N_STEPS = 10
     lambda_triple_out = 1.0
     lambda_join_in = 1.0
     lambda_join_out = 1.0
@@ -379,8 +379,8 @@ if __name__ == "__main__":
     pass
 
     # Model parameters
-    MODEL_PATH = "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt"
-    QUERY_PATH = "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_training/new/dataset.pt"
+    MODEL_PATH = "/home/tim/query_optimization/training_results/lubm-star-log1p/model.pt"
+    QUERY_PATH = "/home/tim/query_optimization/datasets/plans/lubm/star-greedy/dataset.pt"
     DROPOUT = 0.0
     HIDDEN_DIM = 128
     NODE_FEATURE_DIM = 307
@@ -635,7 +635,7 @@ if __name__ == "__main__":
             L_anchor = anchor_loss(anchor_plan_pred, torch.log(query.y))
 
             #L_outer = (L_outer + L_anchor + 0.1 * L_struct_al) 
-            L_outer = (L_outer + 0.0 * L_struct_al)
+            L_outer = (L_outer + 0.1 * L_struct_al)
             L_outer = L_outer / ACCUMULATION_STEPS
 
 

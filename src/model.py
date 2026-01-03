@@ -265,6 +265,7 @@ class CostGNNv3(nn.Module):
         jk_mode: JK aggregation mode - 'cat', 'max', or 'lstm' (default: 'cat')
         use_residual: Whether to use residual connections (default: False)
         use_layer_norm: Whether to use layer normalization (default: False)
+        use_graph_norm: Whether to use graph normalization instead of layer norm (default: False)
         dropout: Dropout probability (default: 0.1)
     
     Reference:
@@ -279,7 +280,8 @@ class CostGNNv3(nn.Module):
         jk_mode='cat',
         use_residual=False,
         use_layer_norm=False,
-        dropout=0.0001,
+        use_graph_norm=False,
+        dropout=0.0,
         aggr='add',
         **kwargs
     ):
@@ -291,12 +293,19 @@ class CostGNNv3(nn.Module):
         self.jk_mode = jk_mode
         self.use_residual = use_residual
         self.use_layer_norm = use_layer_norm
+        self.use_graph_norm = use_graph_norm
         self.hidden_dim = hidden_dim
         
         self.projection = nn.Linear(node_feature_dim, hidden_dim)
         
         self.convs = nn.ModuleList()
-        self.layer_norms = nn.ModuleList() if use_layer_norm else None
+        # Use GraphNorm if specified, otherwise LayerNorm
+        if use_graph_norm:
+            self.norms = nn.ModuleList()
+        elif use_layer_norm:
+            self.norms = nn.ModuleList()
+        else:
+            self.norms = None
         self.final_graph_norm = GraphNorm(hidden_dim)
 
         # GINConv layers for message passing	
@@ -308,8 +317,10 @@ class CostGNNv3(nn.Module):
             )
             self.convs.append(GINConv(mlp, aggr=aggr)) #add or mean
             
-            if use_layer_norm:
-                self.layer_norms.append(nn.LayerNorm(hidden_dim))
+            if use_graph_norm:
+                self.norms.append(GraphNorm(hidden_dim))
+            elif use_layer_norm:
+                self.norms.append(nn.LayerNorm(hidden_dim))
         
         
         # Dropout
@@ -375,9 +386,13 @@ class CostGNNv3(nn.Module):
         nn.init.zeros_(self.fc2.bias)
 
     def forward(self, x, edge_index, edge_weight=None, batch=None):
+
+        if edge_weight is not None and edge_weight.dtype != x.dtype:
+            edge_weight = edge_weight.to(dtype=x.dtype)
         # Project input
         x = torch.sign(x) * torch.log1p(torch.abs(x))
         x = self.projection(x)
+
         
         # Store layer outputs for Jumping Knowledge
         layer_outputs: List[Tensor] = []
@@ -385,8 +400,11 @@ class CostGNNv3(nn.Module):
         # Message passing layers
         for i, conv in enumerate(self.convs):
 
-            if self.use_layer_norm:
-                x = self.layer_norms[i](x)
+            # Apply normalization (GraphNorm needs batch, LayerNorm doesn't)
+            if self.use_graph_norm:
+                x = self.norms[i](x, batch)
+            elif self.use_layer_norm:
+                x = self.norms[i](x)
 
             residual = x if self.use_residual else None
 
@@ -398,14 +416,17 @@ class CostGNNv3(nn.Module):
             if self.use_residual:
                 x = residual + x
             if i < self.n_layers - 1:
-                pass
-                #x = self.dropout(x)
+                x = self.dropout(x)
             
             # Store for JK
             layer_outputs.append(x)
         
         if self.jk is not None:
             x = self.jk(layer_outputs)
+
+        # Apply final graph normalization before pooling (if using graph norm)
+        #if self.final_graph_norm is not None:
+        #    x = self.final_graph_norm(x, batch)
 
         # Global pooling
         if batch is not None:
@@ -416,8 +437,8 @@ class CostGNNv3(nn.Module):
         # Output MLP
         x = self.fc1(x)
         x = F.gelu(x)
+        x = self.dropout(x)
         cost = self.fc2(x).squeeze(-1)
-
 
         return cost
 

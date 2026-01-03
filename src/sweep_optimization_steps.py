@@ -133,7 +133,8 @@ def main(config):
     )
 
     # Methods that actually depend on optimization_steps (DP/Greedy excluded).
-    sweep_algorithms = ["GBJO", "GEQO", "IterativeImprovement", "NeuralSort", "CMA"]
+    #sweep_algorithms = ["GBJO", "GEQO", "IterativeImprovement", "NeuralSort", "CMA"]
+    sweep_algorithms = ["GEQO", "IterativeImprovement"]
 
     # Record metadata
     summary: Dict[str, Any] = {
@@ -252,7 +253,7 @@ if __name__ == "__main__":
         "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl",
         "model_path": "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt", # current best: "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt"
         "num_queries": 80,
-        "step_values": [10, 50, 100, 500, 1000],
+        "step_values": [50, 500, 1000, 2500, 10000],
         "use_exhaustive": False,
         "use_dp": False,
         "dp_limit": 9,  # Set the limit here (e.g., 15 for star queries)
@@ -361,6 +362,6 @@ if __name__ == "__main__":
 
     
     # Run the sweep
-    main(config_lubm_star)
+    main(config_wikidata_star)
 
 

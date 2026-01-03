@@ -35,14 +35,11 @@ def get_session():
     if _session is None or _session_pid != os.getpid():
         _session = requests.Session()
         
-        # Enhanced retry logic for stability
+        # No retries - fail fast on connection issues
         _retry = Retry(
-            total=1,             # Increased from 1
-            connect=2,            # Increased from 3
-            read=2,               # Increased from 3
-            backoff_factor=0.5,   # Increased from 0.2
-            status_forcelist=[500, 502, 503, 504, 429],
-            allowed_methods=["GET"],
+            total=0,              # No retries
+            connect=0,
+            read=0,
             raise_on_status=False,
         )
         
@@ -311,7 +308,18 @@ class Query:
 
 
 
-def random_join_order(triples: list[list[str]], seed = None) -> Query:
+def random_join_order(triples: list[list[str]], seed = None, avoid_cartesian: bool = False) -> Query:
+	"""
+	Create a random join order for a query.
+	
+	Args:
+		triples: List of triple patterns
+		seed: Random seed for reproducibility
+		avoid_cartesian: If True, only create joins where subtrees share variables
+		
+	Returns:
+		Query object representing the join order
+	"""
 	triple_objs: list[Triple | Join] = [
 		Triple(
 			*(Entity(name=name) for name in triple[:3])
@@ -320,16 +328,45 @@ def random_join_order(triples: list[list[str]], seed = None) -> Query:
 	]
 	
 	rng = random.Random(seed)
-
 	rng.shuffle(triple_objs)
 	
 	while len(triple_objs) > 1:
-		join_index = rng.randint(0, len(triple_objs) - 2)
-		join = Join(
-			left=triple_objs[join_index],
-			right=triple_objs[join_index + 1]
-		)
-		triple_objs[join_index:join_index + 2] = [join]
+		if not avoid_cartesian:
+			# Original behavior: just join adjacent pairs
+			join_index = rng.randint(0, len(triple_objs) - 2)
+			join = Join(
+				left=triple_objs[join_index],
+				right=triple_objs[join_index + 1]
+			)
+			triple_objs[join_index:join_index + 2] = [join]
+		else:
+			# Find all pairs that share variables (avoid Cartesian products)
+			valid_pairs = []
+			for i in range(len(triple_objs)):
+				for j in range(i + 1, len(triple_objs)):
+					if triple_objs[i].variables & triple_objs[j].variables:
+						valid_pairs.append((i, j))
+			
+			if not valid_pairs:
+				# No valid pairs - the query has disconnected components
+				# Fall back to allowing Cartesian product for remaining nodes
+				join_index = rng.randint(0, len(triple_objs) - 2)
+				join = Join(
+					left=triple_objs[join_index],
+					right=triple_objs[join_index + 1]
+				)
+				triple_objs[join_index:join_index + 2] = [join]
+			else:
+				# Pick a random valid pair
+				i, j = rng.choice(valid_pairs)
+				join = Join(
+					left=triple_objs[i],
+					right=triple_objs[j]
+				)
+				# Remove both and insert the join (remove higher index first)
+				triple_objs.pop(j)
+				triple_objs.pop(i)
+				triple_objs.append(join)
 	
 	return Query(
 		triple_objs[0],
