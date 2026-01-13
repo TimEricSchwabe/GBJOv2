@@ -27,6 +27,8 @@ import itertools
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(os.path.dirname(__file__))
 
+from src.create_data.create_optimization_data import SPARQLQuery
+
 import src.data as data_module
 sys.modules['explicit_join_model.data'] = data_module
 sys.modules['explicit_join_model'] = sys.modules['src']
@@ -36,6 +38,7 @@ sys.modules['explicit_join_model'] = sys.modules['src']
 import requests
 import re
 from typing import Union
+from collections import defaultdict
 
 # Add the parent directory to Python path
 #sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -71,8 +74,78 @@ from optimization import (
     CMA,
     NeuralSort,
 )
-from model import CostGNNv2
+from model import CostGNNv2, CostGNNv3
 from data import Triple, Join, Query, Entity
+from utils.data_utils import load_sparql_queries
+
+
+def add_fingerprints_to_query_data(query_data, fingerprint_dim: int = 64):
+    """
+    Add random Gaussian fingerprints to join nodes in query data.
+    Matches add_fingerprints_to_query_data() from src/evaluation_parallel.py.
+    """
+    x = query_data.x.clone()
+
+    is_join = (x[:, -1] == 1.0)
+    join_indices = torch.where(is_join)[0]
+    n_joins = len(join_indices)
+
+    if n_joins == 0:
+        return query_data
+
+    fingerprints = torch.randn(n_joins, fingerprint_dim, device=x.device)
+    fingerprints = fingerprints / fingerprints.norm(dim=1, keepdim=True)
+
+    for i, join_idx in enumerate(join_indices):
+        x[join_idx, :fingerprint_dim] = fingerprints[i]
+
+    query_data.x = x
+    return query_data
+
+
+def load_trained_model_v3(
+    model_path: str,
+    device: str = "cpu",
+    model_params: dict | None = None,
+    use_compile: bool = False,
+) -> CostGNNv3:
+    """
+    Load a trained CostGNNv3 model checkpoint (same style as evaluation_parallel.py).
+    """
+    if model_params is None:
+        model_params = {
+            "hidden_dim": 128,
+            "node_feature_dim": 307,
+            "n_layers": 6,
+            "use_jk": False,
+            "jk_mode": "cat",
+            "use_residual": True,
+            "use_layer_norm": False,
+            "dropout": 0.0,
+        }
+
+    # evaluation_parallel.py keeps a 'version' key; ignore it here if present
+    params = dict(model_params)
+    params.pop("version", None)
+
+    model = CostGNNv3(**params).to(device)
+
+    state = torch.load(model_path, map_location=torch.device(device))
+    # Support either raw state_dict or wrapped checkpoints.
+    if isinstance(state, dict) and any(k in state for k in ("state_dict", "model_state_dict")):
+        state = state.get("state_dict", state.get("model_state_dict"))
+    model.load_state_dict(state)
+
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    if use_compile:
+        print("Compiling model with torch.compile...")
+        model = torch.compile(model, dynamic=True)
+        print("Model compilation completed.")
+
+    return model
 
 
 
@@ -325,8 +398,12 @@ def benchmark_method(method_func, query_data, model, device, method_name: str, *
         return float("inf"), False
 
 def run_runtime_evaluation(
+    use_real_queries: bool = False,
+    queries_file: str = None,
+    model_path: str = None,
+    model_params: dict | None = None,
     optimization_steps: int = 10,
-    query_sizes: List[int] = list(range(3, 11)),
+    query_sizes: Union[List[int], None] = None,
     num_trials_per_size: int = 5,
     device: str = 'cpu',
     save_plot: bool = True,
@@ -350,24 +427,102 @@ def run_runtime_evaluation(
         Dictionary containing runtime results for each method and query size
     """
     print(f"Running runtime evaluation on device: {device}")
-    print(f"Query sizes: {query_sizes}")
     print(f"Trials per size: {num_trials_per_size}")
     print(f"Include DP: {include_dp}")
     print(f"Use compile: {use_compile}")
+    print(f"Use real queries: {use_real_queries}")
+    if model_path:
+        print(f"Model: CostGNNv3 checkpoint at {model_path}")
+    else:
+        print("Model: dummy CostGNNv2 (random weights)")
+
+    # Load real queries (optional) and determine query sizes
+    queries_by_size = None
+    if use_real_queries:
+        if not queries_file:
+            raise ValueError("use_real_queries=True requires queries_file to be set.")
+
+        all_queries = load_sparql_queries(queries_file)
+        queries_by_size = defaultdict(list)
+        for q in all_queries:
+            triples = getattr(q, "triples", None)
+            if triples is None:
+                continue
+            
+            # Filter out broken queries (missing torch_data or None data)
+            try:
+                if not hasattr(q, "torch_data") or not q.torch_data or q.torch_data[0] is None:
+                    continue
+                # Check if it has the required attribute 'x'
+                if not hasattr(q.torch_data[0], 'x'):
+                    continue
+            except Exception:
+                continue
+
+            try:
+                size = len(triples)
+            except Exception:
+                continue
+            if size <= 0:
+                continue
+            queries_by_size[size].append(q)
+
+        if not queries_by_size:
+            raise ValueError(f"No usable queries found in {queries_file} (missing/empty .triples?).")
+
+        query_sizes = sorted(queries_by_size.keys())
+        print(f"Loaded real queries from: {queries_file}")
+        print(f"Found query sizes (n_triples) available: {query_sizes}")
+    else:
+        if query_sizes is None:
+            query_sizes = list(range(3, 11))
+        print(f"Query sizes: {query_sizes}")
     
-    # Create dummy model
-    model = create_dummy_model(device, use_compile=use_compile)
+    # Create model
+    if model_path:
+        model = load_trained_model_v3(
+            model_path=model_path,
+            device=device,
+            model_params=model_params,
+            use_compile=use_compile,
+        )
+    else:
+        model = create_dummy_model(device, use_compile=use_compile)
     
     # Warmup the optimization pipeline by running actual benchmarks
     if True:
         print("Warming up optimization pipeline...")
-        warmup_sizes = list(range(3, 8))  # Sizes 3, 4, 5
+        if use_real_queries:
+            warmup_sizes = query_sizes[: min(5, len(query_sizes))]
+        else:
+            warmup_sizes = list(range(3, 8))
         warmup_trials = 3
         
         for warmup_size in tqdm(warmup_sizes, desc="Warmup sizes"):
-            for warmup_trial in range(warmup_trials):
-                # Generate random query for warmup
-                warmup_query_data = generate_random_query_data(warmup_size, device, seed=warmup_trial + 1000)
+            if use_real_queries:
+                available = queries_by_size.get(warmup_size, [])
+                if not available:
+                    continue
+                # Deterministic sampling (independent of global RNG)
+                warmup_selected = random.Random(0).sample(available, min(warmup_trials, len(available)))
+                warmup_iter = enumerate(warmup_selected)
+            else:
+                warmup_iter = ((warmup_trial, None) for warmup_trial in range(warmup_trials))
+
+            for warmup_trial, warmup_query in warmup_iter:
+                # Get query_data for warmup
+                if use_real_queries:
+                    try:
+                        warmup_query_data = warmup_query.torch_data[0]
+                    except Exception:
+                        warmup_query_data = warmup_query
+                    
+                    if warmup_query_data is None:
+                        continue
+
+                    warmup_query_data = add_fingerprints_to_query_data(warmup_query_data, fingerprint_dim=64)
+                else:
+                    warmup_query_data = generate_random_query_data(warmup_size, device, seed=warmup_trial + 1000)
                 
                 # Run all methods without recording results
                 try:
@@ -460,9 +615,9 @@ def run_runtime_evaluation(
     }
 
     # Method-specific knobs (kept small-ish by default)
-    ii_config = {"optimization_steps": 50} # TODO
-    geqo_config = {"optimization_steps": 50}
-    cma_config = {"optimization_steps": 1000}
+    ii_config = {"optimization_steps": 500} # TODO
+    geqo_config = {"optimization_steps": 500}
+    cma_config = {"optimization_steps": 1500}
     neuralsort_config = {
         "optimization_steps": optimization_steps,
         "learning_rate": 0.1,
@@ -475,13 +630,42 @@ def run_runtime_evaluation(
     # Run evaluation for each query size
     for query_size in tqdm(query_sizes, desc="Query sizes"):
         print(f"\nEvaluating query size: {query_size}")
-        
-        for trial in tqdm(range(num_trials_per_size), desc="Trials", leave=False):
-            # Generate random query
-            query_data = generate_random_query_data(query_size, device, seed=trial)
+
+        if use_real_queries:
+            available = queries_by_size.get(query_size, [])
+            if not available:
+                print(f"  Skipping size {query_size}: no queries available")
+                continue
+            selected = random.Random(query_size).sample(
+                available, min(num_trials_per_size, len(available))
+            )
+            if len(selected) < num_trials_per_size:
+                print(
+                    f"  Note: size {query_size} has only {len(selected)} queries available "
+                    f"(requested {num_trials_per_size})"
+                )
+            trial_iter = enumerate(selected)
+        else:
+            trial_iter = ((trial, None) for trial in range(num_trials_per_size))
+
+        for trial, query_obj in tqdm(list(trial_iter), desc="Trials", leave=False):
+            # Get query_data
+            if use_real_queries:
+                try:
+                    query_data = query_obj.torch_data[0]
+                except Exception:
+                    query_data = query_obj
+                
+                if query_data is None:
+                    print(f"  Skipping trial {trial}: query_data is None")
+                    continue
+
+                query_data = add_fingerprints_to_query_data(query_data, fingerprint_dim=64)
+            else:
+                query_data = generate_random_query_data(query_size, device, seed=trial)
             
             # Benchmark DP (only if enabled)
-            if include_dp:
+            if include_dp and query_size <=12:
                 dp_time, dp_success = benchmark_method(
                     DPLinear, query_data, model, device, "DP"
                 )
@@ -577,32 +761,24 @@ def create_runtime_plot(
 
     fontsize = 12
     
-    colors = {
-        "DP": "#999999",
-        "Greedy": "#666666",
-        "GBJO": "black",
-        "II": "#9b59b6",
-        "GEQO": "#f39c12",
-        "CMA": "#e91e63",
-        "NeuralSort": "#1abc9c",
+    # Match symbols/colors with src/visualization/plot_optimization_results.py (METHOD_STYLES)
+    method_display = {
+        "DP": "DP",
+        "GBJO": "GBJO",
+        "II": "Iterative Improvement",
+        "Greedy": "Greedy",
+        "GEQO": "Genetic Search",
+        "NeuralSort": "Neural Sort",
+        "CMA": "CMA",
     }
-    markers = {
-        "DP": "o",
-        "Greedy": "s",
-        "GBJO": "^",
-        "II": "D",
-        "GEQO": "P",
-        "CMA": "X",
-        "NeuralSort": "v",
-    }
-    linestyles = {
-        "DP": ":",
-        "Greedy": "--",
-        "GBJO": "-",
-        "II": "-.",
-        "GEQO": (0, (3, 1, 1, 1)),
-        "CMA": (0, (1, 1)),
-        "NeuralSort": (0, (5, 2)),
+    method_styles = {
+        "DP": {"color": "#56B4E9", "marker": "s", "linestyle": "--"},
+        "GBJO": {"color": "#0072B2", "marker": "^", "linestyle": "-"},
+        "Iterative Improvement": {"color": "#F0E442", "marker": "D", "linestyle": ":"},
+        "Greedy": {"color": "#009E73", "marker": "v", "linestyle": "-."},
+        "Genetic Search": {"color": "#D55E00", "marker": "P", "linestyle": "-"},
+        "Neural Sort": {"color": "#666666", "marker": "h", "linestyle": ":"},
+        "CMA": {"color": "#000000", "marker": "*", "linestyle": "-."},
     }
     
     for method in results:
@@ -618,13 +794,15 @@ def create_runtime_plot(
                 std_times.append(np.std(times))
         
         if sizes:
+            display_name = method_display.get(method, method)
+            style = method_styles.get(display_name, {})
             plt.plot(
                 sizes,
                 mean_times,
-                label=method,
-                color=colors.get(method, "black"),
-                marker=markers.get(method, "o"),
-                linestyle=linestyles.get(method, "-"),
+                label=display_name,
+                color=style.get("color", "black"),
+                marker=style.get("marker", "o"),
+                linestyle=style.get("linestyle", "-"),
                 markersize=6,
                 linewidth=1.5,
             )
@@ -635,7 +813,7 @@ def create_runtime_plot(
     plt.xticks(fontsize=fontsize-1)
     plt.yticks(fontsize=fontsize-1)
     
-    plt.legend(fontsize=fontsize-1)
+    plt.legend(fontsize=9, ncol=2, loc="best")
     plt.yscale('log')  # Use log scale for better visualization
     
     plt.tight_layout()
@@ -669,8 +847,27 @@ def save_results_to_file(results: Dict, filename: str = 'runtime_results.txt'):
 if __name__ == "__main__":
     # Configuration
     config = {
-        'query_sizes': list(range(3, 12)), 
-        'num_trials_per_size': 1,           # Number of trials per size
+        # Toggle between synthetic/random queries and real Wikidata queries
+        'use_real_queries': True,
+        'queries_file': "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl",
+
+        # If use_real_queries=True, query_sizes is auto-detected from the dataset
+        'query_sizes': None,
+        
+        # Trained model checkpoint + architecture (match evaluation_parallel.py)
+        'model_path': "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt",
+        'model_params': {
+            "version": "v3",
+            "hidden_dim": 128,
+            "node_feature_dim": 307,
+            "n_layers": 6,
+            "use_jk": False,
+            "jk_mode": "cat",
+            "use_residual": True,
+            "use_layer_norm": False,
+            "dropout": 0.0,
+        },
+        'num_trials_per_size': 3,           # Number of trials per size
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
         'optimization_steps': 10,
         'save_plot': True,

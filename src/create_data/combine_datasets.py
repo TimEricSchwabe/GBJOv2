@@ -1,107 +1,47 @@
-#!/usr/bin/env python3
-"""
-Script to combine multiple Query datasets (.pt files) into a single dataset file.
-"""
-
 import torch
 import os
-import random
 
-
-def combine_datasets(input_files, output_file):
-    """
-    Combine multiple PyTorch dataset files into a single file.
+def combine_datasets(path1, path2, output_path):
+    """Combine two dataset.pt files into one."""
     
-    Args:
-        input_files: List of paths to input .pt dataset files
-        output_file: Path to output combined dataset file
-    """
+    # Load both datasets
+    data1 = torch.load(os.path.join(path1, 'dataset.pt'), weights_only=False)
+    data2 = torch.load(os.path.join(path2, 'dataset.pt'), weights_only=False)
+    
+    print(f"Dataset 1: {len(data1['data'])} samples")
+    print(f"Dataset 2: {len(data2['data'])} samples")
+    
+    # Combine the data lists
+    combined_data = data1['data'] + data2['data']
+    
+    # Combine triples if they exist
     combined_triples = []
-    combined_data = []
-    total_size = 0
+    if 'triples' in data1:
+        combined_triples.extend(data1['triples'])
+    if 'triples' in data2:
+        combined_triples.extend(data2['triples'])
     
-    print(f"Combining {len(input_files)} dataset files...")
-    
-    for i, input_file in enumerate(input_files):
-        print(f"Loading dataset {i+1}/{len(input_files)}: {input_file}")
-        
-        # Load the dataset
-        data = torch.load(input_file)
-        
-        # Validate structure
-        if not all(key in data for key in ['dataset_size', 'triples', 'data']):
-            raise ValueError(f"Invalid dataset structure in {input_file}")
-        
-        # Add to combined data
-        combined_triples.extend(data['triples'])
-        combined_data.extend(data['data'])
-        total_size += data['dataset_size']
-        
-        print(f"  Added {data['dataset_size']} samples")
-    
-    # Validate that lengths match before shuffling
-    assert len(combined_triples) == total_size, f"Triples length ({len(combined_triples)}) doesn't match dataset_size ({total_size})"
-    assert len(combined_data) == total_size, f"Data length ({len(combined_data)}) doesn't match dataset_size ({total_size})"
-    
-    # Shuffle the combined dataset
-    print("Shuffling combined dataset...")
-    indices = list(range(total_size))
-    random.shuffle(indices)
-    
-    # Apply shuffle to both lists to maintain correspondence
-    shuffled_triples = [combined_triples[i] for i in indices]
-    shuffled_data = [combined_data[i] for i in indices]
-    
-    # Create combined dataset
-    combined_dataset = {
-        'dataset_size': total_size,
-        'triples': shuffled_triples,
-        'data': shuffled_data
+    # Create combined dataset dict
+    combined = {
+        'dataset_size': len(combined_data),
+        'triples': combined_triples,
+        'data': combined_data
     }
     
-    # Validate that lengths still match after shuffling
-    assert len(shuffled_triples) == total_size, f"Shuffled triples length ({len(shuffled_triples)}) doesn't match dataset_size ({total_size})"
-    assert len(shuffled_data) == total_size, f"Shuffled data length ({len(shuffled_data)}) doesn't match dataset_size ({total_size})"
-    
-    # Create output directory if it doesn't exist
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    
     # Save combined dataset
-    torch.save(combined_dataset, output_file)
+    os.makedirs(output_path, exist_ok=True)
+    output_file = os.path.join(output_path, 'dataset.pt')
+    torch.save(combined, output_file)
     
-    print(f"\nCombined and shuffled dataset saved to: {output_file}")
-    print(f"Total samples: {total_size}")
-    print(f"Combined from {len(input_files)} source datasets")
+    print(f"Combined dataset saved to {output_file}")
+    print(f"Total samples: {len(combined_data)}")
 
-
+# Usage
 if __name__ == "__main__":
-    # Set random seed for reproducible shuffling
-    random.seed(42)
+
+    path1 = "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new"
+    path2 = "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new2"
+    output_path = "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new-combined"
     
-    # Define input and output files directly here
-    input_files = [
-        "datasets/path_plan_datasets_training/dataset_path_4_tp__with_subplans/dataset.pt",
-        "datasets/path_plan_datasets_training/dataset_path_5/dataset.pt"
-    ]
-    output_file = "datasets/LUBM_PATH/dataset.pt"
-    
-    # Validate input files exist
-    for input_file in input_files:
-        if not os.path.exists(input_file):
-            raise FileNotFoundError(f"Input file not found: {input_file}")
-    
-    print("Input files:")
-    for f in input_files:
-        print(f"  - {f}")
-    print(f"Output file: {output_file}")
-    print()
-    
-    # Combine datasets
-    combine_datasets(input_files, output_file)
-    
-    # Verify the combined dataset
-    print("\nVerifying combined dataset...")
-    data = torch.load(output_file)
-    print(f"Verified: {data['dataset_size']} samples")
-    print(f"Triples length: {len(data['triples'])}")
-    print(f"Data length: {len(data['data'])}") 
+    combine_datasets(path1, path2, output_path)
+    combine_datasets(path1, path2, output_path)

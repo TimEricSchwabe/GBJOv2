@@ -752,7 +752,7 @@ def visualize_plan_space_projection(
     # Load model
     model = CostGNNv3(node_feature_dim=307, hidden_dim=128, n_layers=6, use_jk=False, 
                       jk_mode='cat', use_residual=True, use_layer_norm=False, dropout=0.0).to(device)
-    #model.load_state_dict(torch.load(model_path, map_location=device))
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     
     # Load query
@@ -868,7 +868,7 @@ def visualize_plan_space_projection(
         # Use temperature tau=1.0 for "soft" but peaked distributions
         #tau = tau = 10 ** (torch.rand(1).item() * 3 - 2)
         #tau = np.random.uniform(0.01, 5.0)
-        tau = 5
+        tau = 0.01
         edge_weights = sample_grouped_gumbel_softmax(
             masked_logits.to(device), 
             edge_index[0], 
@@ -1224,8 +1224,8 @@ def visualize_plan_space_projection(
                    label=f'Bushy ({len(bushy_indices)})')
     
     # Labels and title
-    ax.set_xlabel(f'{projection_method.upper()} Dimension 1', fontsize=12)
-    ax.set_ylabel(f'{projection_method.upper()} Dimension 2', fontsize=12)
+    ax.set_xlabel(f'{projection_method.upper()} Dimension 1', fontsize=30)
+    ax.set_ylabel(f'{projection_method.upper()} Dimension 2', fontsize=30)
     total_plans = num_samples + num_discrete + num_bushy
     #ax.set_title(f'{projection_method.upper()} Projection of {total_plans} Plans\n'
     #             f'({num_discrete} left-deep + {num_bushy} bushy + {num_samples} soft, {rep_desc})', fontsize=14)
@@ -2169,6 +2169,8 @@ if __name__ == "__main__":
         projection_method="umap",
         query_size=query_size,
     )
+
+    exit()
 
     # Then create the interactive plot
     create_interactive_plan_explorer(

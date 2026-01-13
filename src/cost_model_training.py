@@ -83,9 +83,7 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
             
             # Calculate loss based on loss_type
             if loss_type != "qerror":
-                noise = torch.randn_like(data.y) * 0.05 * data.y
-                noisy_y = data.y + noise # TODO change later back
-                loss = criterion(out, torch.log(noisy_y))
+                loss = criterion(out, torch.log(data.y))
             elif loss_type == "qerror":
                 pred_y = torch.exp(out)
                 qerrors = calculate_qerror(pred_y, data.y)
@@ -174,7 +172,7 @@ def train_model(model, optimizer, criterion, train_loader, val_loader=None,
                 torch.save(model.state_dict(), save_path)
                 print(f"New best model saved to {save_path}")
             # save model after each epoch
-            torch.save(model.state_dict(), save_path / f'model_epoch_{epoch + 1}.pt')
+            #torch.save(model.state_dict(), save_path / f'model_epoch_{epoch + 1}.pt')
                 
         print(f'Epoch {epoch + 1}, Train Loss: {avg_train_loss:.4f}, Train Q-Error: {avg_train_qerror:.4f}, '
               f'Val Loss: {perf:.4f}, Val Q-Error: {qerror_metric:.4f}, '
@@ -482,7 +480,7 @@ if __name__ == "__main__":
         
         # Training parameters
         'learning_rate': 0.0001,
-        'batch_size': 1,
+        'batch_size': 32,
         'num_epochs': 500,
         'loss_type': 'huber',         # Options: 'mse', 'qerror', 'huber'
         
@@ -492,7 +490,7 @@ if __name__ == "__main__":
         
         # Paths
         'root_dir': '',
-        'dataset_dir': '/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new',
+        'dataset_dir': '/home/tim/query_optimization/datasets/plans/lubm/star-greedy',
         
         # Other settings
         'enable_training': True,    # Set to False to skip training
@@ -540,6 +538,7 @@ if __name__ == "__main__":
     val_size = total_size - train_size
     
     print(f"Using {train_size} samples for training and {val_size} samples for validation")
+    exit()
     
     # Create indices for training and validation subsets
     train_indices = list(range(train_size))
@@ -579,7 +578,7 @@ if __name__ == "__main__":
         raise ValueError(f"Unknown model type: {config['model_type']}")
     
     # Training setup
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate']) 
     #optimizer = optim_extra.Lookahead(optimizer, k=10, alpha=0.5)
 
     print(model)

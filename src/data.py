@@ -53,7 +53,7 @@ def get_session():
 
 def run_count_query(where_body: str,
                     connect_timeout: float = 5.0,
-                    read_timeout: float = 300.0) -> int:
+                    read_timeout: float = 30.0) -> int:
     """
     Run SELECT (COUNT(*) AS ?count) WHERE { ... } on QLever and return the integer count.
     
