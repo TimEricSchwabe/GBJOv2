@@ -2147,12 +2147,9 @@ if __name__ == "__main__":
         }
     }
     
-    #query_file = "/home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl"
-    #model_path = "/home/tim/query_optimization/training_results/lubm-star-log1p/model.pt"
-    query_file = "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl"
-    model_path = "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt"
-    #model_path = "/home/tim/query_optimization/meta_optimization_results/run_20251218_173606/best_model.pt"
-    #model_path = "/home/tim/query_optimization/meta_optimization_results/run_20251218_195646/best_model.pt"
+
+    query_file = ".../datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl"
+    model_path = ".../training_results/wikidata-star-log1p-add-aggr/model.pt"
     
     # Visualization options
     show_penalty_landscape = False  # Toggle to include penalty in landscape

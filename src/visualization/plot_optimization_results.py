@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-Plot optimization results from saved JSON data using Pandas.
-Refactored for conciseness and clarity.
-Styled for IJCAI paper submission.
-"""
 
 import json
 import os
@@ -17,9 +12,6 @@ from matplotlib.ticker import MaxNLocator
 from typing import Dict, Any
 from matplotlib.ticker import LogLocator, ScalarFormatter, FuncFormatter, NullLocator
 
-# =============================================================================
-# IJCAI Paper Formatting Constants
-# =============================================================================
 SINGLE_COL_WIDTH = 3.25  # inches (IJCAI single column)
 DOUBLE_COL_WIDTH = 6.75  # inches (IJCAI double column)
 FIGSIZE_SINGLE = (SINGLE_COL_WIDTH, 2.4)
@@ -29,11 +21,7 @@ FIGSIZE_SQUARE = (SINGLE_COL_WIDTH, SINGLE_COL_WIDTH)
 # Save kwargs for high-quality PDF output
 SAVE_KWARGS = {'dpi': 300, 'bbox_inches': 'tight', 'pad_inches': 0.02}
 
-# =============================================================================
-# Configure matplotlib for academic papers
-# =============================================================================
 def setup_paper_style():
-    """Configure matplotlib rcParams for IJCAI paper submission."""
     plt.rcParams.update({
         # Text rendering - try LaTeX first, fallback to mathtext
         'text.usetex': False,  # Set True if LaTeX is installed
@@ -112,8 +100,7 @@ METHODS_TO_PLOT = [
     'GBJO-Meta'
 ]
 
-# Colorblind-friendly palette (Wong, 2011 / IBM Design)
-# Designed to be distinguishable in both color and grayscale printing
+
 METHOD_STYLES = {
     'Exhaustive': {'color': '#E69F00', 'marker': 'o', 'linestyle': '-'},       # Orange
     'DP': {'color': '#56B4E9', 'marker': 's', 'linestyle': '--'},              # Sky Blue  
@@ -124,9 +111,7 @@ METHOD_STYLES = {
     'Random': {'color': '#CC79A7', 'marker': 'X', 'linestyle': '--'},          # Reddish Purple
     'Neural Sort': {'color': '#666666', 'marker': 'h', 'linestyle': ':'},      # Dark Gray
     'CMA': {'color': '#000000', 'marker': '*', 'linestyle': '-.'},             # Black
-    # Matches METHODS_MAP display name for key 'GBJO-Meta'
     'GBJO-Meta': {'color': '#FF69B4', 'marker': '*', 'linestyle': '-.'},       # Pink
-    # If present in results
     'GBJO_CG': {'color': '#9E69FF', 'marker': 'p', 'linestyle': '--'},          # Purple
 }
 
@@ -354,7 +339,6 @@ def plot_lineplots_by_size_geomean(df: pd.DataFrame, output_dir: str):
     if 'query_size' not in df.columns:
         return
 
-    # Geometric mean is only defined for positive values; we also ignore NaNs.
     def geometric_mean(s: pd.Series) -> float:
         s = s.dropna()
         s = s[s > 0]
@@ -453,13 +437,11 @@ def plot_boxplot_per_size(df: pd.DataFrame, output_dir: str):
     
     try:
         import seaborn as sns
-        # Create a palette dictionary using colorblind-friendly colors
-        # Ensure consistent order based on METHODS_TO_PLOT
+
         method_ranks = {METHODS_MAP[k]: i for i, k in enumerate(METHODS_TO_PLOT) if k in METHODS_MAP}
         unique_methods = melted['Method'].unique()
         hue_order = sorted(unique_methods, key=lambda m: method_ranks.get(m, 99))
         
-        # Palette must contain valid matplotlib colors; fill in missing ones defensively.
         palette = {m: METHOD_STYLES.get(m, {}).get('color') for m in hue_order}
         missing = [m for m, c in palette.items() if c is None]
         if missing:
@@ -474,7 +456,7 @@ def plot_boxplot_per_size(df: pd.DataFrame, output_dir: str):
         # Add labels vertically above whiskers
         unique_sizes = sorted(melted['query_size'].unique())
         num_hues = len(hue_order)
-        width = 0.8 # Default seaborn width for boxplot
+        width = 0.8 
         hue_width = width / num_hues
         
         for i, size in enumerate(unique_sizes):
@@ -487,12 +469,10 @@ def plot_boxplot_per_size(df: pd.DataFrame, output_dir: str):
                 if costs.empty:
                     continue
                     
-                # Calculate upper whisker manually to match matplotlib/seaborn standard
                 q1 = costs.quantile(0.25)
                 q3 = costs.quantile(0.75)
                 iqr = q3 - q1
                 upper_lim = q3 + 1.5 * iqr
-                # The whisker extends to the farthest point within the limit
                 whisker_val = costs[costs <= upper_lim].max()
                 if pd.isna(whisker_val):
                      whisker_val = costs.max()
@@ -579,7 +559,6 @@ def plot_win_loss_heatmap(df: pd.DataFrame, output_dir: str):
         print("No data for win/loss heatmap.")
         return
 
-    # Initialize win matrix with NaN (diagonal will stay NaN, off-diagonal will be filled)
     win_matrix = pd.DataFrame(np.nan, index=methods, columns=methods)
     
     for m1 in methods:

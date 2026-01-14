@@ -1,3 +1,6 @@
+"""
+Alternative training code to not only regress the cost but also penalize misrankings between plans using margin loss.
+"""
 import os
 import time
 import torch
@@ -391,7 +394,7 @@ if __name__ == "__main__":
         'num_epochs': 3000,
         'loss_type': 'huber',
         'root_dir': '',
-        'dataset_dir': '/home/tim/query_optimization/datasets/plans/wn18rr/stars/', # Directory containing queries.pkl
+        'dataset_dir': '/stars/', # Directory containing queries.pkl
         'enable_training': True,
     }
     

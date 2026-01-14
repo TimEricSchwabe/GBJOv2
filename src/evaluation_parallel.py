@@ -1,9 +1,5 @@
 """
-Parallel evaluation script for query optimization.
-
-This script evaluates different optimization strategies (gradient-based, greedy, random)
-on SPARQL queries in parallel and compares their performance using a trained cost model.
-Removes all visualization and plotting, focusing only on detailed results.
+Main Script to run the different join order optimization algorithms and safe results.
 """
 
 import os
@@ -34,7 +30,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(os.path.dirname(__file__))
 
 # Import the classes
-from src.create_data.create_optimization_data import SPARQLQuery
+#from src.create_data.create_optimization_data import SPARQLQuery
 from data import Triple, Join, Query, Entity
 from model import CostGNNv2, CostGNNv3
 
@@ -143,7 +139,7 @@ def extract_join_order(plan, triple_objs):
             leaves_from_root.append(find_triple_index(current.right))
             break
         elif left_is_leaf:
-            # Left is leaf, right is Join - right-linear (most common for right-deep)
+            # Left is leaf, right is Join - right-linear
             # e.g. Join(t2, Join(t0, t1))
             leaves_from_root.append(find_triple_index(current.left))
             current = current.right
@@ -256,7 +252,6 @@ def visualize_join_order_tree(triple_objs, plans_dict, save_path):
         "CMA": "CMA",
     }
 
-    # Colors for highlighted paths per method (keys match result JSON keys)
     METHOD_COLORS = {
         "gradient": "#3498db",  # Blue
         "greedy": "#2ecc71",  # Green
@@ -596,9 +591,6 @@ def visualize_all_plans(plans_dict, costs_dict, save_path, triple_objs=None):
             root_id, _ = _add_plan_node(plan.root, c, prefix=method_key, next_id=0)
             root_ids.append(root_id)
 
-    # Note: We removed 'rank=same' for roots across clusters as it often causes
-    # nodes to "outflow" their cluster boxes in Graphviz.
-    # If they stack vertically, we could add invisible edges between cluster nodes.
 
     try:
         graph.render(save_path, format="png", cleanup=True)
@@ -697,7 +689,6 @@ def process_single_query(args):
             "plans": {}
         }
 
-        # Ensure optional plan variables are always defined (used later for visualization)
         GEQO_plan = None
         II_plan = None
         ns_plan = None
@@ -828,7 +819,7 @@ def process_single_query(args):
 
 
         
-        # Run DP-based best plan search (only if enabled)
+        # Run DP-based best plan search
         best_adj = None
         best_pred_cost = float('inf')
         best_pred_plan = None
@@ -979,7 +970,7 @@ def process_single_query(args):
         # Run gradient-based optimization with a separate (meta) model checkpoint
         if 'GBJO-Meta' in optimization_algorithms:
             # Hardcoded meta model path (as requested)
-            meta_model_path = "/home/tim/query_optimization/meta_optimization_results/run_20251230_195309/model_epoch_70.pt"
+            meta_model_path = ".../model_epoch_70.pt"
 
             try:
                 # Create and load a second model instance (same architecture as the main one)
@@ -1376,8 +1367,8 @@ def evaluate_optimization_parallel(sparql_queries, model_path, num_queries=None,
 if __name__ == "__main__":
     # Configuration for optimization
     config_wikidata_star = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl", # /home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl
-        "model_path": "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt", # current best: "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt"
+        "queries_file": ".../queries.pkl",
+        "model_path": ".../model.pt",
         "num_queries": 80,
         "optimization_steps": 10, # 2500
         "optimization_steps_geqo": 500,
@@ -1434,8 +1425,8 @@ if __name__ == "__main__":
     }
 
     config_wikidata_path = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new3/dataset.pt",
-        "model_path": "/home/tim/query_optimization/training_results/wikidata-log1p-plus-cartesian/model.pt",
+        "queries_file": ".../new3/dataset.pt",
+        "model_path": ".../wikidata-log1p-plus-cartesian/model.pt",
         "num_queries": 80,
         "optimization_steps": 10, #2500
         "optimization_steps_geqo": 500,
@@ -1490,8 +1481,8 @@ if __name__ == "__main__":
     }
 
     config_lubm_star = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/lubm/star-greedy/dataset.pt", # /home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl
-        "model_path": "/home/tim/query_optimization/training_results/lubm-star-log1p/model.pt", # /home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt
+        "queries_file": ".../datasets/plans/lubm/star-greedy/dataset.pt", 
+        "model_path": ".../training_results/lubm-star-log1p/model.pt", 
         "num_queries": 80,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "optimization_steps": 10,
@@ -1549,8 +1540,8 @@ if __name__ == "__main__":
     }
 
     config_lubm_path = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/lubm/path-greedy/dataset.pt", # /home/tim/query_optimization/datasets/plans/lubm_path_plan_datasets_optimization/optimization_paths_3_to_5/queries.pkl
-        "model_path": "/home/tim/query_optimization/training_results/lubm-path-log1p/model.pt",
+        "queries_file": ".../datasets/plans/lubm/path-greedy/dataset.pt", 
+        "model_path": ".../training_results/lubm-path-log1p/model.pt",
         "num_queries": 80,
         "optimization_steps": 10,
         "optimization_steps_geqo": 500,
@@ -1606,8 +1597,8 @@ if __name__ == "__main__":
     }
 
     config_wn18rr_star = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/wn18rr/stars/queries.pt",
-        "model_path": "/home/tim/query_optimization/training_results/wn18rr-v3/model.pt",
+        "queries_file": ".../datasets/plans/wn18rr/stars/queries.pt",
+        "model_path": ".../training_results/wn18rr-v3/model.pt",
         "num_queries": 20,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "optimization_steps": 500,

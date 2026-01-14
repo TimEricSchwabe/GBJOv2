@@ -760,10 +760,8 @@ if __name__ == "__main__":
         }
     }
     
-    query_file = "/home/tim/query_optimization/datasets/plans/wn18rr/stars/queries.pt"
-    model_path = "/home/tim/query_optimization/training_results/lubm-path-nice-v3-6-layer/model.pt"
-    #model_path = "/home/tim/query_optimization/datasets/models/lubm/path_model.pt"
-    #model_path = "/home/tim/query_optimization/training_results/lubm-path-ranking-loss/model.pt"
+    query_file = ".../datasets/plans/wn18rr/stars/queries.pt"
+    model_path = ".../training_results/lubm-path-nice-v3-6-layer/model.pt"
     
     # Visualization options
     show_penalty_landscape = False  # Toggle to include penalty in landscape
@@ -790,33 +788,13 @@ if __name__ == "__main__":
     
     # Option 2: Auto-discover epoch checkpoints using glob
     # Adjust the pattern to match your checkpoint naming convention
-    checkpoint_dir = "/home/tim/query_optimization/training_results/lubm-path-nice-v3-6-layer"
+    checkpoint_dir = ".../training_results/lubm-path-nice-v3-6-layer"
     model_paths = sorted(glob.glob(f"{checkpoint_dir}/model_epoch*.pt"))
 
     model_paths = [
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_1.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_10.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_20.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_30.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_40.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_50.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_60.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_70.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_80.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_50.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_75.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_100.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_125.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_150.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_175.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_200.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_225.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_250.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_275.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_300.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_350.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_400.pt",
-        "/home/tim/query_optimization/training_results/wn18rr-v3-ordering/models/model_epoch_449.pt",
+        ".../training_results/wn18rr-v3-ordering/models/model_epoch_1.pt",
+        ".../training_results/wn18rr-v3-ordering/models/model_epoch_10.pt",
+        ...
     ]
     
     # If no epoch checkpoints found, fall back to just the final model for testing

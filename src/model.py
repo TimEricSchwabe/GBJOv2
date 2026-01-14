@@ -267,9 +267,7 @@ class CostGNNv3(nn.Module):
         use_layer_norm: Whether to use layer normalization (default: False)
         use_graph_norm: Whether to use graph normalization instead of layer norm (default: False)
         dropout: Dropout probability (default: 0.1)
-    
-    Reference:
-        Jumping Knowledge: https://pytorch-geometric.readthedocs.io/en/2.5.2/generated/torch_geometric.nn.models.JumpingKnowledge.html
+
     """
     def __init__(
         self, 
@@ -326,8 +324,6 @@ class CostGNNv3(nn.Module):
         # Dropout
         self.dropout = nn.Dropout(dropout)
         
-        # Jumping Knowledge module from PyG
-        # Aggregates representations from all layers
         if use_jk:
             if jk_mode == 'lstm':
                 self.jk = JumpingKnowledge(mode=jk_mode, channels=hidden_dim, num_layers=n_layers)
@@ -346,8 +342,7 @@ class CostGNNv3(nn.Module):
         self.fc1 = nn.Linear(jk_output_dim, jk_output_dim // 2)
         self.fc2 = nn.Linear(jk_output_dim // 2, 1)
         
-        # Apply safe initialization to prevent explosion
-        self._init_weights()
+        #self._init_weights()
     
     def _init_weights(self):
         """
@@ -373,7 +368,6 @@ class CostGNNv3(nn.Module):
             nn.init.zeros_(mlp[0].bias)
             
             # Second linear layer in MLP: small initialization
-            # This ensures the conv output starts small, letting residuals dominate
             nn.init.xavier_uniform_(mlp[2].weight, gain=0.1 * depth_scale)
             nn.init.zeros_(mlp[2].bias)
         
@@ -446,7 +440,6 @@ class CostGNNv3(nn.Module):
 class AddLearnableFingerprints(torch.nn.Module):
     """
     Learnable fingerprint embeddings for join nodes.
-    Handles batched graphs correctly - assigns fingerprints per-graph.
     """
     def __init__(self, num_fingerprints=15, fingerprint_dim=32):
         super().__init__()

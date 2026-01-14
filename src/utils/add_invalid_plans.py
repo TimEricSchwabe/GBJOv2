@@ -80,8 +80,8 @@ def add_invalid_plans_to_dataset(input_file: str, output_file: str):
 
 if __name__ == "__main__":
     # Configuration
-    input_file = "datasets/plans/lubm/path-greedy/new/queries.pt" # Replace with your input file path
-    output_file = "datasets/plans/lubm/path-greedy/new/queries_with_invalid.pt" # Replace with your output file path
+    input_file = "...queries.pt" # Replace with your input file path
+    output_file = "...queries_with_invalid.pt" # Replace with your output file path
     
     # Check if input file exists
     if not os.path.exists(input_file):

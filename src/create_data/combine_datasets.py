@@ -39,9 +39,8 @@ def combine_datasets(path1, path2, output_path):
 # Usage
 if __name__ == "__main__":
 
-    path1 = "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new"
-    path2 = "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new2"
-    output_path = "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new-combined"
+    path1 = "DATASET PATH 1"
+    path2 = "DATASET PATH 2"
+    output_path = "DATASET PATH COMBINED"
     
-    combine_datasets(path1, path2, output_path)
     combine_datasets(path1, path2, output_path)

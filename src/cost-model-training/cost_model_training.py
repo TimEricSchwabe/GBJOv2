@@ -490,7 +490,7 @@ if __name__ == "__main__":
         
         # Paths
         'root_dir': '',
-        'dataset_dir': '/home/tim/query_optimization/datasets/plans/lubm/star-greedy',
+        'dataset_dir': '.../star-greedy',
         
         # Other settings
         'enable_training': True,    # Set to False to skip training

@@ -191,7 +191,6 @@ def plot_lr_vs_lambda_acyclic(hist: History, out_dir: Path) -> None:
     cbar = plt.colorbar(sc)
     cbar.set_label("loss")
 
-    # If values are strictly positive, log-scale often reveals structure.
     if (df["learning_rate"] > 0).all():
         plt.xscale("log")
     if (df["lambda_acyclic"] > 0).all():

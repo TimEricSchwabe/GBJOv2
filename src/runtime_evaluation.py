@@ -1,10 +1,5 @@
 """
 Runtime evaluation script for query optimization approaches.
-
-This script generates random queries of increasing sizes and measures the runtime
-of different optimization approaches: DP, Greedy, GBJO, II, GEQO, CMA-ES, NeuralSort.
-
-All functions are redefined to make it easily portable to other machines (not elegant)
 """
 
 import sys
@@ -27,7 +22,6 @@ import itertools
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(os.path.dirname(__file__))
 
-from src.create_data.create_optimization_data import SPARQLQuery
 
 import src.data as data_module
 sys.modules['explicit_join_model.data'] = data_module
@@ -124,7 +118,6 @@ def load_trained_model_v3(
             "dropout": 0.0,
         }
 
-    # evaluation_parallel.py keeps a 'version' key; ignore it here if present
     params = dict(model_params)
     params.pop("version", None)
 
@@ -375,7 +368,6 @@ def benchmark_method(method_func, query_data, model, device, method_name: str, *
             )
 
         elif method_name in ("II", "GEQO"):
-            # Both accept (query_data, model, optimization_steps, device)
             _ = method_func(
                 query_data,
                 model,
@@ -453,7 +445,6 @@ def run_runtime_evaluation(
             try:
                 if not hasattr(q, "torch_data") or not q.torch_data or q.torch_data[0] is None:
                     continue
-                # Check if it has the required attribute 'x'
                 if not hasattr(q.torch_data[0], 'x'):
                     continue
             except Exception:
@@ -503,7 +494,6 @@ def run_runtime_evaluation(
                 available = queries_by_size.get(warmup_size, [])
                 if not available:
                     continue
-                # Deterministic sampling (independent of global RNG)
                 warmup_selected = random.Random(0).sample(available, min(warmup_trials, len(available)))
                 warmup_iter = enumerate(warmup_selected)
             else:
@@ -564,7 +554,6 @@ def run_runtime_evaluation(
                         **warmup_gbjo_config,
                     )
 
-                    # Optional warmups for other methods (best-effort)
                     _, _ = benchmark_method(DPLinear, warmup_query_data, model, device, "DP")
                     _, _ = benchmark_method(IterativeImprovement, warmup_query_data, model, device, "II", optimization_steps=50)
                     _, _ = benchmark_method(GEQO, warmup_query_data, model, device, "GEQO", optimization_steps=50)
@@ -849,13 +838,13 @@ if __name__ == "__main__":
     config = {
         # Toggle between synthetic/random queries and real Wikidata queries
         'use_real_queries': True,
-        'queries_file': "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl",
+        'queries_file': "../datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl",
 
         # If use_real_queries=True, query_sizes is auto-detected from the dataset
         'query_sizes': None,
         
         # Trained model checkpoint + architecture (match evaluation_parallel.py)
-        'model_path': "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt",
+        'model_path': ".../training_results/wikidata-star-log1p-add-aggr/model.pt",
         'model_params': {
             "version": "v3",
             "hidden_dim": 128,

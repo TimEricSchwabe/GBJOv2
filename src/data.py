@@ -18,11 +18,8 @@ import asyncio
 from tqdm import tqdm
 import pickle
 
-# ============== SPARQL Query Execution Setup ==============
-# Shared session with retry logic and connection pooling.
-# requests.Session is thread-safe, so one session works for all workers.
 
-QLEVER_ENDPOINT = "http://127.0.0.1:7001/"
+QLEVER_ENDPOINT = "http://127.0.0.1:7001/" # todo, we should maybe make this parameter
 
 _session = None
 _session_pid = None
@@ -55,7 +52,7 @@ def run_count_query(where_body: str,
                     connect_timeout: float = 5.0,
                     read_timeout: float = 30.0) -> int:
     """
-    Run SELECT (COUNT(*) AS ?count) WHERE { ... } on QLever and return the integer count.
+    Run SELECT (COUNT(*) AS ?count) WHERE { ... } and return the integer count.
     
     Args:
         where_body: The WHERE clause body (without the WHERE { } wrapper)
@@ -76,7 +73,6 @@ def run_count_query(where_body: str,
         }}
     """
     try:
-        # Use get_session() instead of the global _session
         session = get_session() 
         
         resp = session.get(
@@ -189,7 +185,6 @@ class Triple:
 	def get_cardinality(self) -> int:
 		"""
 		Returns the cardinality (number of matching triples) for this triple pattern.
-		This is useful when the triple pattern is considered as a standalone query.
 		"""
 		return run_count_query(self.where_body())
 	
@@ -202,7 +197,6 @@ class Triple:
 	
 	def add_to_graph(self, graph, node_id):
 		label = f"{self.s} {self.p} {self.o}"
-		# Escape double quotes to avoid Graphviz syntax errors
 		if '"' in label:
 			label = label.replace('"', '\\"')
 		graph.node(str(node_id), label=label, shape="box")
@@ -332,7 +326,6 @@ def random_join_order(triples: list[list[str]], seed = None, avoid_cartesian: bo
 	
 	while len(triple_objs) > 1:
 		if not avoid_cartesian:
-			# Original behavior: just join adjacent pairs
 			join_index = rng.randint(0, len(triple_objs) - 2)
 			join = Join(
 				left=triple_objs[join_index],

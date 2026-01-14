@@ -6,11 +6,9 @@ import scienceplots
 plt.style.use('science')
 
 # Configuration
-FILE1 = "optimization_results/wikidata-path/detailed_results.json"  # k=1 data
-FILE2 = "optimization_results/wikidata-path-k-5/detailed_results.json"  # k=5 data
 
-FILE1 = "optimization_results/lubm-path/detailed_results.json"  # k=1 data
-FILE2 = "optimization_results/lubm-path-k-5/detailed_results.json"  # k=5 data
+FILE1 = ".../detailed_results.json"  # k=1 data
+FILE2 = ".../detailed_results.json"  # k=5 data
 
 
 def load_and_extract_costs(file_path):

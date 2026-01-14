@@ -33,7 +33,7 @@ def generate_embeddings(graph_file, entities):
 if __name__ == "__main__":
     entities = []
     # Example: Only use entities occurring in the queries
-    with open('datasets/queries/lubm/star/Joined_Queries.json', 'r') as f:
+    with open('.../Joined_Queries.json', 'r') as f:
        queries = json.load(f)
     for query in queries:
        entities += query['x']
@@ -48,5 +48,4 @@ if __name__ == "__main__":
 
     print(entities)
 
-    # Replace the path to the.nt file with a url to the sparql endpoint if necessary
-    generate_embeddings("datasets/graphs/lubm/lubm.nt", entities)
+    generate_embeddings(".../...nt", entities) 

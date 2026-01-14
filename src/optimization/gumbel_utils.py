@@ -29,15 +29,15 @@ def sample_gumbel(shape, eps=1e-10, device="cpu"):
 
 def sample_binary_concrete(logits: torch.Tensor, temperature: float) -> torch.Tensor:
     """
-    Sample from the Binary Concrete (Gumbel‑Sigmoid) distribution using the
-    re‑parameterisation trick and return a straight‑through sample.
+    Sample from the Binary Concrete (Gumbel-Sigmoid) distribution using the
+    reparameterisation trick and return a straight-through sample.
     
     Args:
         logits: Raw, unconstrained edge logits (shape: [num_edges]).
         temperature: Positive temperature τ controlling smoothness.
         
     Returns:
-        edge_weights: Straight‑through hard sample in [0,1] with gradients.
+        edge_weights: Straight-through hard sample in [0,1] with gradients.
     """
     u = torch.rand_like(logits)
     gumbel = -torch.log(-torch.log(u + 1e-10) + 1e-10)
@@ -67,13 +67,13 @@ def sample_grouped_gumbel_softmax(edge_logits: torch.Tensor,
         use_gumbel_noise: Whether to add Gumbel noise for stochastic sampling.
 
     Returns:
-        Tensor of shape (E,) – edge weights in (0,1) summing to 1 for every
+        Tensor of shape (E,) - edge weights in (0,1) summing to 1 for every
         set of edges that share the same source node.
     """
 
     
     if use_gumbel_noise:
-        raise NotImplementedError("Gumbel noise is not allowed !")
+        raise NotImplementedError("Gumbel noise is not allowed !") # kept here but we removed it completely from the approach
         g = sample_gumbel(edge_logits.shape, device=edge_logits.device)
         scaled_logits = (edge_logits + g) / temperature
     else:

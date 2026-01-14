@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 """
 Sweep optimization_steps for iterative optimizers and plot median true cost vs steps.
-
-- Dataset/config default: config_lubm_path (from src/evaluation_parallel.py)
-- Methods swept (steps-dependent): GBJO, GEQO, IterativeImprovement, NeuralSort, CMA
-  (DP and GreedySearch excluded by design: no tunable optimization_steps)
-- Random is run once and reused as a constant baseline across all step values.
-
-This script writes a single summary JSON (sweep_results.json) so plots can be
-regenerated without rerunning evaluation.
 """
 
 from __future__ import annotations
@@ -31,7 +23,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-# Add the parent directory to Python path (match other scripts in this repo)
 import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -47,7 +38,6 @@ from src.visualization.plot_optimization_results import plot_optimization_steps_
 
 STEP_VALUES_DEFAULT = [10, 50, 100, 500]
 
-# Map from evaluation_parallel plan keys to display names (used in plots/paper)
 PLANKEY_TO_DISPLAY = {
     "gradient": "GBJO",
     "GEQO": "Genetic Search",
@@ -99,7 +89,6 @@ def main(config):
     save_root = os.path.abspath(save_root)
     _ensure_dir(save_root)
 
-    # Load queries once; reuse exact list across sweeps for comparability.
     sparql_queries = load_sparql_queries(config["queries_file"])
     max_uri_atoms = config.get("max_uri_atoms", 2)
     if max_uri_atoms is not None:
@@ -112,9 +101,6 @@ def main(config):
     print(f"Sweeping optimization_steps: {step_values}")
     print(f"Num queries: {len(sparql_queries)}")
 
-    # Run Random once (baseline) and reuse.
-    # Note: The new plotter doesn't automatically use this baseline folder yet,
-    # but we generate it for completeness/future use.
     random_dir = _ensure_dir(os.path.join(save_root, "random_baseline"))
     evaluate_optimization_parallel(
         sparql_queries,
@@ -142,7 +128,6 @@ def main(config):
         "step_values": step_values,
         "dataset": config.get("dataset_name", "unknown"),
         "config": {
-            # keep only the essentials for reproducing
             "queries_file": config["queries_file"],
             "model_path": config["model_path"],
             "num_queries": config.get("num_queries"),
@@ -153,7 +138,7 @@ def main(config):
         },
     }
 
-    # Save summary JSON (metadata only)
+    # Save summary JSON 
     results_file = os.path.join(save_root, "sweep_results.json")
     with open(results_file, "w") as f:
         json.dump(summary, f, indent=2)
@@ -185,8 +170,6 @@ def main(config):
 
     # Plot
     plots_dir = _ensure_dir(os.path.join(save_root, "plots"))
-    # Pass the ROOT DIRECTORY (save_root) instead of the summary file
-    # This allows the plotter to crawl subdirectories and re-aggregate as needed.
     plot_optimization_steps_sweep(save_root, plots_dir)
     plot_optimization_steps_sweep(save_root, plots_dir, metric="mean")
     print(f"Done. Plots saved to {plots_dir}")
@@ -195,8 +178,8 @@ def main(config):
 if __name__ == "__main__":
     config_lubm_path = {
         "dataset_name": "lubm_path",
-        "queries_file": "/home/tim/query_optimization/datasets/plans/lubm/path-greedy/dataset.pt",
-        "model_path": "/home/tim/query_optimization/training_results/lubm-path-log1p/model.pt",
+        "queries_file": ".../datasets/plans/lubm/path-greedy/dataset.pt",
+        "model_path": ".../training_results/lubm-path-log1p/model.pt",
         "num_queries": 20,
         "step_values": [10, 50, 100, 500],
         "use_exhaustive": False,
@@ -250,8 +233,8 @@ if __name__ == "__main__":
     }
 
     config_wikidata_star = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl",
-        "model_path": "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt", # current best: "/home/tim/query_optimization/training_results/wikidata-star-log1p-add-aggr/model.pt"
+        "queries_file": ".../datasets/plans/wikidata_star_plan_datasets_optimization/queries.pkl",
+        "model_path": ".../training_results/wikidata-star-log1p-add-aggr/model.pt", # current best: ".../training_results/wikidata-star-log1p-add-aggr/model.pt"
         "num_queries": 80,
         "step_values": [50, 500, 1000, 2500, 10000],
         "use_exhaustive": False,
@@ -306,8 +289,8 @@ if __name__ == "__main__":
     }
 
     config_lubm_star = {
-        "queries_file": "/home/tim/query_optimization/datasets/plans/lubm/star-greedy/dataset.pt", # /home/tim/query_optimization/datasets/plans/lubm_star_plan_datasets_optimization/optimization_stars_3_to_14/queries.pkl
-        "model_path": "/home/tim/query_optimization/training_results/lubm-star-log1p/model.pt", # /home/tim/query_optimization/datasets/models/lubm/6-layers-v3-with-layer-norm/model.pt
+        "queries_file": ".../datasets/plans/lubm/star-greedy/dataset.pt", 
+        "model_path": ".../training_results/lubm-star-log1p/model.pt", 
         "num_queries": 100,
         "max_query_size": None,  # Filter queries larger than this (None for no filter)
         "step_values": [10, 50, 100, 500, 1000],
