@@ -55,41 +55,65 @@ def create_optimization_animation(animation_data, visualization_dir, query_idx, 
     
     print(f"Animation frames: {len(edge_weights_history)}")
     
-    # Use FINAL weights to determine layout (what we're converging to)
-    final_weights = edge_weights_history[-1]
-    
-    # Create a NetworkX graph for layout based on final adjacency
-    G_layout = nx.DiGraph()
-    G_layout.add_nodes_from(range(n_nodes))
-    
-    # Add all possible edges to track for animation
+    # Build all_edges list from edge_index for animation frames
     all_edges = []
     for i in range(len(edge_index[0])):
         src, dst = edge_index[0][i].item(), edge_index[1][i].item()
         all_edges.append((src, dst))
     
-    # For layout, only add strong edges from the final weights (like visualize_adjacency_matrix does)
-    strong_edge_threshold = 0.5
-    for i, (src, dst) in enumerate(all_edges):
-        final_weight = final_weights[i]
-        if hasattr(final_weight, 'item'):
-            final_weight = final_weight.item()
-        final_weight = float(final_weight)
-        
-        if final_weight > strong_edge_threshold:
-            G_layout.add_edge(src, dst, weight=final_weight)
+    # Create layout graph - use best discrete adjacency if available
+    G_layout = nx.DiGraph()
+    G_layout.add_nodes_from(range(n_nodes))
     
-    # Determine layout using final adjacency structure
+    if 'best_discrete_A' in animation_data and animation_data['best_discrete_A'] is not None:
+        # Use the best discrete plan found during optimization for layout
+        discrete_A = animation_data['best_discrete_A']
+        print("Using best discrete adjacency for layout")
+        
+        # Add edges from discrete adjacency matrix
+        for i in range(n_nodes):
+            for j in range(n_nodes):
+                if discrete_A[i, j] > 0.5:
+                    G_layout.add_edge(j, i, weight=1.0)
+    else:
+        # Fall back to using final soft weights
+        print("Falling back to final soft weights for layout")
+        final_weights = edge_weights_history[-1]
+        
+        # For layout, only add strong edges from the final weights
+        strong_edge_threshold = 0.5
+        for i, (src, dst) in enumerate(all_edges):
+            final_weight = final_weights[i]
+            if hasattr(final_weight, 'item'):
+                final_weight = final_weight.item()
+            final_weight = float(final_weight)
+            
+            if final_weight > strong_edge_threshold:
+                G_layout.add_edge(src, dst, weight=final_weight)
+    
+    # Determine layout using the graph structure
     if use_tree_layout:
-        # Find the root node from final weights - join node with no outgoing edges
-        root = n_nodes - 1  # Default fallback
+        # Find the root node - join node with no outgoing edges
+        root = n_nodes - 1  # Default fallback (last join node is typically root)
         try:
-            for node_idx in range(triples_num, n_nodes):
-                out_weights = [final_weights[i] for i, (src, dst) in enumerate(zip(edge_index[0], edge_index[1])) 
-                              if src.item() == node_idx]
-                if sum(out_weights) < 0.01:
-                    root = node_idx
-                    break
+            if 'best_discrete_A' in animation_data and animation_data['best_discrete_A'] is not None:
+                # Use discrete adjacency to find root
+                discrete_A = animation_data['best_discrete_A']
+                for node_idx in range(triples_num, n_nodes):
+                    # Root has no outgoing edges
+                    if discrete_A[node_idx, :].sum() < 0.5:
+                        root = node_idx
+                        break
+            else:
+                raise Exception("No best discrete adjacency found")
+                # Use soft weights to find root
+                final_weights = edge_weights_history[-1]
+                for node_idx in range(triples_num, n_nodes):
+                    out_weights = [final_weights[i] for i, (src, dst) in enumerate(zip(edge_index[0], edge_index[1])) 
+                                  if src.item() == node_idx]
+                    if sum(out_weights) < 0.01:
+                        root = node_idx
+                        break
             
             # Try tree layout with the identified root
             pos = nx.drawing.nx_agraph.graphviz_layout(G_layout, prog='dot', root=root)
@@ -405,8 +429,8 @@ def generate_animations_for_run(run_directory, fps=10, use_tree_layout=True, max
 def main():
     """Main function to generate animations."""
     # Configuration parameters
-    run_directory = "optimization_results/run_20251223_160907"
-    fps = 10
+    run_directory = "optimization_results/run_20260114_163955"
+    fps = 1
     use_tree_layout = True
     max_edge_weight = 2.0
     last_n_steps = None 

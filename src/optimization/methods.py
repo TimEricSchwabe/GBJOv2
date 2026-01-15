@@ -405,6 +405,9 @@ def GBJO(
     predicted_cost_exp = float(np.exp(final_log_cost))
 
     if save_animation_data:
+        # Add the best discrete plan for layout purposes
+        if best_discrete_A is not None:
+            animation_data['best_discrete_A'] = best_discrete_A.cpu().numpy()
         return final_A, triples_num, predicted_cost_exp, animation_data
     else:
         return final_A, triples_num, predicted_cost_exp

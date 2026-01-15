@@ -469,8 +469,8 @@ if __name__ == "__main__":
     
     CONFIG = {
         # Data paths
-        "dataset_path": "/home/tim/query_optimization/datasets/plans/wikidata_path_plan_datasets_training/new/dataset.pt",
-        "model_path": "/home/tim/query_optimization/training_results/wikidata-path-log1p/model.pt",
+        "dataset_path": "datasets/plans/wikidata_path_plan_datasets_training/new/dataset.pt",
+        "model_path": "training_results/wikidata-path-log1p/model.pt",
         
         # Evaluation settings
         "num_plans": 400,  # Number of plans to evaluate per trial

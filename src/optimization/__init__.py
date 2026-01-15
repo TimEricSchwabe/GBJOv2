@@ -6,7 +6,6 @@ from .methods import (
     DPLinear,
     exhaustive_leftdeep_best_plan,
     NeuralSort,
-    optimize_query_gumbel_sinkhorn,
     CMA,
     IterativeImprovement,
     GEQO)
@@ -26,7 +25,6 @@ __all__ = [
     'DPLinear',
     'exhaustive_leftdeep_best_plan',
     'NeuralSort',
-    'optimize_query_gumbel_sinkhorn',
     'CMA',
     'sample_gumbel',
     'sample_binary_concrete',
