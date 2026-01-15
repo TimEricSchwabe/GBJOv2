@@ -1,10 +1,6 @@
-# Gradient Based Join Ordering
+# GBJO: Gradient Based Join Ordering
 
-This repository contains the code for the paper on Gradient Based Join Ordering and implements a gradient-based search method for query plans. The following animation shows the initial continuous superposition of query plans and
-how it changes while the gradient optimizer tries to minimize the predicted cost (top right) as well as violation of valid plan constraints (bottom right).
-
-
-![Demo of feature](./optim.gif)
+This repository contains the code for the paper on Gradient Based Join Ordering and implements a gradient-based search method for query plans.
 
 
 ## Overview
@@ -15,7 +11,7 @@ The overview closely follows the experiments performed in the paper and presents
 2. **Results**: Where and how the raw results from the paper are saved
 3. **Cost Model Training**: A Graph Neural Network (CostGNN) that learns to predict query execution costs
 4. **Gradient-Based Optimization**:  Optimization procedures for finding optimal join orders
-5. **Cost and Runtime Comparison**: Comparing gradient-based optimization to discrete Search
+5. **Cost and Runtime Comparison**: Comparing gradient-based optimization to other baselines
 6. **Visualization**: Generation of final plots and error landscape visualizations
 
 
@@ -23,27 +19,24 @@ The overview closely follows the experiments performed in the paper and presents
 
 ### Python Packages
 
-To install the required python packages to run the experiments:
-  ```bash
-  pip install -r requirements.txt
-  ```
+To install the required python packages to run the experiments (from `pyproject.toml`):
 
-Or, create a conda environment using
-  ```bash
- conda env create -f environment.yml
-  ```
+```bash
+pipx install uv
+uv pip install -e .
+```
 ### SPARQL endpoint
 
 Further, to calculate costs for generated plans (and optionally for generating rdf2vec embeddings) you need to serve the used graphs
-via a SPARQL endpoint. We recommend using virtuoso for this: 
-https://github.com/openlink/virtuoso-opensource
+via a SPARQL endpoint. We recommend using qlever for this: 
+https://github.com/ad-freiburg/qlever
 
 
 ## Datasets and Queries
 
 ### Graph Datasets
 The datasets on which the queries are based are taken from GNCE[1]. They are stored in .nt format (one triple per line) and can be accessed
-in the `/datasets/graphs` folder.
+in the `/datasets/graphs` folder (this and all other data below is hosted here: https://figshare.com/s/ab9a9ea0b55b647e031e).
 
 ### RDF2Vec Embeddings and Entity Counts
 
@@ -70,34 +63,23 @@ The queries that are used to generate random plans and their costs are stored in
 
 The plan datasets used in the paper are stored in the `/datasets/plans` folder.
 
-### Training Datasets
+### Plan Dataset Generation
 
-The datasets used for training the cost model are stored in the `*_training` folders as .pt files, ready to be used by the training script (see below).
-The training files can be generated based on the queries via
+If you want to generate additional plans, they can be generated based on queries via
   ```bash
   python src/create_data/create_cost_model_training_data.py
   ```
   > **Important**: The .nt file for the graph you generate plans for need to be loaded into a SPARQL endpoint in order to calculate the c_out costs for each plan.
 
-### Optimization Datasets
-
-The datasets used to investigate the cost landscape, and perform the optimization evaluations are stored in the `*_optimization` folders as `.pkl` files.
-To generate them, run
-  ```bash
-  python src/create_data/create_optimization_data.py
-  ```
-
 ##  Results
 The raw results and plots shown in the paper are saved as follows:
 
 ### Model Training
-The results for the 4 cost models are saved under `/training_results` with the model files as well as plots and metrics
+The results for the 4 cost models are saved under `datasets/models` with the model files as well as plots and metrics
 
-### Gradient Search Fronts
-Saved under `/k_vs_cost_results`
 
 ### Optimization Results
-The results of the optimization comparison to greedy search are saved under `/optimization_results`, including config, plots and raw query plans
+The results of the optimizationfor GBJO and baselines are saved under `/optimization_results`, including config, plots and raw query plans
 
 ## Cost Model Training
 After the necessary datasets have been generated, the next step is to train a cost model on them to predict the (c_out) cost.
@@ -120,24 +102,34 @@ Within the code you can specify the config as follows:
 ```python
     config = {
         # Model parameters
-        'model_type': 'CostGNNv2',  
+        'model_type': 'CostGNNv3',  # Options: 'CostGNN', 'CostGNNv2', 'CostGNNv3'
         'node_feature_dim': 307,    # Input feature dimension
-        'hidden_dim': 512,          # Hidden layer dimension
+        'hidden_dim': 128,          # Hidden layer dimension
+        
+        # CostGNNv3 architecture parameters
+        'n_layers': 6,              # Number of GIN message-passing layers
+        'use_jk': False,            # Whether to use Jumping Knowledge
+        'jk_mode': 'cat',           # JK mode: 'cat', 'max', or 'lstm'
+        'use_residual': True,       # Whether to use residual connections
+        'use_layer_norm': False,    # Whether to use layer normalization
+        'use_graph_norm': False,     # Whether to use graph normalization instead
+        'dropout': 0.,             # Dropout probability
+        'aggr': 'add',              # Aggregation function for gin layers: 'add' or 'mean'
         
         # Training parameters
         'learning_rate': 0.0001,
-        'batch_size': 128,
-        'num_epochs': 1,
-        'loss_type': 'mse',         # Options: 'mse', 'qerror'
+        'batch_size': 32,
+        'num_epochs': 500,
+        'loss_type': 'huber',         # Options: 'mse', 'qerror', 'huber'
         
         # Dataset parameters
-        'use_single_file': True, 
+        'use_single_file': True,
         # Paths
-        'root_dir': '', # Root Dir of the repository
-        'dataset_dir': 'datasets/..', # which .pt to use for training
+        'root_dir': '',
+        'dataset_dir': '.../star-greedy', # on which plan dataset to train
         
         # Other settings
-        'enable_training': False,    # Set to False to skip training and only perform evaluation
+        'enable_training': True,    # Set to False to skip training
     }
 ```
 The training will be written to `/training_results` in a new folder which stores the best model, plots of metrics/loss during training and plots for final evaluation
@@ -146,76 +138,28 @@ on the validation data.
 
 ## Join Order Optimization
 
-The code for the gradient-based optimization as given in Algorithm 1 in the paper can be found as `optimize_query_gumbel` in `src/optimization/methods.py`
+The code for the gradient-based optimization and the other baselines in the paper can be found in `src/optimization/methods.py`
 
 ### Visualizing the Cost Landscape
-To generate the 1-D visualizations of cost between 2 random plans, run
+To generate the visualizations of cost between random plans, run
 ```bash
-python src/cost_landscape_visualization.py
-```
-The script lets you pick a model and a plan pickle file and then generated 2 random left-linear plans for a given query and interpolates N cost estimations between those to generate the final plot.
-
-
-
-### Number of Search Fronts $k$
-
-To gnerate the results how the median predicted cost changes with increasing the number of search fronts $k$, run
-```bash
-python src/k_vs_cost.py
+python src/visualization/optimization_space_visualization.py
 ```
 
-Here, you need to specify a configuration for the gradient-based join order optimizer, as follows:
-```python
-    config = {
-        "queries_file": "datasets/wikidata_star_plan_datasets_optimization/queries.pkl", # on which plan file to run the experiment
-        "model_path": "datasets/models/wikidata/star_model.pt", # Which cost model to use
-        "num_queries": 20, # How many queries to use for the evaluation
-        "optimization_steps": 100, # How many gradient steps to take
-        "max_nk": 10, # Maximal number of gradient fronts to perform 
-        "optimization_params": {
-            "learning_rate": 1.7, # Learning rate of the gradient optimizer
-            "lambda_acyclic": 3081.0, # penalty weights as per the paper
-            "lambda_triple_in": 3714.0,
-            "lambda_triple_out": 135.0,
-            "lambda_join_in": 1742.0,
-            "lambda_join_out": 1558.0,
-            "lambda_entropy": 0.0, # not used
-            "lambda_total_penalty": 2.6,
-            "lambda_left_linear": 2300.0,
-            "init_tau": 4.5, 
-            "min_tau": 1.0,
-            "tau_decay": 0.963, # not used
-            "use_temperature_annealing": True,
-            "return_best": True,
-            "min_penalty_threshold": 5, # gamma
-            "use_lambda_ramping": True,
-            "logit_sampling": "softmax",
-            "save_animation_data": False,
-            "animation_save_interval": 10,
-            "lambda_ramp_exponent": 6.5, # p
-            "lr_warmup_steps": 0, # optional. perform a warmup of the learning rate
-            "gradient_clip_norm": 2, # optional, clip gradients
-            "use_lr_scheduling": True,
-            "decoding_method": "greedy"
-        }
-    }
-```
-The results are saved to the `k_vs_cost` folder in a new subfolder including plots and raw results.
+### Comparison to baseline join order algorithms
 
-### Comparison to discrete local Search
-
-The results for comparison of gradient-based and greedy search from the paper are stored in the `optimization_results` folder. The 
+The results for comparison of GBJO to the baselines from the paper are stored in the `optimization_results` folder. The 
 results include the plots as well as the raw data including query triples, predicted cost and predicted plan per query.
 
 
-Finally, to compare the gradient-based search to greedy search (and optionally dynamic programming) yourself, run
+To regenerate those results, run
 ```bash
-python src/evaluation.py
+python src/evaluation_parallel.py
 ```
-The code requires you to define a config similar to above. The new results will similarly be stored in the `optimization_results`
+The code requires you to define a config (examples are given in the file). The new results will similarly be stored in the `optimization_results`
 folder. To generate the final plots run
 ```bash
-python src/visualization/plot_optimization_results.py /path/to/your/results_directory
+python src/visualization/plot_optimization_results.py
 ```
 
 
@@ -223,7 +167,7 @@ python src/visualization/plot_optimization_results.py /path/to/your/results_dire
 ### Hyperparameter Search
 In order to search for hyperparameters for a particular model and plan dataset, run
 ```bash
-python src/hyperparameter_search/hyperparameter_search.py
+python src/hyperparameter_search/hyperparam_search.py
 ```
 Change the SEARCH_SPACE in the code to your requirements
 
