@@ -38,8 +38,11 @@ typedef int lapack_int_t;
 
 namespace {
 
-constexpr int H = 128;          // hidden dim (CostGNNv3)
-constexpr int FC1_OUT = 64;     // H/2
+#ifndef GBJO_H
+#define GBJO_H 128               // hidden dim (CostGNNv3); -DGBJO_H=32 for small models
+#endif
+constexpr int H = GBJO_H;        // hidden dim (CostGNNv3)
+constexpr int FC1_OUT = H / 2;   // cost head width
 
 // Portable vectorizable expf (Cephes polynomial, ~1 ulp). Pure arithmetic +
 // bit ops, so clang/gcc auto-vectorize it on NEON/AVX without libmvec or
@@ -560,7 +563,11 @@ double gbjo_optimize(void* p, const float* h0, const float* S, int n, int steps,
                      // when out_plans != null, write up to max_pool unique
                      // candidate adjacencies + their log-costs, set *out_ncand.
                      int max_pool, int8_t* out_plans, double* out_costs,
-                     int* out_ncand) {
+                     int* out_ncand,
+                     // optional: export the final (2n-2, n-1) logit matrix L so
+                     // the caller can build a rich decode pool (final mode +
+                     // connected-greedy injection + Gumbel draws) in numpy.
+                     float* out_logits) {
     Ctx& ctx = *(Ctx*)p;
     const int N = 2 * n - 1;
     const int rows = 2 * n - 2, cols = n - 1;  // logit block
@@ -698,6 +705,10 @@ double gbjo_optimize(void* p, const float* h0, const float* S, int n, int steps,
         if (seen.emplace(key, (int)plans.size()).second)
             plans.push_back(std::move(plan));
     }
+
+    // export the final logit matrix (post-GD) for caller-side rich decoding
+    if (out_logits)
+        std::memcpy(out_logits, L.data(), (size_t)rows * cols * sizeof(float));
 
     // --- score unique discrete plans; first-seen + strict '<'
     double best_cost = 1e300;

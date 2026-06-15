@@ -44,6 +44,7 @@ def _load_lib():
         _f64p, _f64p, _f64p, _f64p, _f64p,
         ctypes.c_double, ctypes.c_int, ctypes.c_int, ctypes.c_int, _i8p, _i8p,
         ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_void_p,  # out_logits (final L export; null = skip)
     ]
     return lib
 
@@ -131,6 +132,7 @@ class CppGBJO:
         beam_width = int(self.params["discrete_beam_width"])
         step0 = self._step0_plan(n, beam_width)
         out = np.zeros((N, N), dtype=np.int8)
+        Lout = np.zeros((2 * n - 2, n - 1), dtype=np.float32)  # diag: final logits
         log_cost = self.lib.gbjo_optimize(
             self.ctx, h0, S, n, optimization_steps,
             np.asarray(lrs, dtype=np.float64), np.asarray(moms, dtype=np.float64),
@@ -138,7 +140,9 @@ class CppGBJO:
             self._lambdas, float(self.params["gradient_clip_norm"]),
             beam_width, int(lex), int(mask_cart), step0, out,
             0, None, None, None,  # no candidate-pool export
+            Lout.ctypes.data_as(ctypes.c_void_p),
         )
+        self.last_L = Lout
         return out.astype(int), float(np.exp(log_cost))
 
     def __del__(self):

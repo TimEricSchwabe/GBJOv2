@@ -670,6 +670,7 @@ class FastGBJO:
                     best_A = A_hat
 
         self.last_candidates = [seen[k] for k in order]  # diagnostics
+        self.last_L = L.detach().numpy().copy()           # diag: final logits
         return best_A, float(np.exp(best_cost))
 
 

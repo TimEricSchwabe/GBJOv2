@@ -59,6 +59,7 @@ import torch.nn.functional as F
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gbjo_fast import (FastGBJO, cartesian_penalty, beam_exact,
@@ -260,7 +261,7 @@ LAM_KEYS = ["lambda_triple_in", "lambda_triple_out", "lambda_join_in",
 
 
 def unroll_diff(gbjo, x, steps, share, triples=None, pool_samples=32,
-                sample_temp=2.5, tbptt=0, meta=True, lambdas=None):
+                sample_temp=2.5, tbptt=0, meta=True, lambdas=None, lr_scale=None):
     """Differentiable unroll. Returns (W_final (2n-2,n-1), h0, candidate
     A_hats). The forward trajectory/pool is always the same; what differs is
     how far the META-gradient (to theta / lambdas) flows back:
@@ -309,7 +310,8 @@ def unroll_diff(gbjo, x, steps, share, triples=None, pool_samples=32,
         if clip > 0:
             g = g * (clip / (norm + 1e-6)).clamp(max=1.0)
         buf = buf * moms[step] + g
-        L = L - lrs[step] * buf
+        step_lr = lrs[step] if lr_scale is None else lr_scale * lrs[step]
+        L = L - step_lr * buf
         if not keep:                          # cut graph for the detached prefix
             L = L.detach().requires_grad_(True)
             buf = buf.detach()
@@ -416,7 +418,8 @@ def build_items(queries, emb, counts, rng_seed=0):
 # --------------------------------------------------------------------------
 
 def mrt_step(gbjo, item, oracle, steps, alpha, beta, pool_samples=32,
-             sample_temp=2.5, mrt_weight=1.0, tbptt=0, lambdas=None):
+             sample_temp=2.5, mrt_weight=1.0, tbptt=0, lambdas=None,
+             lr_scale=None):
     """Return (loss, diag) for one query. loss requires grad on theta.
     mrt_weight scales the (through-unroll, 2nd-order) policy-shaping term;
     beta scales the (direct, 1st-order, stable) rank term."""
@@ -424,7 +427,7 @@ def mrt_step(gbjo, item, oracle, steps, alpha, beta, pool_samples=32,
     W, h0, cands = unroll_diff(gbjo, item["x"], steps, item["share"],
                                triples=triples, pool_samples=pool_samples,
                                sample_temp=sample_temp, tbptt=tbptt,
-                               meta=True, lambdas=lambdas)
+                               meta=True, lambdas=lambdas, lr_scale=lr_scale)
 
     costs, logps, preds = [], [], []
     for A_hat in cands:
@@ -456,15 +459,15 @@ def mrt_step(gbjo, item, oracle, steps, alpha, beta, pool_samples=32,
 
 
 def evaluate(gbjo, items, oracle, steps, pool_samples=32, sample_temp=2.5,
-             lambdas=None):
+             lambdas=None, lr_scale=None):
     """True-cost diagnostics of the inference-picked plan (argmin predicted
     cost) over each val query. Returns per-query arrays + aggregates."""
     picked, best, censored = [], [], []
-    for it in items:
+    for it in tqdm(items, desc="eval", leave=False):
         W, h0, cands = unroll_diff(gbjo, it["x"], steps, it["share"],
                                    triples=it["triples"], pool_samples=pool_samples,
                                    sample_temp=sample_temp, meta=False,
-                                   lambdas=lambdas)
+                                   lambdas=lambdas, lr_scale=lr_scale)
         with torch.no_grad():
             costs = [oracle.c_out(adjacency_to_join_order(A), it["triples"])
                      for A in cands]
@@ -513,6 +516,7 @@ def save_plots(out_dir, history, last_eval, base):
     ax.set_xlabel("epoch"); ax.set_ylabel("# val queries"); ax.legend()
 
     ax = axs[1, 0]
+    ax.plot(ep, [h["train_L"] for h in history], "-o", ms=3, c="k", label="total")
     ax.plot(ep, [h["L_mrt"] for h in history], "-o", ms=3, label="MRT")
     ax.plot(ep, [h["L_rank"] for h in history], "-o", ms=3, label="rank")
     ax.plot(ep, [h["anchor"] for h in history], "-o", ms=3, label="anchor (L2)")
@@ -539,6 +543,39 @@ def save_plots(out_dir, history, last_eval, base):
     plt.close(fig)
 
 
+def save_search_plots(out_dir, history):
+    """Learned search-shaping scalars over epochs (penalty lambdas + the inner
+    GD-search lr scale). Only drawn when --train-lambdas / --train-inner-lr is
+    on; a no-op otherwise."""
+    has_lam = any("lambdas" in h for h in history)
+    has_lr = any("inner_lr_scale" in h for h in history)
+    if not (has_lam or has_lr):
+        return
+    ep = [h["epoch"] for h in history]
+    ncol = int(has_lam) + int(has_lr)
+    fig, axs = plt.subplots(1, ncol, figsize=(7 * ncol, 4.5), squeeze=False)
+    col = 0
+    if has_lam:
+        ax = axs[0, col]; col += 1
+        keys = sorted({k for h in history if "lambdas" in h for k in h["lambdas"]})
+        for k in keys:
+            ax.plot(ep, [h.get("lambdas", {}).get(k, float("nan"))
+                         for h in history], "-o", ms=3,
+                    label=k.replace("lambda_", "λ_"))
+        ax.set_title("learned penalty lambdas"); ax.set_xlabel("epoch")
+        ax.set_ylabel("value"); ax.legend(fontsize=8)
+    if has_lr:
+        ax = axs[0, col]
+        ax.plot(ep, [h.get("inner_lr_scale", float("nan")) for h in history],
+                "-o", ms=3, c="tab:purple")
+        ax.axhline(1.0, ls="--", c="gray", lw=1, label="init (1.0)")
+        ax.set_title("learned inner GD-search lr scale"); ax.set_xlabel("epoch")
+        ax.set_ylabel("scale x deploy schedule"); ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "mrt_search_params.png"), dpi=110)
+    plt.close(fig)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True, help="pretrained decoder model_rank.pt")
@@ -561,6 +598,15 @@ def main():
                     help="theta/lambda grad-norm clip (0 = off)")
     ap.add_argument("--cosine", action="store_true",
                     help="cosine-anneal the outer LR over epochs")
+    ap.add_argument("--train-inner-lr", action="store_true",
+                    help="also train a scalar multiplier on the inner GD-search "
+                         "step size (log-space; shapes the search dynamics, "
+                         "deploys as a scaled schedule.npz)")
+    ap.add_argument("--search-lr", type=float, default=None,
+                    help="separate (higher) lr for the search-shaping scalars "
+                         "(lambdas + inner-lr); these are ~handful of scalars "
+                         "that need a far bigger step than the decoder weights. "
+                         "None = same as --lr")
     ap.add_argument("--train-lambdas", action="store_true",
                     help="also train the penalty lambdas (log-space, positive); "
                          "shapes the GD basins, not just the cost surface")
@@ -581,6 +627,10 @@ def main():
     ap.add_argument("--alpha", type=float, default=1.0, help="MRT policy sharpening")
     ap.add_argument("--beta", type=float, default=1.0, help="rank-term weight")
     ap.add_argument("--gamma", type=float, default=1e-3, help="trust-region L2")
+    ap.add_argument("--accum", type=int, default=1,
+                    help="gradient accumulation: average grads over K queries "
+                         "before each optimizer step (mini-batch = variance "
+                         "reduction; 1 = per-query step = old behaviour)")
     ap.add_argument("--val-frac", type=float, default=0.2)
     ap.add_argument("--out", default="standalone/models/mrt",
                     help="output dir (model_mrt.pt + mrt_progress.png + history)")
@@ -604,19 +654,37 @@ def main():
         gbjo._sched_cache.clear()
         print(f"GD-search min_tau (final anneal floor) override = {args.min_tau}")
 
-    # optional: trainable penalty lambdas (log-space -> always positive)
+    # optional: trainable SEARCH-SHAPING scalars in their own (higher-lr) group
+    # -- penalty lambdas + a scalar multiplier on the inner GD step size, both
+    # log-space (always positive). A handful of scalars reshape the search
+    # basins far more per-step than the decoder weights, so they get their own
+    # lr; they are NOT in `params`, so the decoder clip/anchor leave them alone.
     log_lams = None
     if args.train_lambdas:
         log_lams = {k: torch.tensor(math.log(max(gbjo.params[k], 1e-3)),
                                     requires_grad=True) for k in LAM_KEYS}
-        params = params + list(log_lams.values())
         print("training penalty lambdas:",
               {k: round(gbjo.params[k], 2) for k in LAM_KEYS})
+    log_lr = None
+    if args.train_inner_lr:
+        log_lr = torch.zeros((), requires_grad=True)   # scale starts at 1.0
+        print("training inner GD-search lr scale (init 1.0)")
+    search_params = (list(log_lams.values()) if log_lams else []) \
+        + ([log_lr] if log_lr is not None else [])
 
     def cur_lambdas():
         return {k: torch.exp(v) for k, v in log_lams.items()} if log_lams else None
 
-    opt = torch.optim.Adam(params, lr=args.lr)
+    def cur_lr_scale():
+        return torch.exp(log_lr) if log_lr is not None else None
+
+    groups = [{"params": params, "lr": args.lr}]
+    if search_params:
+        groups.append({"params": search_params,
+                       "lr": args.search_lr or args.lr})
+        print(f"search-shaping group: {len(search_params)} scalars "
+              f"@ lr {args.search_lr or args.lr}")
+    opt = torch.optim.Adam(groups)
     sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
              if args.cosine else None)
 
@@ -633,7 +701,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
 
     base = evaluate(gbjo, val, oracle, args.steps, args.pool_samples,
-                    args.sample_temp, cur_lambdas())
+                    args.sample_temp, cur_lambdas(), cur_lr_scale())
     print(f"pretrained val: regret {base['mean_regret']:.3f}  "
           f"suboptimal {base['subopt']*100:.0f}%  "
           f"catastrophes {base['n_catastrophe']}/{len(val)}  "
@@ -647,45 +715,60 @@ def main():
         t0 = time.time()
         order = np.random.default_rng(epoch).permutation(len(train))
         agg = {"mrt": 0.0, "rank": 0.0, "anchor": 0.0, "tot": 0.0}
-        for qi in order:
-            opt.zero_grad()
+        accum = max(1, args.accum)            # grad accumulation = mini-batch
+        pbar = tqdm(order, desc=f"epoch {epoch}", leave=False)
+        opt.zero_grad()
+        for i, qi in enumerate(pbar):
             loss, comp = mrt_step(gbjo, train[qi], oracle, args.steps,
                                   args.alpha, args.beta, args.pool_samples,
                                   args.sample_temp, args.mrt_weight,
-                                  args.tbptt, cur_lambdas())
+                                  args.tbptt, cur_lambdas(), cur_lr_scale())
             total, anchor_val = loss, 0.0
             if args.gamma > 0:                # trust region (skip if gamma=0)
                 anchor = sum(((p - p0) ** 2).sum()
                              for p, p0 in zip(params, theta0))
                 total = loss + args.gamma * anchor
                 anchor_val = anchor.item()
-            total.backward()
-            if args.clip > 0:
-                torch.nn.utils.clip_grad_norm_(params, args.clip)
-            opt.step()
+            (total / accum).backward()        # mean grad over the mini-batch
+            if (i + 1) % accum == 0 or (i + 1) == len(order):
+                if args.clip > 0:
+                    torch.nn.utils.clip_grad_norm_(params, args.clip)
+                opt.step()
+                opt.zero_grad()
             agg["mrt"] += comp["mrt"]; agg["rank"] += comp["rank"]
             agg["anchor"] += anchor_val; agg["tot"] += loss.item()
+            pbar.set_postfix(L=f"{agg['tot']/(i+1):.3f}", calls=oracle.calls)
         if sched is not None:
             sched.step()
         nt = len(train)
         ev = evaluate(gbjo, val, oracle, args.steps, args.pool_samples,
-                      args.sample_temp, cur_lambdas())
-        history.append({
+                      args.sample_temp, cur_lambdas(), cur_lr_scale())
+        rec = {
             "epoch": epoch, "L_mrt": agg["mrt"] / nt, "L_rank": agg["rank"] / nt,
             "anchor": agg["anchor"] / nt, "train_L": agg["tot"] / nt,
             "val_regret": ev["mean_regret"], "val_subopt": ev["subopt"],
             "val_catastrophe": ev["n_catastrophe"],
-            "val_mean_logc": ev["mean_picked_logc"]})
+            "val_mean_logc": ev["mean_picked_logc"]}
+        if log_lams:                          # per-epoch learned search scalars
+            rec["lambdas"] = {k: torch.exp(v).item() for k, v in log_lams.items()}
+        if log_lr is not None:
+            rec["inner_lr_scale"] = torch.exp(log_lr).item()
+        history.append(rec)
         oracle.save()
         save_plots(args.out, history, ev, base)
+        save_search_plots(args.out, history)
         json.dump(history, open(os.path.join(args.out, "history.json"), "w"))
         mark = ""
         if ev["mean_regret"] < best_regret:   # save BEST, not last
             best_regret = ev["mean_regret"]
             save_finetuned(flat, n_layers, os.path.join(args.out, "model_mrt.pt"))
-            if log_lams:
-                json.dump({k: float(torch.exp(v)) for k, v in log_lams.items()},
-                          open(os.path.join(args.out, "lambdas_best.json"), "w"))
+            if log_lams or log_lr is not None:
+                best = {k: torch.exp(v).item() for k, v in log_lams.items()} \
+                    if log_lams else {}
+                if log_lr is not None:
+                    best["inner_lr_scale"] = torch.exp(log_lr).item()
+                json.dump(best, open(
+                    os.path.join(args.out, "search_best.json"), "w"))
             mark = "  <- best"
         print(f"epoch {epoch}: train L {agg['tot']/nt:.4f}  "
               f"val regret {ev['mean_regret']:.3f}  "
@@ -698,7 +781,9 @@ def main():
           f"{base['mean_regret']:.3f}); best -> {args.out}/model_mrt.pt")
     if log_lams:
         print("final lambdas:",
-              {k: round(float(torch.exp(v)), 2) for k, v in log_lams.items()})
+              {k: round(torch.exp(v).item(), 2) for k, v in log_lams.items()})
+    if log_lr is not None:
+        print(f"final inner-lr scale: {torch.exp(log_lr).item():.3f}")
 
 
 if __name__ == "__main__":

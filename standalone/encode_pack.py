@@ -88,7 +88,8 @@ def main():
         local_mp=not cfg.get("encoder_no_local_mp", False),
         use_fanout=use_fanout,
         rel_emb=not cfg.get("encoder_no_rel_emb", False),
-        n_relations=kg.nR).to(args.device)
+        n_relations=kg.nR,
+        rel_emb_dim=cfg.get("encoder_rel_emb_dim", 0)).to(args.device)
     encoder.load_state_dict(torch.load(
         os.path.join(args.train_out, args.encoder_file), map_location="cpu"))
     encoder.eval()

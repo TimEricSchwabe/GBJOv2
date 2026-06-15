@@ -59,7 +59,7 @@ class TermEncoder(nn.Module):
     def __init__(self, hidden=128, out_dim=100, n_layers=4, arch="gps",
                  pe="rwpe", pe_dim=24, use_rdf2vec=False, use_counts=True,
                  heads=4, attn="multihead", local_mp=True, use_fanout=True,
-                 rel_emb=True, n_relations=0):
+                 rel_emb=True, n_relations=0, rel_emb_dim=0, dropout=0.0):
         super().__init__()
         if pe == "rwpe" and pe_dim % 3:
             raise ValueError("rwpe pe_dim must be divisible by 3 (role-aware)")
@@ -78,9 +78,13 @@ class TermEncoder(nn.Module):
         self.input_norm = nn.LayerNorm(hidden)
         self.node_type_emb = nn.Embedding(3, hidden)
         self.role_emb = nn.Embedding(6, hidden)
-        # learnable per-relation identity; id 0 = padding (non-relation nodes)
-        self.rel_emb_table = (nn.Embedding(n_relations + 1, hidden,
+        # learnable per-relation identity; id 0 = padding (non-relation nodes).
+        # rel_emb_dim=0 -> hidden-dim table; else a small table projected up.
+        red = rel_emb_dim if rel_emb_dim > 0 else hidden
+        self.rel_emb_table = (nn.Embedding(n_relations + 1, red,
                                            padding_idx=0) if rel_emb else None)
+        self.rel_emb_proj = (nn.Linear(red, hidden)
+                             if rel_emb and red != hidden else None)
 
         def gine_mlp():
             return nn.Sequential(nn.Linear(hidden, hidden), nn.SiLU(),
@@ -91,7 +95,7 @@ class TermEncoder(nn.Module):
             conv = GINEConv(gine_mlp(), edge_dim=hidden, train_eps=False)
             if arch == "gps":
                 self.layers.append(GPSConv(hidden, conv if local_mp else None,
-                                           heads=heads, dropout=0.0,
+                                           heads=heads, dropout=dropout,
                                            attn_type=attn))
             elif arch == "gine":
                 self.layers.append(conv)
@@ -114,7 +118,8 @@ class TermEncoder(nn.Module):
         h = F.silu(self.input_norm(self.feature_encoder(torch.cat(parts, -1))))
         h = h + self.node_type_emb(ntype)
         if self.rel_emb_table is not None:
-            h = h + self.rel_emb_table(rel_id)
+            r = self.rel_emb_table(rel_id)
+            h = h + (self.rel_emb_proj(r) if self.rel_emb_proj is not None else r)
         edge_attr = self.role_emb(role_idx)
         for layer in self.layers:
             if self.arch == "gps":

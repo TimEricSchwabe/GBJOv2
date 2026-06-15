@@ -55,8 +55,11 @@ def extract_queries(out_json, n_groups=100):
     return queries
 
 
-def repack_model(model_pt, out_npz, n_layers=6):
+def repack_model(model_pt, out_npz, n_layers=None):
     sd = torch.load(model_pt, map_location="cpu")
+    if n_layers is None:                           # infer from the checkpoint
+        n_layers = 1 + max(int(k.split(".")[1])
+                           for k in sd if k.startswith("mlps."))
     np.savez(
         out_npz,
         proj_w=sd["projection.weight"].numpy(),

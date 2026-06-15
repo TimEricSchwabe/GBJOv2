@@ -26,8 +26,11 @@ class FlatCostGNNDual:
 
     is_dual = True
 
-    def __init__(self, state_dict, n_layers=6):
+    def __init__(self, state_dict, n_layers=None):
         sd = state_dict
+        if n_layers is None:                       # infer from the checkpoint
+            n_layers = 1 + max(int(k.split(".")[1])
+                               for k in sd if k.startswith("mlps."))
         self.proj_w = sd["projection.weight"]
         self.proj_b = sd["projection.bias"]
         self.layers = [(sd[f"mlps.{i}.0.weight"], sd[f"mlps.{i}.0.bias"],
@@ -40,7 +43,7 @@ class FlatCostGNNDual:
         self._S = None
 
     @classmethod
-    def load(cls, model_path, n_layers=6):
+    def load(cls, model_path, n_layers=None):
         sd = torch.load(model_path, map_location="cpu")
         return cls(sd, n_layers=n_layers)
 
@@ -68,10 +71,12 @@ class FlatCostGNNDual:
 
 
 class CostGNNDual(nn.Module):
-    def __init__(self, node_feature_dim=307, hidden_dim=128, n_layers=6):
+    def __init__(self, node_feature_dim=307, hidden_dim=128, n_layers=6,
+                 dropout=0.0):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.n_layers = n_layers
+        self.dropout = nn.Dropout(dropout)
         self.projection = nn.Linear(node_feature_dim, hidden_dim)
         self.mlps = nn.ModuleList([
             nn.Sequential(nn.Linear(2 * hidden_dim, hidden_dim),
@@ -101,11 +106,11 @@ class CostGNNDual(nn.Module):
             aggP = torch.zeros_like(h).index_add_(0, dp, h[sp])
             aggS = torch.zeros_like(h).index_add_(0, ds, h[ss])
             z = torch.cat([aggP + h, aggS + h], dim=1)   # eps = 0
-            h = h + mlp(z)
+            h = h + self.dropout(mlp(z))
 
         if num_graphs is None:
             num_graphs = int(batch.max().item()) + 1
         g = torch.zeros(num_graphs, self.hidden_dim, device=h.device,
                         dtype=h.dtype).index_add_(0, batch, h)
-        g = F.gelu(self.fc1(g))
+        g = self.dropout(F.gelu(self.fc1(g)))
         return self.fc2(g).squeeze(-1)

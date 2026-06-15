@@ -40,6 +40,10 @@ def main():
     ap.add_argument("--mrt", required=True, help="MRT fine-tuned decoder .pt")
     ap.add_argument("--queries", default="standalone/overfit_queries.json")
     ap.add_argument("--pack", required=True)
+    ap.add_argument("--pre-pack", default=None,
+                    help="separate pack whose deploy params the PRETRAINED model "
+                         "decodes under (honest before/after when the MRT pack "
+                         "folds in learned lr/lambdas); default = --pack")
     ap.add_argument("--endpoint", default="http://127.0.0.1:7020/")
     ap.add_argument("--cache", default="standalone/cstar_cache.json")
     ap.add_argument("--timeout", type=float, default=30.0)
@@ -55,13 +59,23 @@ def main():
                    params={"lambda_cartesian": 0.0})
     mrt = FastGBJO(FlatCostGNNDual.load(args.mrt),
                    params={"lambda_cartesian": 0.0})
-    dp = deploy_params(args.pack)
-    for g in (pre, mrt):
+    dp_mrt = deploy_params(args.pack)
+    dp_pre = deploy_params(args.pre_pack) if args.pre_pack else dp_mrt
+    for g, dp in ((pre, dp_pre), (mrt, dp_mrt)):
         if dp and not args.no_deploy_params:
             g.params.update(dp)
         if args.min_tau is not None:
             g.params["min_tau"] = args.min_tau
         g._sched_cache.clear()
+    if args.pre_pack:
+        print(f"pre  decodes under {args.pre_pack} params "
+              f"(lr={pre.params['learning_rate']}, "
+              f"acyc={pre.params['lambda_acyclic']}, "
+              f"ll={pre.params['lambda_left_linear']})")
+        print(f"mrt  decodes under {args.pack} params "
+              f"(lr={mrt.params['learning_rate']}, "
+              f"acyc={mrt.params['lambda_acyclic']}, "
+              f"ll={mrt.params['lambda_left_linear']})")
     emb, counts = load_emb_source(args.pack)
     items = build_items(json.load(open(args.queries)), emb, counts)
     oracle = CStarOracle(args.endpoint, args.timeout, args.cache)

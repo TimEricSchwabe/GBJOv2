@@ -424,6 +424,13 @@ def main():
                     help="rwpe: 3*walk_length; lap: #eigenvectors")
     ap.add_argument("--encoder-layers", type=int, default=4)
     ap.add_argument("--encoder-hidden", type=int, default=128)
+    ap.add_argument("--encoder-rel-emb-dim", type=int, default=0,
+                    help="dim of the learnable relation embedding (0 = hidden; "
+                         "smaller -> projected up to hidden)")
+    ap.add_argument("--weight-decay", type=float, default=0.0,
+                    help="AdamW weight decay (regularization)")
+    ap.add_argument("--dropout", type=float, default=0.0,
+                    help="dropout in decoder MLPs + encoder GPS layers")
     ap.add_argument("--encoder-attn", default="multihead",
                     choices=["multihead", "performer"],
                     help="gps self-attention: O(n^2) softmax or linear FAVOR+")
@@ -494,7 +501,8 @@ def main():
             use_counts=not args.encoder_no_counts,
             attn=args.encoder_attn, local_mp=not args.encoder_no_local_mp,
             use_fanout=use_fanout, rel_emb=not args.encoder_no_rel_emb,
-            n_relations=kg.nR)
+            n_relations=kg.nR, rel_emb_dim=args.encoder_rel_emb_dim,
+            dropout=args.dropout)
         gid_atoms = build_gid_atoms(gids, samples, kg)
         encoder = encoder.to(device)
         print(f"encoder: {args.encoder} {args.encoder_layers}x"
@@ -564,11 +572,11 @@ def main():
     w /= w.sum()
 
     model = CostGNNDual(node_feature_dim=307, hidden_dim=args.hidden,
-                        n_layers=args.layers).to(device)
+                        n_layers=args.layers, dropout=args.dropout).to(device)
     params = list(model.parameters())
     if encoder is not None:
         params += list(encoder.parameters())
-    opt = torch.optim.Adam(params, lr=args.lr)
+    opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
     sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
              if args.lr_schedule == "cosine" else None)
     crit = lambda out, y: quantile_huber(out, y, args.quantile_tau)
