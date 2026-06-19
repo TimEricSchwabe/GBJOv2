@@ -15,4 +15,8 @@ datasets/
 *.tiff
 *.ttl
 *.pkl
+*.log
 **/__pycache__/
+
+# v3 run-artifacts (models, kg index, caches, query sets, plan data, logs, libs)
+v3/artifacts/
